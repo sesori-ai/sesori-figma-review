@@ -1,0 +1,10 @@
+{
+  "name": "figma-ai-review",
+  "private": true,
+  "workspaces": ["plugin", "bridge"],
+  "scripts": {
+    "build": "npm run build -w plugin",
+    "bridge": "npm run start -w bridge",
+    "check": "npm run check --workspaces"
+  }
+}

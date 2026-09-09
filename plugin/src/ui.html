@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 12px/1.45 Inter, system-ui, sans-serif; color: var(--figma-color-text, #222); background: var(--figma-color-bg, #fff); display: flex; flex-direction: column; height: 100vh; }
+  header { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--figma-color-border, #e5e5e5); font-size: 11px; }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: #999; flex: none; }
+  header .dot.ok { background: #1bc47d; } header .dot.warn { background: #f3a51b; } header .dot.bad { background: #f24822; }
+  header #status { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header #cost { color: var(--figma-color-text-secondary, #666); white-space: nowrap; }
+  #toolbar { display: flex; gap: 4px; padding: 6px 10px; flex-wrap: wrap; }
+  button { font: inherit; padding: 4px 8px; border-radius: 5px; border: 1px solid var(--figma-color-border, #ddd); background: var(--figma-color-bg-secondary, #f5f5f5); color: inherit; cursor: pointer; }
+  button:hover { background: var(--figma-color-bg-tertiary, #eee); }
+  button.primary { background: var(--figma-color-bg-brand, #0d99ff); color: var(--figma-color-text-onbrand, #fff); border-color: transparent; }
+  button.danger { background: var(--figma-color-bg-danger, #f24822); color: #fff; border-color: transparent; }
+  #sessions { padding: 6px 10px; border-bottom: 1px solid var(--figma-color-border, #e5e5e5); max-height: 40%; overflow: auto; }
+  #sessions .row { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+  #sessions .row .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  main { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { padding: 7px 10px; border-radius: 8px; max-width: 95%; white-space: pre-wrap; word-break: break-word; }
+  .user { align-self: flex-end; background: var(--figma-color-bg-brand-tertiary, #e5f4ff); }
+  .assistant { align-self: flex-start; background: var(--figma-color-bg-secondary, #f5f5f5); }
+  .chip { align-self: flex-start; font-size: 11px; color: var(--figma-color-text-secondary, #666); padding: 2px 8px; border: 1px dashed var(--figma-color-border, #ccc); border-radius: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 95%; }
+  .card { align-self: stretch; border: 1px solid var(--figma-color-border-brand, #0d99ff); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .card.perm { border-color: var(--figma-color-border-warning, #f3a51b); }
+  .card .q { font-weight: 600; white-space: pre-wrap; }
+  .card pre { margin: 0; font: 11px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; max-height: 160px; overflow: auto; background: var(--figma-color-bg-secondary, #f5f5f5); padding: 6px; border-radius: 5px; }
+  .card .ctl { display: flex; flex-wrap: wrap; gap: 4px; }
+  .card .ctl textarea { flex: 1 1 100%; }
+  .card .a { color: var(--figma-color-text-secondary, #666); font-style: italic; }
+  .error { align-self: stretch; color: var(--figma-color-text-danger, #c00); border: 1px solid currentColor; border-radius: 8px; padding: 6px 10px; white-space: pre-wrap; }
+  .muted { color: var(--figma-color-text-secondary, #666); font-size: 11px; }
+  footer { border-top: 1px solid var(--figma-color-border, #e5e5e5); padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
+  footer .row { display: flex; gap: 6px; align-items: flex-end; }
+  textarea { font: inherit; flex: 1; resize: none; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--figma-color-border, #ddd); background: var(--figma-color-bg, #fff); color: inherit; }
+  #working { display: none; align-self: flex-start; } #working.on { display: block; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header><span id="dot" class="dot"></span><span id="status">connecting to bridge…</span><span id="cost"></span></header>
+<div id="toolbar">
+  <button id="btn-flow" class="primary" title="Review the prototype flow on the current page">Review flow</button>
+  <button id="btn-selection" title="Review the selected nodes">Review selection</button>
+  <button id="btn-new" title="Start an empty conversation anchored to this page">New chat</button>
+  <button id="btn-history" title="Resume a previous session for this file">History</button>
+  <button id="btn-stop" class="danger" hidden title="Interrupt the current turn">Stop</button>
+</div>
+<div id="sessions" hidden></div>
+<main id="chat"><div class="muted">Pick “Review flow”, select something and hit “Review selection”, or just ask a question.</div></main>
+<footer>
+  <div id="sel" class="muted">No selection</div>
+  <div class="row"><textarea id="input" rows="2" placeholder="Ask about the design… Enter to send, Shift+Enter for a new line"></textarea><button id="send" class="primary">Send</button></div>
+</footer>
+<!-- SCRIPT -->
+</body>
+</html>
