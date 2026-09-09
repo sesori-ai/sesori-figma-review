@@ -29,8 +29,9 @@ plugin panel. Nobody talks to a terminal.
 - [x] **M0 Design** – feasibility checked against Figma Plugin API docs and the Agent SDK reference.
 - [x] **M1 Skeleton (this commit)** – plugin (`manifest`, sandbox executor, UI), bridge (WebSocket server, workspace
       provisioning, SDK session manager, health, cost), shared protocol, self-checks, smoke test, docs.
-      Verified: type checks, flow-walker check, workspace/usage check, and an end-to-end smoke run (fake plugin →
-      bridge → Claude → `focus` tool → answer → cost recorded).
+      Verified: type checks, the sandbox check (code.ts against a mock `figma` API: flow walk, screen tree, focus,
+      annotate), the workspace/usage check, and an end-to-end smoke run (fake plugin → bridge → Claude → `focus`
+      tool → answer → cost recorded). Not yet verified: anything that needs the real Figma app.
 - [ ] **M2 First real review in Figma** – import the manifest, run against a real prototype, fix what breaks:
       node id format accepted by the desktop MCP tools (`12:34` vs `12-34`), export sizes, annotation writes,
       viewport behaviour across pages.

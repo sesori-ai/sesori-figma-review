@@ -77,7 +77,7 @@ workspace and run `claude --resume <sessionId>` to inspect a session from the CL
 ## Develop and test
 
 ```bash
-npm run check                 # type-check both packages + flow-walker and workspace/usage self-checks
+npm run check                 # type-check both packages + sandbox (mock figma) and workspace/usage self-checks
 npm run build                 # rebuild the plugin after editing plugin/src
 FIGMA_REVIEW_MODEL=haiku npm run bridge   # then, in another terminal:
 npm run smoke -w bridge       # fake plugin: one real turn through the bridge, ~2 cents, no Figma needed

@@ -13,7 +13,8 @@ let sessions: SessionRecord[] = [];
 
 const el = (tag: string, cls = "", text = "") => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const btn = (label: string, onClick: () => void, cls = "") => { const b = el("button", cls, label) as HTMLButtonElement; b.onclick = onClick; return b; };
-const bubble = (cls: string, text = "") => { const b = el("div", cls, text); chat.append(b); chat.scrollTop = chat.scrollHeight; return b; };
+const working = el("div", "chip", "thinking…"); // re-appended on every busy=true, so clearing the chat is safe
+const bubble = (cls: string, text = "") => { const b = el("div", cls, text); chat.insertBefore(b, working.parentNode === chat ? working : null); chat.scrollTop = chat.scrollHeight; return b; };
 const selText = () => ctx.selection.length ? ctx.selection.map(n => `${n.name} (${n.type} ${n.id})`).join(", ") : "none";
 const toolLabel = (name: string) => name.replace(/^mcp__/, "").replace(/__/, ": ");
 
@@ -45,7 +46,7 @@ function onDown(m: DownMsg) {
     case "tool": return m.tool === "ask_user" ? askCard(m.id, m.args) : toMain(m);
     case "permission": return permissionCard(m.id, m.tool, m.input);
     case "sdk": return onSdk(m.msg);
-    case "busy": stopBtn.hidden = !m.busy; $("working").classList.toggle("on", m.busy); if (m.busy) chat.append($("working")); return;
+    case "busy": stopBtn.hidden = !m.busy; if (m.busy) { chat.append(working); chat.scrollTop = chat.scrollHeight; } else working.remove(); return;
     case "error": bubble("error", m.message); return;
   }
 }
@@ -148,4 +149,3 @@ $("btn-selection").onclick = () => {
 $("btn-new").onclick = () => { chat.innerHTML = ""; live = undefined; costEl.textContent = ""; input.focus(); };
 $("btn-history").onclick = () => { sessionsEl.hidden = !sessionsEl.hidden; if (!sessionsEl.hidden) renderSessions(); };
 stopBtn.onclick = () => send({ kind: "interrupt" });
-chat.append(Object.assign(el("div", "chip", "thinking…"), { id: "working" }));

@@ -1,4 +1,4 @@
-// Pure prototype-flow walker. Kept free of Figma globals so flow.check.ts can run it in Node.
+// Pure prototype-flow walker, free of Figma globals.
 
 export type FlowNode = {
   id: string;

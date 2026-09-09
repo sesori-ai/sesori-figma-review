@@ -24,8 +24,8 @@ The plugin never talks to Claude directly, and the bridge never renders anything
 ```
 shared/protocol.ts          UpMsg / DownMsg / ToolResult / SessionRecord types; port and MCP URL constants
 plugin/manifest.json        dynamic-page, editorType figma, devAllowedDomains ws://localhost:3055
-plugin/src/code.ts          sandbox: file id, context events, tool executor
-plugin/src/flow.ts          pure prototype-flow walker (+ flow.check.ts)
+plugin/src/code.ts          sandbox: file id, context events, tool executor (+ sandbox.check.ts, runs it on a mock figma API)
+plugin/src/flow.ts          pure prototype-flow walker
 plugin/src/ui.html, ui.ts   UI iframe; build.mjs inlines the bundled ui.ts into dist/ui.html
 bridge/src/bridge.ts        WebSocket server, SDK session manager, health, cost accounting
 bridge/src/workspace.ts     ~/.figma-review/files/<fileId>/ provisioning, sessions index, usage math (+ selfcheck.ts)
