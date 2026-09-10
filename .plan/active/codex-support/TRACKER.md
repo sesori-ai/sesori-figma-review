@@ -45,7 +45,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   four-turn/$0.10 limits and no credential/config copying. They prove preserved intent, not this dormant foundation.
   Later live tests retain those rules. Codex tests use cheapest suitable catalog-reported image/tool-capable model and
   low effort; ask before premium/high-effort exceptions.
-- Foundation current diff is 1,478 changed lines (1,396 additions, 82 deletions), within the 1,500-line cap. `npm ci`, legacy workspace checks, focused mocked Claude adapter
+- Foundation current diff is 1,492 changed lines (1,410 additions, 82 deletions), within the 1,500-line cap. `npm ci`, legacy workspace checks, focused mocked Claude adapter
   checks, both builds and `git diff --check` pass. Tests cover exact tool description strings, selected parameter
   metadata, representative schema cases and source-audited legacy catalog reuse;
   warm settings/boundary identity, replacement/consume/cold fallback/dispose/stale fencing; serialized settings,
@@ -92,6 +92,8 @@ PR #3 current-head findings and local dispositions:
 | 3981805798 | Fixed: ordinary native user array text projects with context stripping; mixed image/non-question tool result stays hidden. |
 | 3981805806 | Fixed: proof wording limited to exact descriptions, selected metadata, representative schemas and source audit. |
 | 3981805787 | Declined with parent native evidence: inspected 13 app-scoped JSONL transcripts contain no native `result` rows; persisted assistant text is already projected. No synthetic format invented pending an actual supported native shape. |
+| 3982009538, 3982069529 | Fixed: repeated Stop is idempotent while active turn already carries interruption intent; first failure still clears for retry. |
+| 3982069514 | Declined: exact allow-list order is conservative native-input invalidation; safe close behavior is proven and no latency evidence warrants semantic normalization. |
 | 3981525734 | Fixed: narrow injectable Claude-native factory; mocked prepare/start/session iteration, lifecycle, MCP and settings paths; owned temp roots auto-clean. |
 | 3981525766, 3981525781 | Fixed: usage/cost documented as replacement cumulative session snapshots; transport/native-session qualification refs corrected to Steps 4/5. |
 

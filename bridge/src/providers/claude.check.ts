@@ -364,6 +364,18 @@ const failedStopOutputs = [];
 for await (const output of failedStopSession.output) failedStopOutputs.push(output);
 assert.equal(turnOutcome(failedStopOutputs), "completed", "failed interrupt rolls back only its active turn intent");
 
+const duplicateStopQuery = new FakeQuery([nativeInit, { type: "result", is_error: false, usage: {}, total_cost_usd: 0 }]);
+const duplicateStopSession = await sessionWith(duplicateStopQuery);
+duplicateStopSession.send({ text: "active", selection: [] });
+const firstStop = duplicateStopSession.interrupt();
+duplicateStopQuery.failInterrupts = 1;
+const duplicateStop = duplicateStopSession.interrupt();
+await Promise.all([firstStop, duplicateStop]);
+assert.equal(duplicateStopQuery.interrupts, 1, "duplicate Stop is idempotent while first intent remains active");
+const duplicateOutputs = [];
+for await (const output of duplicateStopSession.output) duplicateOutputs.push(output);
+assert.equal(turnOutcome(duplicateOutputs), "interrupted");
+
 const suspendedQuery = new FakeQuery([
   nativeInit,
   { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },

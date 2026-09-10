@@ -377,7 +377,7 @@ class ClaudeSession implements ReviewSession {
   }
   async interrupt() {
     const turn = this.activeTurn;
-    if (this.closed || !turn) return;
+    if (this.closed || !turn || turn.interrupted) return;
     turn.interrupted = true;
     try { await this.query.interrupt(); }
     catch (error) {
