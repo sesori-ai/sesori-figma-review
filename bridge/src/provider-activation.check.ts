@@ -133,7 +133,7 @@ valid.send(startMessage("pending"));
 await new Promise(resolve => setTimeout(resolve, 0));
 valid.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 assert.equal((await valid.next(message => message.kind === "connection")).intentId, "pending");
-const fresh = await new Client(port).opened();
+let fresh = await new Client(port).opened();
 fresh.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 assert.equal((await fresh.next(message => message.kind === "connection")).intentId, "pending", "fresh client adopts pending reservation");
 await fresh.next(message => message.kind === "health");
@@ -159,6 +159,8 @@ fresh.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "Fil
 assert.deepEqual((await fresh.next(message => message.kind === "connection")).activeText, [{ session: liveRef, itemId: "live", text: "prefix" }]);
 fresh.send({ kind: "user", text: "steer", selection: [] });
 await fresh.next(message => message.kind === "busy" && message.busy);
+fresh.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
+assert.deepEqual((await fresh.next(message => message.kind === "connection")).activeText, [{ session: liveRef, itemId: "live", text: "prefix" }]);
 fresh.send({ kind: "interrupt" }); await new Promise(resolve => setTimeout(resolve, 0));
 assert.deepEqual([currentSession.sent, currentSession.interrupted], [["prompt-current", "steer"], 1]);
 
@@ -172,13 +174,22 @@ const replacement = await fresh.next(message => message.kind === "session" && me
 assert.deepEqual([replacement.session.usage.input, replacement.session.costUsd, replacement.session.costStatus], [3, 2, "reported"],
   "authoritative usage/cost snapshots replace rather than sum and may validly decrease");
 
+const beforeLiveSettings = readSettings().providers.claude;
 const gate = deferred<void>(); currentSession.settingGate = gate;
 fresh.send({ kind: "settings", requestId: "claude-live", provider: "claude", settings: { model: "sonnet", effort: "high" } });
 await new Promise(resolve => setTimeout(resolve, 0));
 fresh.send({ kind: "settings", requestId: "codex-race", provider: "codex", settings: { model: "image", effort: "medium" } });
 await fresh.next(message => message.kind === "health" && message.health.settingsResult?.requestId === "codex-race");
+const settingsOrigin = fresh, settingsReplacement = await new Client(port).opened();
+settingsReplacement.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
+await settingsReplacement.next(message => message.kind === "connection");
+assert.deepEqual((await settingsReplacement.next(message => message.kind === "health")).health.settings.providers.claude, beforeLiveSettings);
 gate.resolve();
-await fresh.next(message => message.kind === "health" && message.health.settingsResult?.requestId === "claude-live");
+const settled = await settingsReplacement.next(message => message.kind === "health" && !message.health.settingsResult
+  && message.health.settings.providers.claude.model === "sonnet");
+assert.equal(settled.health.settingsResult, undefined);
+assert.deepEqual(settingsOrigin.matching(message => message.kind === "health" && message.health.settingsResult?.requestId === "claude-live"), []);
+fresh = settingsReplacement;
 assert.deepEqual(readSettings().providers, {
   claude: { model: "sonnet", effort: "high" }, codex: { model: "image", effort: "medium" },
 }, "awaited active update preserves unrelated provider commit");
@@ -189,6 +200,8 @@ fresh.send({ kind: "settings", requestId: "rejected", provider: "claude", settin
 await new Promise(resolve => setTimeout(resolve, 0)); rejectedGate.reject(new Error("native rejected"));
 const rejectedHealth = await fresh.next(message => message.kind === "health" && message.health.settingsResult?.requestId === "rejected");
 assert.equal(rejectedHealth.health.settingsResult.accepted, false);
+const rejectedPlain = await fresh.next(message => message.kind === "health" && !message.health.settingsResult);
+assert.equal(rejectedPlain.health.settings.providers.claude.model, "sonnet");
 assert.deepEqual(readSettings().providers.claude, { model: "sonnet", effort: "high" }, "failed live setting rolls back persisted truth");
 currentSession.settingGate = undefined;
 fresh.send({ kind: "settings", requestId: "select-codex", provider: "codex", settings: { model: "image", effort: "medium" }, selectedProvider: "codex" });
@@ -196,6 +209,17 @@ await fresh.next(message => message.kind === "health" && message.health.settings
 assert.ok(codex.prepareCount > 0, "actual selected-provider transition prepares its provider");
 fresh.send({ kind: "settings", requestId: "select-claude", provider: "claude", settings: { model: "sonnet", effort: "high" }, selectedProvider: "claude" });
 await fresh.next(message => message.kind === "health" && message.health.settingsResult?.requestId === "select-claude");
+currentSession.output.push(usage(4, 1, "reported", true));
+await fresh.next(message => message.kind === "busy" && !message.busy);
+fresh.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
+assert.deepEqual((await fresh.next(message => message.kind === "connection")).activeText, [{ session: liveRef, itemId: "live", text: "prefix" }]);
+fresh.send({ kind: "user", text: "second turn", selection: [] });
+await fresh.next(message => message.kind === "busy" && message.busy);
+currentSession.output.push({ kind: "event", event: { type: "text_start", session: liveRef, itemId: "second" } });
+currentSession.output.push({ kind: "event", event: { type: "text_delta", session: liveRef, itemId: "second", text: "new turn" } });
+await fresh.next(message => message.kind === "event" && message.event.itemId === "second" && message.event.type === "text_delta");
+fresh.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
+assert.deepEqual((await fresh.next(message => message.kind === "connection")).activeText, [{ session: liveRef, itemId: "second", text: "new turn" }]);
 
 const attachedClient = await new Client(port).opened();
 attachedClient.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
@@ -234,6 +258,6 @@ assert.equal(failingSession.closed, 1);
 attachedClient.send({ kind: "user", text: "after failure", selection: [] });
 assert.match((await attachedClient.next(message => message.kind === "error")).message, /No active session/);
 
-valid.close(); fresh.close(); attachedClient.close(); other.close();
+valid.close(); settingsOrigin.close(); fresh.close(); attachedClient.close(); other.close();
 await app.shutdown();
 console.log("review bridge integration check ok");

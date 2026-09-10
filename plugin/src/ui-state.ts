@@ -36,7 +36,7 @@ export class SettingsControl {
   acceptHealth(args: { health: Health; provider: ProviderId }): { settings: ProviderSettings; error?: string } {
     const result = args.health.settingsResult;
     const isLatest = !!result && result.requestId === this.pending?.requestId;
-    const error = result && !result.accepted ? result.error ?? "Settings update failed" : undefined;
+    const error = isLatest && !result.accepted ? result.error ?? "Settings update failed" : undefined;
     if (isLatest) this.pending = undefined;
     return {
       settings: this.pending?.provider === args.provider

@@ -290,6 +290,9 @@ export function createReviewBridge(args: {
   function sendSettingsResult(ws: Socket, result: NonNullable<Health["settingsResult"]>) {
     if (ws.fileId && clients.get(ws.fileId) === ws) send(ws.fileId, { kind: "health", health: makeHealth({ settingsResult: result }) });
   }
+  const publishSettledSettings = (ws: Socket) => {
+    if (ws.fileId) send(ws.fileId, { kind: "health", health: makeHealth() });
+  };
   async function updateSettings(ws: Socket, message: Extract<UpMsg, { kind: "settings" }>) {
     const before = readSettings();
     const preferenceChanged = !samePreference(before.providers[message.provider], message.settings);
@@ -300,10 +303,12 @@ export function createReviewBridge(args: {
       try { await target.session.applySettings({ settings: message.settings }); }
       catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
+        publishSettledSettings(ws);
         sendSettingsResult(ws, { requestId: message.requestId, accepted: false, error: reason });
         return;
       }
       if (conv !== target) {
+        publishSettledSettings(ws);
         sendSettingsResult(ws, { requestId: message.requestId, accepted: false, error: "Session changed before settings were committed." });
         return;
       }
@@ -321,6 +326,7 @@ export function createReviewBridge(args: {
       const provider = providers[next.provider];
       if (provider) prepareProvider(provider, ws.fileId, workspaceFor(ws.fileId, "Figma file"));
     }
+    publishSettledSettings(ws);
     sendSettingsResult(ws, { requestId: message.requestId, accepted: true });
   }
 
@@ -368,9 +374,10 @@ export function createReviewBridge(args: {
       }
       case "user":
         if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or open one from History." });
-        if (!conv.busy) conv.textItems.clear();
-        conv.busy = true;
+        const startingTurn = !conv.busy;
         conv.session.send({ text: message.text, selection: message.selection });
+        if (startingTurn) conv.textItems.clear();
+        conv.busy = true;
         return send(conv.fileId, { kind: "busy", busy: true });
       case "reply": {
         const request = pending.get(message.id);

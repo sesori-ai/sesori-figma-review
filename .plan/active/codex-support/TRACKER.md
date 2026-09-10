@@ -40,13 +40,13 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   It proved busy steering through a question card, Stop cancellation, idle reconnect, native history, and nonzero
   cumulative usage/cost after resume through a recreated bridge/query process.
 - First Step 3 review disposition: accepted provider-change derivation, handshake admission, and production-seam
-  evidence findings. Qualified the settings finding: simple model→effort DOM edits were already correct, while stale
-  health replacement and concurrent whole-document persistence were real. Parent also required pending-start/fresh
+  evidence findings. Qualified the settings finding: actual Claude disposal broadcasts health, so no outage was
+  proven, but bridge-owned settled publication must not rely on that adapter callback. Parent also required pending-start/fresh
   attachment history and terminal ownership fixes. Deterministic tests now use ordinary dependency injection through
-  the production receive/onUp/pump paths. Actual bundled-UI admission/history/settings/card fixes are now covered;
-  fresh independent review remains pending.
-- Parent approved a Step-3-only 2,250-line ceiling after review exposed additional UI lifecycle failures; readable
-  bundled-`ui.ts` integration proof replaces helper-only proof. The exception does not apply to later steps.
+  the production receive/onUp/pump paths. Actual bundled-UI admission/history/settings/card/replay fixes and explicit
+  bridge-owned settled-settings publication are now covered; fresh independent review remains pending.
+- Parent approved a Step-3-only 2,400-line ceiling after review exposed additional UI lifecycle/replay failures;
+  restored boundary and bundled-`ui.ts` proof cover them. The exception does not apply to later steps.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
 

@@ -70,7 +70,11 @@ export class ConversationView {
       result.cancelledStart = true;
       this.intent = undefined;
     } else if (this.intent?.kind === "history") {
-      if (args.activeText) this.intent.activeText = args.activeText;
+      if (args.activeText) {
+        const covered = new Set(args.activeText.map(item => item.itemId));
+        this.intent.events = this.intent.events.filter(event => !covered.has(event.itemId));
+        this.intent.activeText = args.activeText;
+      }
       if (args.session?.provider === this.intent.session.provider && args.session.sessionId === this.intent.session.sessionId) {
         this.current = args.session; this.intent.latest = args.session;
       }

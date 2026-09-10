@@ -27,7 +27,7 @@ let intentCounter = 0;
 const admission = new ConnectionAdmission();
 const settingsControl = new SettingsControl();
 const view = new ConversationView();
-const items = new Map<string, { element: HTMLElement; markdown: string }>();
+const items = new Map<string, { element: HTMLElement; markdown: string; completed?: boolean }>();
 
 const el = (tag: string, cls = "", text = "") => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const icon = (id: string) => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.innerHTML = `<use href="#i-${id}"/>`; return s; };
@@ -194,7 +194,7 @@ function renderCost(s: SessionRecord) {
 
 // ---- provider-neutral activity -------------------------------------------
 function onEvent(event: ReviewEvent) {
-  if (view.bufferEvent(event) || !eventBelongsToSession({ event, session: view.session })) return;
+  if (view.bufferEvent(event) || !eventBelongsToSession({ event, session: view.session }) || items.get(event.itemId)?.completed) return;
   if (event.type === "text_start") {
     if (!items.has(event.itemId)) items.set(event.itemId, { element: assistant(""), markdown: "" });
   } else if (event.type === "text_delta") {
@@ -312,10 +312,10 @@ function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
   for (const h of m.messages) {
     if (h.role === "tool") {
       const element = h.name === "stopped" ? bubble("chip stopped", "Stopped") : chip(h.name, h.input);
-      if (h.itemId) { historyIds.add(h.itemId); items.set(h.itemId, { element, markdown: "" }); }
+      if (h.itemId) { historyIds.add(h.itemId); items.set(h.itemId, { element, markdown: "", completed: true }); }
     } else if (h.role === "assistant") {
       const element = assistant(md(h.text));
-      if (h.itemId) { historyIds.add(h.itemId); items.set(h.itemId, { element, markdown: h.text }); }
+      if (h.itemId) { historyIds.add(h.itemId); items.set(h.itemId, { element, markdown: h.text, completed: true }); }
     } else bubble("msg user", h.text); // user message or ask_user answer
   }
   for (const snapshot of confirmed.activeText) if (!historyIds.has(snapshot.itemId)

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { buildSync } from "esbuild";
-import { PROTOCOL_VERSION, type DownMsg, type Health, type SessionRecord } from "../../shared/protocol.ts";
+import { PROTOCOL_VERSION, type DownMsg, type Health, type ReviewEvent, type SessionRecord } from "../../shared/protocol.ts";
+import { eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
+import { ConversationView } from "./view-control.ts";
+import { decodeBridgeMessage } from "./wire.ts";
 
 class ElementStub {
   children: ElementStub[] = [];
@@ -62,6 +64,8 @@ const health = (model = "haiku", effort = "low"): Health => ({ protocolVersion: 
   providers: [{ provider: "claude", status: "ready", models: [{ value: "haiku", label: "Haiku", efforts: ["low", "medium"] }, { value: "sonnet", label: "Sonnet", efforts: ["low", "medium"] }] },
     { provider: "codex", status: "unavailable", models: [] }],
   settings: { provider: "claude", providers: { claude: { model, effort }, codex: { model: "default", effort: "default" } } } });
+const resultHealth = (requestId: string, accepted: boolean, model: string, effort: string, error?: string): Health =>
+  ({ ...health(model, effort), settingsResult: { requestId, accepted, error } });
 const text = (node: ElementStub): string => `${node.textContent}${node.inner}${node.children.map(text).join("")}`;
 const count = (value: string, part: string) => value.split(part).length - 1;
 
@@ -70,22 +74,23 @@ class Harness {
   sockets: SocketStub[] = [];
   timers: (() => void)[] = [];
   posted: unknown[] = [];
+  footer = new ElementStub("footer");
   constructor() {
     const ids = ["btn-settings", "dot", "status", "cost", "btn-flow", "btn-stop", "btn-selection", "btn-new", "btn-history",
       "settings", "model", "effort", "about", "sessions", "chat", "empty", "sel", "input", "send"];
     for (const id of ids) this.elements.set(id, new ElementStub(id.startsWith("btn-") || id === "send" ? "button" : id === "input" ? "textarea" : id === "model" || id === "effort" ? "select" : "div", id));
     this.get("chat").append(this.get("empty")); this.get("sel").append(new ElementStub("svg"), new ElementStub("span"));
-    const footer = new ElementStub("footer"), body = new ElementStub("body");
+    const body = new ElementStub("body");
     const owner = this;
     class Socket extends SocketStub { constructor(url: string) { super(url); owner.sockets.push(this); } }
     const document = { getElementById: (id: string) => this.elements.get(id), createElement: (tag: string) => new ElementStub(tag),
-      createElementNS: (_ns: string, tag: string) => new ElementStub(tag), querySelector: (query: string) => query === "footer" ? footer : undefined,
+      createElementNS: (_ns: string, tag: string) => new ElementStub(tag), querySelector: (query: string) => query === "footer" ? this.footer : undefined,
       body, execCommand: () => true };
     const window: { onmessage?: (event: { data: unknown }) => void } = {};
     vm.runInNewContext(bundle, { document, window, parent: { postMessage: (message: unknown) => this.posted.push(message) }, navigator: { userAgent: "Electron" },
       WebSocket: Socket, Option: class extends ElementStub { constructor(label: string, value: string) { super("option"); this.textContent = label; this.value = value; } },
       setTimeout: (callback: () => void) => { this.timers.push(callback); return this.timers.length; }, clearTimeout: () => {}, console });
-    window.onmessage?.({ data: { pluginMessage: { kind: "context", fileId: "file", fileName: "File", page: "Page", selection: [], annotations: {} } } });
+    window.onmessage?.({ data: { pluginMessage: { kind: "context", fileId: "file", fileName: "File", pageId: "page", pageName: "Page", selection: [], annotations: {} } } });
   }
   get(id: string) { return this.elements.get(id)!; }
   get socket() { return this.sockets[this.sockets.length - 1]!; }
@@ -119,45 +124,82 @@ admission.socket.open(); admission.get("send").onclick?.();
 assert.equal(admission.get("input").value, "kept");
 admission.deliver({ kind: "connection", protocolVersion: PROTOCOL_VERSION, busy: false }); admission.deliver({ kind: "health", health: health() });
 admission.get("send").onclick?.(); assert.equal(admission.get("input").value, ""); assert.equal(admission.sent("start").length, 1);
-admission.deliver({ kind: "sessions", sessions: [session] }); admission.socket.close();
+admission.deliver({ kind: "sessions", sessions: [session] }); admission.get("input").value = "offline draft"; admission.socket.close();
 const beforeNew = text(admission.get("chat")); admission.get("btn-new").onclick?.();
 assert.equal(text(admission.get("chat")), beforeNew); assert.equal(admission.sent("close").length, 0);
 admission.get("btn-history").onclick?.(); const opens = admission.sent("open").length;
 admission.button(admission.get("sessions"), "Open").onclick?.(); assert.equal(admission.sent("open").length, opens);
+assert.equal(admission.get("input").value, "offline draft"); assert.equal(text(admission.get("chat")), beforeNew);
+assert.match(JSON.stringify(admission.posted), /New was not started/); assert.match(JSON.stringify(admission.posted), /History was not opened/);
+admission.get("model").value = "sonnet"; admission.get("model").onchange?.();
+assert.equal(admission.get("model").value, "haiku"); assert.equal(admission.sent("settings").length, 0);
+admission.timers.shift()?.(); admission.socket.open();
+admission.get("model").value = "sonnet"; admission.get("model").onchange?.();
+assert.equal(admission.get("model").value, "haiku"); assert.equal(admission.sent("settings").length, 0);
+assert.match(JSON.stringify(admission.posted), /Settings were not changed/);
 
-// Interrupted settings remain explicitly unconfirmed, then authoritative reconnect health decides either outcome without resend.
+// Rapid edits survive an older result; current accepted/rejected results settle intent. Reconnect health separately resolves lost results.
 const settings = new Harness();
 assert.equal(settings.get("model").disabled, true); settings.connect();
 settings.get("model").value = "sonnet"; settings.get("model").onchange?.();
-assert.equal(settings.sent("settings").length, 1); settings.socket.close();
-assert.match(text(settings.get("chat")), /not confirmed/);
-settings.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, busy: false });
-settings.deliver({ kind: "health", health: health("sonnet", "low") });
-assert.equal(settings.get("model").value, "sonnet"); assert.doesNotMatch(text(settings.get("chat")), /not confirmed/); assert.equal(settings.sent("settings").length, 1);
+settings.get("effort").value = "medium"; settings.get("effort").onchange?.();
+const edits = settings.sent("settings") as { requestId: string; settings: { model: string; effort: string } }[];
+assert.deepEqual(edits[1]!.settings, { model: "sonnet", effort: "medium" });
+settings.deliver({ kind: "health", health: resultHealth(edits[0]!.requestId, false, "sonnet", "low", "stale") });
+assert.deepEqual([settings.get("model").value, settings.get("effort").value], ["sonnet", "medium"]);
+assert.doesNotMatch(text(settings.get("chat")), /stale/);
+settings.deliver({ kind: "health", health: resultHealth(edits[1]!.requestId, true, "sonnet", "medium") });
+settings.get("model").value = "haiku"; settings.get("model").onchange?.();
+const rejected = settings.sent("settings").slice(-1)[0] as { requestId: string };
+settings.deliver({ kind: "health", health: resultHealth(rejected.requestId, false, "sonnet", "medium", "rejected") });
+assert.equal(settings.get("model").value, "sonnet"); assert.match(text(settings.get("chat")), /rejected/);
 settings.get("model").value = "haiku"; settings.get("model").onchange?.(); settings.socket.close();
-settings.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, busy: false });
-settings.deliver({ kind: "health", health: health("sonnet", "low") });
-assert.equal(settings.get("model").value, "sonnet");
+assert.match(text(settings.get("chat")), /not confirmed/);
+settings.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, busy: false }); settings.deliver({ kind: "health", health: health("haiku", "medium") });
+assert.equal(settings.get("model").value, "haiku"); assert.doesNotMatch(text(settings.get("chat")), /not confirmed/);
+settings.get("model").value = "sonnet"; settings.get("model").onchange?.(); settings.socket.close();
+settings.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, busy: false }); settings.deliver({ kind: "health", health: health("haiku", "medium") });
+assert.equal(settings.get("model").value, "haiku");
 
-// Lost History reply retries same intent. Snapshot identity restores a mid-item prefix; native overlap is not duplicated.
+// A no-retained History row blocks click/Enter submission and a second row supersedes its correlated result.
+const rows = new Harness(), otherSession = { ...session, sessionId: "22222222-2222-4222-8222-222222222222", title: "Other" };
+rows.connect(); rows.deliver({ kind: "sessions", sessions: [session, otherSession] }); rows.get("btn-history").onclick?.();
+rows.get("sessions").querySelectorAll("button")[0]!.onclick?.();
+const rowFirst = rows.sent("open").slice(-1)[0] as { intentId: string };
+rows.get("input").value = "click"; rows.get("send").onclick?.(); assert.equal(rows.get("input").value, "click");
+rows.get("input").onkeydown?.({ key: "Enter", shiftKey: false, preventDefault() {} }); assert.equal(rows.get("input").value, "click");
+assert.equal(rows.sent("user").length + rows.sent("start").length, 0);
+rows.get("btn-history").onclick?.(); rows.get("sessions").querySelectorAll("button")[1]!.onclick?.();
+const rowSecond = rows.sent("open").slice(-1)[0] as { intentId: string };
+assert.notEqual(rowSecond.intentId, rowFirst.intentId);
+rows.deliver({ kind: "history", intentId: rowFirst.intentId, session: otherSession, attached: false, messages: [{ role: "assistant", text: "stale row" }] });
+assert.doesNotMatch(text(rows.get("chat")), /stale row/);
+rows.deliver({ kind: "history", intentId: rowSecond.intentId, session, attached: false, messages: [{ role: "assistant", text: "current row" }] });
+assert.match(text(rows.get("chat")), /current row/);
+
+// Retry adopts a newer identity snapshot boundary; completed native identity also rejects delayed SDK overlap.
 const history = new Harness();
 const connection: Extract<DownMsg, { kind: "connection" }> = { kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: true,
-  activeText: [{ session, itemId: "live", text: "Hello " }, { session, itemId: "done", text: "Complete" }] };
+  activeText: [{ session, itemId: "partial", text: "A" }, { session, itemId: "done", text: "Complete" }] };
 history.connect(connection); const firstOpen = history.sent("open").slice(-1)[0]! as { intentId: string };
-history.socket.close(); history.reconnect(connection); const retryOpen = history.sent("open").slice(-1)[0]! as { intentId: string };
+history.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "partial", text: "B" } });
+history.socket.close(); history.reconnect({ ...connection, activeText: [{ session, itemId: "partial", text: "AB" }, { session, itemId: "done", text: "Complete" }] });
+const retryOpen = history.sent("open").slice(-1)[0]! as { intentId: string };
 assert.equal(retryOpen.intentId, firstOpen.intentId);
-history.deliver({ kind: "event", event: { type: "text_start", session, itemId: "live" } });
-history.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "live", text: "world" } });
 history.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "done", text: "Complete" } });
 history.deliver({ kind: "tool", id: "ask", tool: "ask_user", args: { question: "Continue?", options: ["Yes"] } });
 history.deliver({ kind: "permission", id: "permission", tool: "annotate", input: {} });
 history.get("input").value = "wait"; history.get("send").onclick?.(); assert.equal(history.get("input").value, "wait");
 history.deliver({ kind: "history", intentId: firstOpen.intentId, session, attached: true, messages: [{ role: "assistant", text: "Complete", itemId: "done" }] });
-const rendered = text(history.get("chat"));
-assert.match(rendered, /Hello .*world/); assert.equal(count(rendered, "Complete"), 1); assert.match(rendered, /Continue/); assert.match(rendered, /annotate/);
+let rendered = text(history.get("chat"));
+assert.match(rendered, /AB/); assert.equal(count(rendered, "Complete"), 1); assert.match(rendered, /Continue/); assert.match(rendered, /annotate/);
+assert.equal(history.footer.hidden, true);
+history.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "partial", text: "C" } });
+history.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "done", text: "Complete" } });
+rendered = text(history.get("chat")); assert.match(rendered, /ABC/); assert.equal(count(rendered, "Complete"), 1);
 const yes = history.button(history.get("chat"), "Yes"), allow = history.button(history.get("chat"), "Allow");
 yes.onclick?.(); yes.onclick?.(); allow.onclick?.(); allow.onclick?.();
-assert.equal(history.sent("reply").length, 2);
+assert.equal(history.sent("reply").length, 2); assert.equal(history.footer.hidden, false);
 history.get("btn-new").onclick?.();
 history.deliver({ kind: "history", intentId: firstOpen.intentId, session, attached: true, messages: [{ role: "assistant", text: "stale" }] });
 assert.doesNotMatch(text(history.get("chat")), /stale/);
@@ -167,9 +209,35 @@ const cancel = new Harness(); cancel.connect(connection);
 const cancelOpen = cancel.sent("open").slice(-1)[0]! as { intentId: string };
 cancel.deliver({ kind: "tool", id: "cancelled", tool: "ask_user", args: { question: "Gone?", options: ["Yes"] } });
 const staleYes = cancel.button(cancel.get("chat"), "Yes");
+assert.equal(cancel.footer.hidden, true);
 cancel.deliver({ kind: "cancel_request", id: "cancelled", reason: "Provider cancelled" });
+assert.equal(cancel.footer.hidden, false);
 cancel.deliver({ kind: "history", intentId: cancelOpen.intentId, session, attached: true, messages: [] }); staleYes.onclick?.();
 assert.equal(cancel.sent("reply").length, 0); assert.equal(cancel.get("chat").querySelectorAll(".actionable").length, 0);
 
-assert.ok(readFileSync(new URL("./ui.ts", import.meta.url), "utf8").includes("new ConversationView"));
+// Pure wire/display/view boundaries remain explicit where DOM integration would not add evidence.
+assert.equal(PROTOCOL_VERSION, 3);
+assert.equal(decodeBridgeMessage({ kind: "health", health: { bridge: "legacy" } }), undefined);
+for (const protocolVersion of [undefined, 1, 2, 4]) assert.equal(decodeBridgeMessage({ kind: "connection", protocolVersion, busy: false }), undefined);
+assert.deepEqual(decodeBridgeMessage({ kind: "connection", protocolVersion: 3, busy: false }), { kind: "connection", protocolVersion: 3, busy: false });
+assert.equal(decodeBridgeMessage({ kind: "connection", protocolVersion: 3, busy: false, activeText: [{ itemId: 1 }] }), undefined);
+const delta: ReviewEvent = { type: "text_delta", session, itemId: "item", text: "text" };
+assert.equal(eventBelongsToSession({ event: delta, session }), true);
+assert.equal(eventBelongsToSession({ event: { ...delta, session: { provider: "codex", sessionId: session.sessionId } }, session }), false);
+assert.equal(eventBelongsToSession({ event: { ...delta, session: { provider: "claude", sessionId: "wrong" } }, session }), false);
+assert.equal(sessionCostLabel({ session: { ...session, costUsd: 0.123, costStatus: "estimated" }, precision: 2 }), "~$0.12");
+assert.equal(sessionCostLabel({ session: { ...session, costStatus: "unavailable" }, precision: 2 }), "Cost unavailable");
+assert.deepEqual(providerSettingOptions({ health: undefined, settings: { model: "", effort: "" } }),
+  { models: [{ value: "", label: "Default" }], efforts: [{ value: "", label: "Default" }] });
+assert.deepEqual(providerSettingOptions({ health: health().providers[0], settings: { model: "legacy", effort: "custom" } }), {
+  models: [{ value: "haiku", label: "Haiku" }, { value: "sonnet", label: "Sonnet" }, { value: "legacy", label: "legacy" }],
+  efforts: [{ value: "low", label: "low" }, { value: "medium", label: "medium" }, { value: "custom", label: "custom" }],
+});
+const stale = new ConversationView(); stale.begin({ intentId: "old", retainSession: false }); stale.begin({ intentId: "current", retainSession: false });
+assert.equal(stale.confirm({ intentId: "old", session }), undefined);
+assert.ok(stale.confirm({ intentId: "current", session }));
+assert.equal(stale.update({ ...session, sessionId: "wrong" }), false);
+assert.equal(stale.update({ ...session, provider: "codex" }), false);
+let cancellations = 0; stale.addCard({ id: "card", cancel: () => cancellations++ });
+stale.disconnect({ reason: "offline" }); stale.disconnect({ reason: "offline again" }); assert.equal(cancellations, 1);
 console.log("bundled ui lifecycle check ok");
