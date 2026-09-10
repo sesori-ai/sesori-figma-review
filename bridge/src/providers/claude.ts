@@ -321,12 +321,15 @@ class ClaudeSession implements ReviewSession {
     settings: ProviderSettings;
     resumed: boolean;
     mcpStatusTimeoutMs: number;
+    onInitialized: (health: ProviderHealth) => void;
+    onClose: () => void;
     log: (...values: unknown[]) => void;
   }) {
     this.query = args.query;
     this.push = args.push;
     this.effectiveSettings = { ...args.settings };
     this.log = args.log;
+    this.onClose = args.onClose;
     const self = this;
     this.output = (async function* () {
       let sessionId = "";
@@ -351,18 +354,15 @@ class ClaudeSession implements ReviewSession {
             timeoutMs: args.mcpStatusTimeoutMs,
             log: args.log,
           });
-          yield {
-            kind: "initialized",
-            sessionId,
-            health: {
-              provider: "claude",
-              status: "ready",
-              version: typeof message.claude_code_version === "string" ? message.claude_code_version : undefined,
-              model: typeof message.model === "string" ? message.model : undefined,
-              models: claudeModels(),
-            },
-            servers,
+          const health: ProviderHealth = {
+            provider: "claude",
+            status: "ready",
+            version: typeof message.claude_code_version === "string" ? message.claude_code_version : undefined,
+            model: typeof message.model === "string" ? message.model : undefined,
+            models: claudeModels(),
           };
+          args.onInitialized(health);
+          yield { kind: "initialized", sessionId, health, servers };
         }
         for (const event of display.map({
           message: sdkMessage,
@@ -393,6 +393,7 @@ class ClaudeSession implements ReviewSession {
   private readonly query: NativeQuery;
   private readonly push: (message: SDKUserMessage | null) => void;
   private readonly log: (...values: unknown[]) => void;
+  private readonly onClose: () => void;
 
   send(args: { text: string; selection: NodeRef[]; context?: string }) {
     if (this.closed) throw new Error("Claude session is closed");
@@ -436,7 +437,8 @@ class ClaudeSession implements ReviewSession {
     if (this.closed) return;
     this.closed = true;
     this.push(null);
-    this.query.close();
+    try { this.query.close(); }
+    finally { this.onClose(); }
   }
 }
 
@@ -475,7 +477,7 @@ const matchesWarm = (entry: WarmEntry, args: {
 export class ClaudeProvider implements ReviewProvider {
   readonly id = "claude" as const;
   private warm?: WarmEntry;
-  private runtime?: { owner: WarmEntry; prepared?: boolean; error?: string };
+  private runtime?: { owner: object; prepared?: boolean; error?: string; version?: string; model?: string };
   private readonly native: NativeFactory;
 
   constructor(private readonly args: {
@@ -490,7 +492,8 @@ export class ClaudeProvider implements ReviewProvider {
     return {
       provider: "claude",
       status: this.runtime?.error ? "unavailable" : this.runtime?.prepared ? "ready" : "starting",
-      model: args.settings.model || undefined,
+      version: this.runtime?.version,
+      model: this.runtime?.model ?? (args.settings.model || undefined),
       models: claudeModels(),
       error: this.runtime?.error,
     };
@@ -551,7 +554,9 @@ export class ClaudeProvider implements ReviewProvider {
     const input = inputStream();
     const startArgs = { ...args, allowedTools: [...readAllow(args.dir)] };
     let nativeQuery: NativeQuery | undefined;
+    let runtimeOwner: object | undefined;
     const warm = this.warm;
+    let mayOwnColdRuntime = !warm;
     if (warm && (!args.resume && matchesWarm(warm, startArgs))) {
       warm.delegate.current = args.boundary;
       this.warm = undefined;
@@ -560,6 +565,7 @@ export class ClaudeProvider implements ReviewProvider {
         resolved = await warm.query;
         if (this.runtime?.owner === warm) {
           nativeQuery = resolved.query(input.stream);
+          runtimeOwner = warm;
           this.runtime = { owner: warm, prepared: true };
           this.args.onPrepared();
         } else {
@@ -570,6 +576,7 @@ export class ClaudeProvider implements ReviewProvider {
         if (resolved) this.closeResolvedWarm(resolved, "unusable consumed warm query");
         if (this.runtime?.owner === warm) {
           this.runtime = undefined;
+          mayOwnColdRuntime = true;
           this.args.onPrepared();
         }
         this.args.log("pre-warmed query unusable, starting cold", error);
@@ -578,6 +585,7 @@ export class ClaudeProvider implements ReviewProvider {
       this.warm = undefined;
       if (this.runtime?.owner === warm) {
         this.runtime = undefined;
+        mayOwnColdRuntime = true;
         this.args.onPrepared();
       }
       this.closeWarm(warm, "incompatible warm query");
@@ -586,10 +594,16 @@ export class ClaudeProvider implements ReviewProvider {
       this.runtime = undefined;
       this.args.onPrepared();
     }
-    nativeQuery ??= this.native.cold({
-      prompt: input.stream,
-      options: options({ ...startArgs, version: this.args.version, log: this.args.log }),
-    });
+    if (!nativeQuery) {
+      const coldOwner = {};
+      nativeQuery = this.native.cold({
+        prompt: input.stream,
+        options: options({ ...startArgs, version: this.args.version, log: this.args.log }),
+      });
+      runtimeOwner = coldOwner;
+      if (mayOwnColdRuntime && !this.runtime) this.runtime = { owner: coldOwner };
+    }
+    const ownsRuntime = () => !!runtimeOwner && this.runtime?.owner === runtimeOwner;
     return new ClaudeSession({
       query: nativeQuery,
       push: input.push,
@@ -597,6 +611,16 @@ export class ClaudeProvider implements ReviewProvider {
       settings: args.settings,
       resumed: !!args.resume,
       mcpStatusTimeoutMs: this.args.mcpStatusTimeoutMs ?? MCP_STATUS_TIMEOUT_MS,
+      onInitialized: health => {
+        if (!runtimeOwner || !ownsRuntime()) return;
+        this.runtime = { owner: runtimeOwner, prepared: true, version: health.version, model: health.model };
+        this.args.onPrepared();
+      },
+      onClose: () => {
+        if (!ownsRuntime()) return;
+        this.runtime = undefined;
+        this.args.onPrepared();
+      },
       log: this.args.log,
     });
   }

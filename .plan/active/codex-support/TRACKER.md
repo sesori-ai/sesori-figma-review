@@ -30,30 +30,20 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 ## Step 2 replacement foundation
 
-- Full reviewed implementation remains immutable at `origin/codex-support-step-2` commit `f7265eb`. Oversized PR #2
-  (https://github.com/sesori-ai/sesori-figma-review/pull/2) was closed as superseded, not merged or abandoned.
-- Foundation boundary: additive provider-neutral IDs/refs/events/health/model/cost contracts, provider interfaces,
-  neutral Zod Figma catalog, complete dormant Claude adapter, and focused adapter/history/stream/accounting tests.
-  Released `UpMsg`/`DownMsg`/`Health`/`Settings`/`SessionRecord`, plugin UI and protocol remain active and unchanged.
-  Approved stateless reuse makes legacy bridge tools consume the exact neutral catalog and makes legacy history call
-  the shared Claude transcript leaf; metadata/output stay identical while unsafe non-native IDs now reject. This
-  slice does not expose Codex, migrate persistence, or claim new UI/protocol behavior.
-- Step 3 activation must retain valid checkpoint fixes: provider-scoped health/settings; immutable request/session
-  ownership; protocol v3 mixed-version guidance; single connection/view intent for start/reconnect/History/cards;
-  file-scoped close; settings-await fencing; normalized block identity/usage/cost; and self-owned bounded smoke.
-- Historical checkpoint smokes used authorized existing Claude sign-in, Haiku/low, isolated homes/free ports,
-  four-turn/$0.10 limits and no credential/config copying. They prove preserved intent, not this dormant foundation.
-  Later live tests retain those rules. Codex tests use cheapest suitable catalog-reported image/tool-capable model and
-  low effort; ask before premium/high-effort exceptions.
-- **Verified checkpoint (`cfe0ec8`):** 1,532 changed lines (1,450 additions, 82 deletions). Parent accepted this
-  32-line soft-cap tail for final cost-provenance/health fixes and regression proof. `npm ci`, legacy workspace
-  checks, focused mocked Claude adapter checks, both builds and `git diff --check` pass. Tests cover exact tool description strings, selected parameter
-  metadata, representative schema cases and source-audited legacy catalog reuse;
-  warm settings/boundary identity, replacement/consume/cold fallback/dispose/stale fencing; serialized settings,
-  rollback and fail-closed behavior; init MCP fallback; safe UUID transcript projection; normalized stream identity;
-  cumulative response/per-turn usage; invalid/recovered immutable cost; and fail-closed optional turn/budget limits
-  before native dispatch. No legacy wire/UI/session schema changed; no paid/native turn was run for deterministic
-  dormant-adapter fixes.
+- Full implementation stays immutable at `origin/codex-support-step-2` commit `f7265eb`; oversized PR #2 was closed
+  as superseded, not merged or abandoned.
+- This dormant foundation adds normalized contracts, neutral validated tools, Claude adapter and focused tests. Legacy
+  wire/UI/session schemas remain active; exact catalog and transcript-leaf reuse preserve metadata and output. Codex,
+  persistence migration and new UI/protocol behavior remain excluded.
+- Step 3 retains provider-scoped ownership/settings/health, protocol-v3 mismatch handling, one view intent, file-scoped
+  close, settings fencing, normalized identity/accounting, and bounded smoke obligations.
+- Historical smokes used Claude Haiku/low, isolated homes/free ports and four-turn/$0.10 limits. Later Claude/Codex
+  tests retain the recorded credential, model and spend rules.
+- **Historical checkpoint `cfe0ec8`:** 1,532 changed lines (1,450 additions, 82 deletions), with all checks passing.
+  Parent accepts a standing foundation review-fix tail up to 1,650 total lines only for existing lifecycle,
+  accounting and safety repairs plus proof, never Step 3 activation. Tests cover catalog/schema reuse, warm/cold
+  lifecycle and init fencing, settings, MCP fallback, transcript/stream/accounting, and fail-closed env limits.
+  No paid/native turn was run for deterministic dormant-adapter fixes.
 
 ## Qualification gates before user-facing Codex exposure
 

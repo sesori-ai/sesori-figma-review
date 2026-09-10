@@ -126,7 +126,7 @@ assert.equal(provider.health({ settings: { model: "haiku", effort: "low" } }).st
 
 type Native = NonNullable<ConstructorParameters<typeof ClaudeProvider>[0]["native"]>;
 type WarmCall = { options: Parameters<Native["warm"]>[0]["options"]; pending: ReturnType<typeof deferred<FakeWarm>> };
-const lifecycle = () => {
+const lifecycle = (coldMessages: unknown[] = []) => {
   const warmCalls: WarmCall[] = [], coldQueries: FakeQuery[] = [];
   const coldOptions: Parameters<Native["cold"]>[0]["options"][] = [];
   const native: Native = {
@@ -135,7 +135,7 @@ const lifecycle = () => {
       warmCalls.push({ options, pending });
       return pending.promise;
     },
-    cold: ({ options }) => { const query = new FakeQuery(); coldQueries.push(query); coldOptions.push(options); return query; },
+    cold: ({ options }) => { const query = new FakeQuery(coldMessages); coldQueries.push(query); coldOptions.push(options); return query; },
   };
   let callbacks = 0;
   const logs: unknown[][] = [];
@@ -230,19 +230,27 @@ assert.equal(currentWarm.queries, 1, "matching warm query is consumed");
 assert.equal(cached.coldQueries.length, 0);
 
 // New prepare/dispose while consumed warm awaits fences stale success and uses a cold query for the requested start.
-const consumed = lifecycle();
+const consumed = lifecycle([
+  { type: "system", subtype: "init", session_id: baseRecord.sessionId, model: "stale", mcp_servers: [] },
+  { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },
+]);
 consumed.provider.prepare(warmArgs(firstBoundary));
 const consumedStart = consumed.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
 consumed.provider.prepare(warmArgs(reboundBoundary, { model: "sonnet", effort: "low" }));
 const consumedWarm = new FakeWarm();
 consumed.warmCalls[0].pending.resolve(consumedWarm);
-await consumedStart;
+const consumedSession = await consumedStart;
 assert.equal(consumedWarm.closes, 1);
 assert.equal(consumed.coldQueries.length, 1, "stale consumed warm falls back cold");
 const replacementWarm = new FakeWarm();
 consumed.warmCalls[1].pending.resolve(replacementWarm);
 await Promise.resolve();
 assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "low" } }).status, "ready");
+const replacementCallbacks = consumed.callbacks();
+for await (const _output of consumedSession.output) {}
+assert.equal(consumed.callbacks(), replacementCallbacks, "superseded session init cannot publish readiness");
+assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "low" } }).model, "sonnet");
+consumedSession.close();
 consumed.provider.dispose();
 await Promise.resolve();
 assert.equal(replacementWarm.closes, 1);
@@ -257,16 +265,34 @@ await Promise.resolve();
 assert.equal(disposedWarm.closes, 1);
 assert.equal(disposed.callbacks(), 1, "dispose publishes once; stale resolution stays fenced");
 assert.equal(disposed.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
-const disposedConsumed = lifecycle();
+const disposedConsumed = lifecycle([
+  { type: "system", subtype: "init", session_id: baseRecord.sessionId, model: "stale", mcp_servers: [] },
+  { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },
+]);
 disposedConsumed.provider.prepare(warmArgs(firstBoundary));
 const startBeforeDispose = disposedConsumed.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
 disposedConsumed.provider.dispose();
 const staleAfterDispose = new FakeWarm();
 disposedConsumed.warmCalls[0].pending.resolve(staleAfterDispose);
-await startBeforeDispose;
+const disposedSession = await startBeforeDispose;
 assert.equal(staleAfterDispose.closes, 1);
 assert.equal(disposedConsumed.coldQueries.length, 1);
 assert.equal(disposedConsumed.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
+const disposedCallbacks = disposedConsumed.callbacks();
+for await (const _output of disposedSession.output) {}
+assert.equal(disposedConsumed.callbacks(), disposedCallbacks, "disposed session init stays fenced");
+assert.equal(disposedConsumed.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
+disposedSession.close();
+
+const closedBeforeInit = lifecycle([
+  { type: "system", subtype: "init", session_id: baseRecord.sessionId, model: "stale", mcp_servers: [] },
+]);
+const closedSession = await closedBeforeInit.provider.start({ ...warmArgs(firstBoundary), baseRecord });
+closedSession.close();
+const closedCallbacks = closedBeforeInit.callbacks();
+for await (const _output of closedSession.output) {}
+assert.equal(closedBeforeInit.callbacks(), closedCallbacks, "closed session init stays fenced");
+assert.equal(closedBeforeInit.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
 
 const rejected = lifecycle();
 rejected.provider.prepare(warmArgs(firstBoundary));
@@ -281,18 +307,26 @@ const retryQuery = new FakeQuery([
   { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },
 ]);
 const retryNative: Native = { warm: () => failedPrepared.promise, cold: () => retryQuery };
-const retryProvider = new ClaudeProvider({ version: "test", log: () => {}, onPrepared: () => {}, native: retryNative });
+let retryCallbacks = 0;
+const retryProvider = new ClaudeProvider({
+  version: "test", log: () => {}, onPrepared: () => retryCallbacks++, native: retryNative,
+});
 retryProvider.prepare(warmArgs(firstBoundary));
 failedPrepared.reject(new Error("prepare failed"));
 await Promise.resolve();
 assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "unavailable");
+assert.equal(retryCallbacks, 1);
 const retrySession = await retryProvider.start({ ...warmArgs(firstBoundary), baseRecord });
 assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting",
   "owned cold retry clears completed prepare error without claiming readiness");
+assert.equal(retryCallbacks, 2);
 const retryOutputs = [];
 for await (const output of retrySession.output) retryOutputs.push(output);
 const retryInitialized = retryOutputs.find(output => output.kind === "initialized");
 assert.equal(retryInitialized?.kind === "initialized" ? retryInitialized.health.status : undefined, "ready");
+assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "ready");
+assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).model, "haiku");
+assert.equal(retryCallbacks, 3, "owned cold init publishes provider readiness once");
 
 const consumeThrows = lifecycle();
 consumeThrows.provider.prepare(warmArgs(firstBoundary));
@@ -489,8 +523,12 @@ const initQuery = new FakeQuery([
 ], new Error("refresh failed"));
 const initLogs: unknown[][] = [];
 const initNative: Native = { warm: async () => new FakeWarm(), cold: () => initQuery };
-const initProvider = new ClaudeProvider({ version: "test", log: (...values) => initLogs.push(values), onPrepared: () => {}, native: initNative });
+let initCallbacks = 0;
+const initProvider = new ClaudeProvider({
+  version: "test", log: (...values) => initLogs.push(values), onPrepared: () => initCallbacks++, native: initNative,
+});
 const initSession = await initProvider.start({ ...warmArgs(firstBoundary), resume: baseRecord.sessionId, baseRecord });
+assert.equal(initProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
 const outputs = [];
 for await (const output of initSession.output) outputs.push(output);
 const initialized = outputs.find(output => output.kind === "initialized");
@@ -499,6 +537,11 @@ assert.deepEqual(initialized?.servers, [
   { name: "figma-desktop", status: "disconnected", error: undefined },
 ]);
 assert.ok(initLogs.some(values => String(values[0]).includes("using init snapshot")));
+const resumedHealth = initProvider.health({ settings: { model: "sonnet", effort: "low" } });
+assert.equal(resumedHealth.status, "ready");
+assert.equal(resumedHealth.version, "test");
+assert.equal(resumedHealth.model, "haiku", "native init model overrides requested fallback");
+assert.equal(initCallbacks, 1, "resumed cold init publishes provider readiness once");
 assert.deepEqual(outputs.at(-1), {
   kind: "usage", usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0 },
   cost: { usd: 0.01, status: "unavailable" }, turnCompleted: true,
