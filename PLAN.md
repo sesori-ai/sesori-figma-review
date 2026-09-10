@@ -32,11 +32,14 @@ plugin panel. Nobody talks to a terminal.
       Verified: type checks, the sandbox check (code.ts against a mock `figma` API: flow walk, screen tree, focus,
       annotate), the workspace/usage check, and an end-to-end smoke run (fake plugin → bridge → Claude → `focus`
       tool → answer → cost recorded). Not yet verified: anything that needs the real Figma app.
-- [ ] **M2 First real review in Figma** – import the manifest, run against a real prototype, fix what breaks:
-      node id format accepted by the desktop MCP tools (`12:34` vs `12-34`), export sizes, annotation writes,
-      viewport behaviour across pages.
-- [ ] **M3 Review quality** – tune CLAUDE.md and the `review-flow` skill on real files; decide whether the
-      tool-steering section (Figma MCP rate limits) earns its keep or gets deleted.
+- [x] **M2 First real review in Figma** – done on a real file (Opus, low effort): manifest import, health, flow
+      fallback on a page without prototype wiring, `get_screen`, `ask_user` cards, `focus`, 10 Dev Mode annotations
+      written, cost/turns in the header. Desktop MCP tools accept `12:34` ids. Fixed along the way: plugin-data
+      namespace, two-plugin connection flapping (now one socket per file), chips collapsing in an overflowing
+      flex column, plain-text markdown, per-block usage undercount (now `result.usage`).
+- [ ] **M3 Review quality** – iterate on CLAUDE.md and the `review-flow` skill on real files. First finding: at low
+      effort the model summarised all screens in one message without focusing any; the skill now forces
+      focus → findings → `ask_user` per screen. Decide whether the tool-steering section earns its keep.
 - [ ] **M4 Team rollout** – shared install instructions, one API key per machine (Agent SDK usage falls under the
       Commercial ToS), maybe a `launchd` entry so the bridge is always up.
 

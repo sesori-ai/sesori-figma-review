@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import { BRIDGE_PORT, FIGMA_MCP_URL, type DownMsg, type Health, type NodeRef, type PermissionDecision, type SessionRecord, type ToolResult, type UpMsg } from "../../shared/protocol.ts";
-import { readSessions, saveSession, sumUsage, workspaceFor, zeroUsage } from "./workspace.ts";
+import { addUsage, readAllow, readSessions, saveSession, workspaceFor, zeroUsage } from "./workspace.ts";
 
 const VERSION = "0.1.0";
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
@@ -46,8 +46,8 @@ const figmaServer = (fileId: string) => createSdkMcpServer({ name: "figma", vers
 ]});
 
 const SYSTEM = `You are a senior product designer and front-end lead doing a design review inside Figma, through a plugin chat panel.
-Use the figma tools to look at and steer the user's canvas. Be concrete and brief in chat; put implementation detail into annotations.
-When something is ambiguous, ask with ask_user instead of assuming.`;
+The user watches the canvas while you talk: call focus on a node before discussing it, and cover one screen per message.
+Be concrete and brief in chat; put implementation detail into annotations. When something is ambiguous, ask with ask_user instead of assuming.`;
 
 function options(fileId: string, dir: string, resume?: string): Options {
   const appRepo = process.env.APP_REPO;
@@ -60,15 +60,10 @@ function options(fileId: string, dir: string, resume?: string): Options {
     mcpServers: { figma: figmaServer(fileId), "figma-desktop": { type: "http", url: FIGMA_MCP_URL } },
     strictMcpConfig: true, // do not pull in the user's personal MCP servers
     tools: ["Read", "Glob", "Grep", "Write", "Edit", "Skill"],
-    allowedTools: [
-      "Read", "Glob", "Grep", "Skill",
-      `Edit(//${dir.replace(/^\//, "")}/notes/**)`, // Edit rules also govern Write
-      "mcp__figma__get_flow", "mcp__figma__get_screen", "mcp__figma__focus", "mcp__figma__ask_user",
-      "mcp__figma-desktop", // every tool of the local Figma MCP server
-    ],
+    allowedTools: readAllow(dir), // auto-approve list, editable per file in <workspace>/permissions.json
     disallowedTools: ["AskUserQuestion"], // ask_user replaces it (it focuses the canvas)
     permissionMode: "default",
-    canUseTool: async (toolName, input) => { // everything not allowed above (annotate, writes outside notes/) → plugin card
+    canUseTool: async (toolName, input) => { // everything not in the allow list (e.g. writes outside notes/) → plugin card
       const d = await ask<PermissionDecision>(fileId, { kind: "permission", tool: toolName, input }, { behavior: "deny", message: "Figma plugin disconnected" });
       return d.behavior === "allow" ? { behavior: "allow", updatedInput: input } : d;
     },
@@ -80,7 +75,7 @@ function options(fileId: string, dir: string, resume?: string): Options {
 }
 
 // ---- conversations --------------------------------------------------------------
-type Conv = { q: Query; push: (m: SDKUserMessage | null) => void; fileId: string; dir: string; rec: SessionRecord; baseCost: number; baseUsage: SessionRecord["usage"]; usageById: Map<string, any> };
+type Conv = { q: Query; push: (m: SDKUserMessage | null) => void; fileId: string; dir: string; rec: SessionRecord; baseCost: number };
 let conv: Conv | undefined; // ponytail: one conversation at a time across all files; starting one ends the previous
 let warm: { dir: string; wq: Promise<WarmQuery> } | undefined;
 const health: Health = { bridge: VERSION, figmaMcp: "down" };
@@ -125,7 +120,7 @@ async function startConv(m: Extract<UpMsg, { kind: "start" }>) {
   q ??= query({ prompt: gen, options: options(m.fileId, dir, m.resume) });
   const prev = m.resume ? readSessions(dir).find(s => s.sessionId === m.resume) : undefined;
   const rec: SessionRecord = prev ?? { sessionId: "", title: m.text.slice(0, 80), anchor: m.anchor, pageId: m.pageId, pageName: m.pageName, createdAt: now(), updatedAt: now(), turns: 0, costUsd: 0, usage: zeroUsage() };
-  conv = { q, push, fileId: m.fileId, dir, rec, baseCost: rec.costUsd, baseUsage: rec.usage, usageById: new Map() }; // ponytail: cost/usage assumed not restored by --resume; base + this process
+  conv = { q, push, fileId: m.fileId, dir, rec, baseCost: rec.costUsd }; // ponytail: total_cost_usd assumed not restored by --resume; base + this process
   const anchor = `Figma file "${m.fileName}", page "${m.pageName}" (${m.pageId}). Anchor: ${m.anchor.type}${m.anchor.nodeIds.length ? " " + m.anchor.nodeIds.join(", ") : ""}`;
   push(userMessage(m.text, m.selection, anchor));
   send(m.fileId, { kind: "busy", busy: true });
@@ -153,11 +148,10 @@ async function pump(c: Conv) {
         saveSession(c.dir, c.rec);
         out({ kind: "session", session: c.rec });
       }
-      if (msg.type === "assistant") c.usageById.set(msg.message.id, msg.message.usage);
       if (msg.type === "result") {
         c.rec.turns++;
         c.rec.costUsd = c.baseCost + msg.total_cost_usd;
-        c.rec.usage = sumUsage(c.usageById, c.baseUsage);
+        c.rec.usage = addUsage(c.rec.usage, msg.usage);
         c.rec.updatedAt = now();
         saveSession(c.dir, c.rec);
         out({ kind: "session", session: c.rec });

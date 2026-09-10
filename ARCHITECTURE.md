@@ -50,13 +50,13 @@ bridge/smoke.mjs            fake plugin for an end-to-end run without Figma
 
 | Option | Value | Effect |
 | --- | --- | --- |
-| `cwd` | workspace dir | CLAUDE.md, skill and `.mcp.json` resolve from here |
+| `cwd` | workspace dir | CLAUDE.md, skill and `.mcp.json` resolve from here; `permissions.json` is read by the bridge |
 | `settingSources` | `["project"]` | load only project-level config, not the user's personal settings |
 | `additionalDirectories` | `[APP_REPO]` if set | app source is readable, not writable |
 | `mcpServers` + `strictMcpConfig` | in-process `figma`, http `figma-desktop` | no other MCP servers leak in |
 | `tools` | Read, Glob, Grep, Write, Edit, Skill | no Bash, no web, no subagents |
-| `allowedTools` | reads, Skill, `Edit(//<ws>/notes/**)`, figma read tools, `ask_user`, `mcp__figma-desktop` | auto-approved |
-| `canUseTool` | everything else (`annotate`, other writes) | becomes a permission card in the plugin |
+| `allowedTools` = workspace `permissions.json` | `allow`: reads, Skill, `Edit(//<ws>/notes/**)`, all 5 figma tools, `mcp__figma-desktop` | auto-approved; edit per file to change |
+| `canUseTool` | everything else (writes outside notes/) | becomes a permission card in the plugin |
 | `disallowedTools` | `AskUserQuestion` | replaced by `ask_user`, which focuses the canvas first |
 | `includePartialMessages` | true | text streams into the chat as it is generated |
 | `resume` | session id | for History → Resume |
@@ -85,7 +85,7 @@ bridge: push user message = "[file/page/anchor]\n<text>\n[Current selection: …
 bridge ──busy:true──► UI
 SDK ──system.init──► bridge ──health{servers, model, version}──► UI · ──session{sessionId}──► UI
 SDK ──stream_event/assistant──► bridge ──sdk──► UI   (text deltas render live; tool_use blocks become chips)
-SDK ──result──► bridge: rec.cost = base + total_cost_usd; usage = base + Σ per message.id
+SDK ──result──► bridge: rec.cost = base + total_cost_usd; usage += result.usage
 bridge ──session──► UI · ──sessions──► UI · ──busy:false──► UI
 ```
 
@@ -112,7 +112,7 @@ user clicks/types ──► UI ──reply{answer + current selection}──► 
 
 The handler blocks until the user answers. In-process SDK MCP servers are exempt from the tool idle timeout.
 
-### Permission (annotate, writes outside notes/)
+### Permission (anything not in the workspace allow list, e.g. writes outside notes/)
 
 ```
 SDK ──canUseTool(name, input)──► bridge ──permission{id, tool, input}──► UI
@@ -138,8 +138,8 @@ UI ──interrupt──► bridge: query.interrupt() → the turn ends with a r
 
 ## Cost and token accounting
 
-`result.total_cost_usd` is cumulative for the CLI process. Token usage is summed from `assistant` messages, keyed
-by `message.id` because Claude Code emits one `assistant` message per content block of the same API response.
+`result.total_cost_usd` is cumulative for the CLI process. Token usage is the `usage` on each `result` message (the
+turn's total), accumulated on the session record; per-block `assistant` usage is not final and is ignored.
 On resume, stored totals are used as the base for the new process (assumed not restored by `--resume`).
 
 ## Security and permissions

@@ -56,8 +56,8 @@ and the Figma MCP server are all reachable; hover it for details.
 - **History** – earlier sessions for this file, with cost. *Resume* continues one.
 - Typing while Claude is working **steers** it: the message is merged into the running turn. **Stop** interrupts.
 - Your current selection is attached to every message, so "make this one bigger" works.
-- When Claude wants to write an annotation (or a file outside its notes folder) you get an **Allow / Deny** card,
-  and the canvas jumps to the node first. Questions from Claude arrive as cards with option buttons; the canvas
+- Annotations are written without asking. Anything not on the auto-approve list (e.g. a file outside the notes
+  folder) shows an **Allow / Deny** card. Questions from Claude arrive as cards with option buttons; the canvas
   jumps to the spot it is asking about.
 - The header shows session cost, input/output tokens and turn count.
 
@@ -71,8 +71,9 @@ and the Figma MCP server are all reachable; hover it for details.
 | `FIGMA_REVIEW_EFFORT` | Claude Code default | Effort level: `low`, `medium`, `high`, `xhigh`, `max`. |
 
 Each Figma file gets a workspace with an editable `CLAUDE.md` (review conventions and a removable
-"tool steering" section about the Figma MCP server), `.mcp.json`, the `review-flow` skill, `notes/` and
-`sessions.json`. Files are created once and never overwritten, so edit them freely. You can also `cd` into a
+"tool steering" section about the Figma MCP server), `permissions.json` (the **auto-approve list**: add or
+remove tools under `allow`), `.mcp.json`, the `review-flow` skill, `notes/` and `sessions.json`.
+All but the skill are created once and never overwritten, so edit them freely. You can also `cd` into a
 workspace and run `claude --resume <sessionId>` to inspect a session from the CLI.
 
 ## Develop and test

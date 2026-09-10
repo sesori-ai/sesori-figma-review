@@ -1,6 +1,9 @@
 // UI iframe: the only user-facing surface. WebSocket client to the bridge, chat renderer, and relay
 // between the bridge and the sandbox (tool calls go down to code.ts, replies come back up).
+import { marked } from "marked";
 import { BRIDGE_PORT, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type SessionRecord, type UpMsg } from "../../shared/protocol.ts";
+
+const md = (s: string) => marked.parse(s.replace(/</g, "&lt;"), { async: false }) as string; // raw HTML from the model is shown as text
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const chat = $("chat"), input = $<HTMLTextAreaElement>("input"), statusEl = $("status"), dot = $("dot"), costEl = $("cost"), sessionsEl = $("sessions"), selEl = $("sel"), stopBtn = $("btn-stop");
@@ -9,6 +12,7 @@ let ctx = { fileId: "", fileName: "", pageId: "", pageName: "", selection: [] as
 let ws: WebSocket | undefined;
 let live: SessionRecord | undefined; // current conversation (placeholder until the bridge confirms it)
 let textEl: HTMLElement | undefined; // assistant text block currently being streamed
+let textRaw = ""; // its markdown source so far; re-rendered on every delta (ponytail: fine for chat-sized messages)
 let sessions: SessionRecord[] = [];
 
 const el = (tag: string, cls = "", text = "") => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
@@ -68,8 +72,8 @@ function renderCost(s: SessionRecord) {
 function onSdk(msg: any) {
   if (msg.type === "stream_event" && !msg.parent_tool_use_id) {
     const ev = msg.event;
-    if (ev.type === "content_block_start") textEl = ev.content_block.type === "text" ? bubble("msg assistant") : undefined;
-    if (ev.type === "content_block_delta" && ev.delta.type === "text_delta" && textEl) { textEl.textContent += ev.delta.text; chat.scrollTop = chat.scrollHeight; }
+    if (ev.type === "content_block_start") { textEl = ev.content_block.type === "text" ? bubble("msg assistant") : undefined; textRaw = ""; }
+    if (ev.type === "content_block_delta" && ev.delta.type === "text_delta" && textEl) { textRaw += ev.delta.text; textEl.innerHTML = md(textRaw); chat.scrollTop = chat.scrollHeight; }
   }
   if (msg.type === "assistant") {
     for (const b of msg.message.content) if (b.type === "tool_use") bubble("chip", `⚙ ${toolLabel(b.name)} ${summarize(b.input)}`);
