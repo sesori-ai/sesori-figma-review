@@ -45,7 +45,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   four-turn/$0.10 limits and no credential/config copying. They prove preserved intent, not this dormant foundation.
   Later live tests retain those rules. Codex tests use cheapest suitable catalog-reported image/tool-capable model and
   low effort; ask before premium/high-effort exceptions.
-- Foundation current diff is 1,492 changed lines (1,410 additions, 82 deletions), within the 1,500-line cap. `npm ci`, legacy workspace checks, focused mocked Claude adapter
+- Foundation current diff is 1,532 changed lines (1,450 additions, 82 deletions), within the 1,500-line cap. `npm ci`, legacy workspace checks, focused mocked Claude adapter
   checks, both builds and `git diff --check` pass. Tests cover exact tool description strings, selected parameter
   metadata, representative schema cases and source-audited legacy catalog reuse;
   warm settings/boundary identity, replacement/consume/cold fallback/dispose/stale fencing; serialized settings,
@@ -80,11 +80,11 @@ PR #3 current-head findings and local dispositions:
 
 | Review comment IDs | Disposition |
 | --- | --- |
-| 3981475303, 3981525719 | Fixed at warm-entry identity: immutable file/dir/settings match, safely rebound boundary delegate, stale consumed/replaced/disposed results fenced; sync close failures handled and consume-throw resource closed before cold fallback; mocked lifecycle paths covered. |
+| 3981475303, 3981525719, 3982209348 | Fixed at warm-entry identity: immutable file/dir/settings match, safely rebound boundary delegate, stale consumed/replaced/disposed results fenced; sync close failures handled and consume-throw resource closed before cold fallback; completed prepare error clears only at owned no-warm retry, with readiness left to initialized output; mocked lifecycle paths covered. |
 | 3981475321, 3981525731 | Fixed: session-owned effective settings, serialized updates, rollback after partial failure, fail-closed session on rollback failure; closed send rejects and closed interrupt settles without native control; Stop stays independent. |
 | 3981475312, 3981525775 | Fixed: normalized init MCP snapshot survives refresh rejection and failure is logged. |
 | 3981525724, 3981525785 | Fixed: UUID-only native IDs before path construction; one SDK-free transcript leaf serves legacy wrapper and adapter, preserving filtering/interruption/trailing lines. |
-| 3981525740 | Fixed: invalid/nonfinite/negative native cost preserves known amount as unavailable; every valid cumulative snapshot is authoritative base+native (including a decrease) and recovers reported status. |
+| 3981525740, 3982209342 | Fixed: invalid native cost preserves known amount unavailable; valid cumulative value is exact base+native while explicit fresh/resume provenance retains reported/estimated/unavailable historical confidence. |
 | 3981525759 | Fixed: released descriptions and hints restored exactly; representative schemas tested and legacy catalog reuse source-audited through unchanged old tool/reply flow. |
 | 3981834685 | Fixed: copied allow-list joins warm immutable key and same operation snapshot feeds options; real fixture edits replace prepare cache and force current cold start. |
 | 3981834697 | Fixed: one active-turn identity makes idle/failed/late Stop safe and clears old ownership before result yields; native starts and suspended iterator covered. |

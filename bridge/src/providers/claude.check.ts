@@ -222,6 +222,25 @@ rejected.warmCalls[0].pending.reject(new Error("startup failed"));
 await rejectedStart;
 assert.equal(rejected.coldQueries.length, 1, "failed consumed warm falls back cold");
 
+const failedPrepared = deferred<FakeWarm>();
+const retryQuery = new FakeQuery([
+  { type: "system", subtype: "init", session_id: baseRecord.sessionId, model: "haiku", mcp_servers: [] },
+  { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },
+]);
+const retryNative: Native = { warm: () => failedPrepared.promise, cold: () => retryQuery };
+const retryProvider = new ClaudeProvider({ version: "test", log: () => {}, onPrepared: () => {}, native: retryNative });
+retryProvider.prepare(warmArgs(firstBoundary));
+failedPrepared.reject(new Error("prepare failed"));
+await Promise.resolve();
+assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "unavailable");
+const retrySession = await retryProvider.start({ ...warmArgs(firstBoundary), baseRecord });
+assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting",
+  "owned cold retry clears completed prepare error without claiming readiness");
+const retryOutputs = [];
+for await (const output of retrySession.output) retryOutputs.push(output);
+const retryInitialized = retryOutputs.find(output => output.kind === "initialized");
+assert.equal(retryInitialized?.kind === "initialized" ? retryInitialized.health.status : undefined, "ready");
+
 const consumeThrows = lifecycle();
 consumeThrows.provider.prepare(warmArgs(firstBoundary));
 const unusableWarm = new FakeWarm();
@@ -429,7 +448,7 @@ assert.deepEqual(initialized?.servers, [
 assert.ok(initLogs.some(values => String(values[0]).includes("using init snapshot")));
 assert.deepEqual(outputs.at(-1), {
   kind: "usage", usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0 },
-  cost: { usd: 0.01, status: "reported" }, turnCompleted: true,
+  cost: { usd: 0.01, status: "unavailable" }, turnCompleted: true,
 });
 
 const lateStatus = deferred<{ name: string; status: string }[]>();
@@ -476,7 +495,11 @@ assert.deepEqual(responses.messageDelta({ output_tokens: 8, cache_read_input_tok
   { input: 27, output: 19, cacheRead: 3, cacheWrite: 0 });
 assert.deepEqual(responses.complete({ input_tokens: 22, output_tokens: 12, cache_read_input_tokens: 3 }),
   { input: 27, output: 19, cacheRead: 3, cacheWrite: 0 });
-const resumedCost = new ClaudeCostTracker({ baseUsd: 1.5, baseStatus: "reported" });
+const freshCost = new ClaudeCostTracker({ baseUsd: 0, baseStatus: "unavailable", resumed: false });
+assert.deepEqual(freshCost.snapshot(), { usd: 0, status: "unavailable" });
+assert.deepEqual(freshCost.complete(undefined), { usd: 0, status: "unavailable" });
+assert.deepEqual(freshCost.complete(0.1), { usd: 0.1, status: "reported" });
+const resumedCost = new ClaudeCostTracker({ baseUsd: 1.5, baseStatus: "reported", resumed: true });
 assert.deepEqual(resumedCost.complete(0.1), { usd: 1.6, status: "reported" });
 assert.deepEqual(resumedCost.complete(0.25), { usd: 1.75, status: "reported" }, "cost uses immutable resume baseline");
 for (const invalid of [undefined, Number.NaN, Number.POSITIVE_INFINITY, -1]) {
@@ -485,6 +508,11 @@ for (const invalid of [undefined, Number.NaN, Number.POSITIVE_INFINITY, -1]) {
 assert.deepEqual(resumedCost.complete(0.4), { usd: 1.9, status: "reported" }, "valid native cost recovers reporting");
 assert.deepEqual(resumedCost.complete(0.2), { usd: 1.7, status: "reported" },
   "each valid native cumulative snapshot replaces rather than max-clamps");
+const unavailableResume = new ClaudeCostTracker({ baseUsd: 0, baseStatus: "unavailable", resumed: true });
+assert.deepEqual(unavailableResume.complete(0.2), { usd: 0.2, status: "unavailable" },
+  "zero-turn crashed resume cannot invent historical provenance");
+const estimatedResume = new ClaudeCostTracker({ baseUsd: 2, baseStatus: "estimated", resumed: true });
+assert.deepEqual(estimatedResume.complete(0.3), { usd: 2.3, status: "estimated" });
 
 const nativeSession = "11111111-1111-4111-8111-111111111111";
 const session = { provider: "claude" as const, sessionId: nativeSession };

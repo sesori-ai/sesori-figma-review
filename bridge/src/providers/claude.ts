@@ -138,8 +138,10 @@ export class ClaudeUsageTracker {
 export class ClaudeCostTracker {
   private readonly baseUsd: number;
   private current: { usd: number; status: CostStatus };
-  constructor(args: { baseUsd: number; baseStatus: CostStatus }) {
+  private readonly validStatus: CostStatus;
+  constructor(args: { baseUsd: number; baseStatus: CostStatus; resumed: boolean }) {
     this.baseUsd = args.baseUsd;
+    this.validStatus = args.resumed ? args.baseStatus : "reported";
     this.current = { usd: args.baseUsd, status: args.baseStatus };
   }
   complete(nativeCumulativeUsd: unknown) {
@@ -147,7 +149,7 @@ export class ClaudeCostTracker {
       this.current = { usd: this.current.usd, status: "unavailable" };
       return this.snapshot();
     }
-    this.current = { usd: this.baseUsd + nativeCumulativeUsd, status: "reported" };
+    this.current = { usd: this.baseUsd + nativeCumulativeUsd, status: this.validStatus };
     return this.snapshot();
   }
   snapshot() { return { ...this.current }; }
@@ -300,6 +302,7 @@ class ClaudeSession implements ReviewSession {
     push: (message: SDKUserMessage | null) => void;
     baseRecord: ProviderSessionRecord;
     settings: ProviderSettings;
+    resumed: boolean;
     mcpStatusTimeoutMs: number;
     log: (...values: unknown[]) => void;
   }) {
@@ -311,7 +314,11 @@ class ClaudeSession implements ReviewSession {
     this.output = (async function* () {
       let sessionId = "";
       const usage = new ClaudeUsageTracker({ committed: { ...args.baseRecord.usage } });
-      const cost = new ClaudeCostTracker({ baseUsd: args.baseRecord.costUsd, baseStatus: args.baseRecord.costStatus });
+      const cost = new ClaudeCostTracker({
+        baseUsd: args.baseRecord.costUsd,
+        baseStatus: args.baseRecord.costStatus,
+        resumed: args.resumed,
+      });
       const display = new ClaudeDisplayMapper();
       for await (const sdkMessage of self.query) {
         const message = object(sdkMessage);
@@ -558,6 +565,10 @@ export class ClaudeProvider implements ReviewProvider {
       }
       this.closeWarm(warm, "incompatible warm query");
     }
+    if (!warm && this.runtime?.error) {
+      this.runtime = undefined;
+      this.args.onPrepared();
+    }
     nativeQuery ??= this.native.cold({
       prompt: input.stream,
       options: options({ ...startArgs, version: this.args.version, log: this.args.log }),
@@ -567,6 +578,7 @@ export class ClaudeProvider implements ReviewProvider {
       push: input.push,
       baseRecord: args.baseRecord,
       settings: args.settings,
+      resumed: !!args.resume,
       mcpStatusTimeoutMs: this.args.mcpStatusTimeoutMs ?? MCP_STATUS_TIMEOUT_MS,
       log: this.args.log,
     });
