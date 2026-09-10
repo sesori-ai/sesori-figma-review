@@ -1,8 +1,9 @@
 // UI iframe: the only user-facing surface. WebSocket client to the bridge, chat renderer, and relay
 // between the bridge and the sandbox (tool calls go down to code.ts, replies come back up).
 import { marked } from "marked";
-import { BRIDGE_PORT, PROTOCOL_VERSION, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type ReviewEvent, type SessionRecord, type SessionRef, type Settings, type UpMsg } from "../../shared/protocol.ts";
+import { BRIDGE_PORT, PROTOCOL_VERSION, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type ReviewEvent, type SessionRecord, type SessionRef, type UpMsg } from "../../shared/protocol.ts";
 import { eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
+import { ConnectionAdmission, SettingsControl } from "./ui-state.ts";
 import { ConversationView } from "./view-control.ts";
 import { decodeBridgeMessage } from "./wire.ts";
 
@@ -19,8 +20,10 @@ let sessions: SessionRecord[] = [];
 let pendingAsk: { id: string; answer: (text: string) => void; cancel: (reason?: string) => void } | undefined;
 let opened: SessionRecord | undefined;
 let health: Health | undefined;
-let protocolReady = false;
+let busy = false;
 let intentCounter = 0;
+const admission = new ConnectionAdmission();
+const settingsControl = new SettingsControl();
 const view = new ConversationView();
 const items = new Map<string, { element: HTMLElement; markdown: string }>();
 
@@ -78,12 +81,12 @@ window.onmessage = (e: MessageEvent) => {
 function connect() {
   ws = new WebSocket(`ws://localhost:${BRIDGE_PORT}`);
   ws.onopen = () => {
-    protocolReady = false;
+    admission.opened();
     offline.remove(); setStatus("checking bridge protocol…", "warn");
     send({ kind: "hello", protocolVersion: PROTOCOL_VERSION, fileId: ctx.fileId, fileName: ctx.fileName });
   };
   ws.onclose = () => {
-    protocolReady = false;
+    admission.disconnected();
     view.disconnect({ reason: "Bridge disconnected" });
     pendingAsk = undefined; footer.hidden = false; renderBusy(false);
     chat.prepend(offline); setStatus("bridge offline", "bad"); setTimeout(connect, 2000);
@@ -93,7 +96,7 @@ function connect() {
     let raw: unknown;
     try { raw = JSON.parse(e.data); } catch { return protocolMismatch(); }
     const message = decodeBridgeMessage(raw);
-    if (!message || (!protocolReady && message.kind !== "connection")) return protocolMismatch();
+    if (!message || (!admission.ready && message.kind !== "connection")) return protocolMismatch();
     onDown(message);
   };
 }
@@ -105,36 +108,35 @@ function protocolMismatch() {
   setStatus("plugin/bridge protocol mismatch", "bad");
   ws?.close();
 }
-function renderBusy(busy: boolean) {
-  stopBtn.hidden = !busy; $("btn-flow").hidden = busy;
+function renderBusy(value: boolean) {
+  busy = value; stopBtn.hidden = !busy; $("btn-flow").hidden = busy;
   if (busy) { empty.remove(); chat.append(working); chat.scrollTop = chat.scrollHeight; } else working.remove();
 }
 
 function onDown(m: DownMsg) {
   switch (m.kind) {
     case "connection": {
-      protocolReady = true; drift.remove();
+      admission.acknowledge(); drift.remove();
       const previous = view.session;
       const reconciled = view.reconcile({ intentId: m.intentId, session: m.session });
       notifyCancelled(reconciled.cancelled.length);
+      if (reconciled.cancelledStart) bubble("error", "The pending start was cancelled before the bridge accepted it. Send it again if needed.");
       if (m.session?.sessionId) renderCost(m.session);
       for (const queued of reconciled.queued) send({ kind: "user", ...queued });
       renderBusy(m.busy); setStatus("connected to bridge", "warn");
-      if (!m.session && !m.intentId && previous?.sessionId) {
-        const intentId = `history-${Date.now().toString(36)}-${++intentCounter}`;
-        const session = { provider: previous.provider, sessionId: previous.sessionId };
-        view.beginHistory({ intentId, session });
-        send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session });
-      }
+      const attachedChanged = m.session?.sessionId && (!previous || previous.provider !== m.session.provider || previous.sessionId !== m.session.sessionId);
+      if (attachedChanged) requestHistory(m.session!, true);
+      else if (!m.session && !m.intentId && previous?.sessionId) requestHistory(previous, true);
       return;
     }
     case "health": return renderHealth(m.health);
     case "sessions": sessions = m.sessions; if (!sessionsEl.hidden) renderSessions(); return;
     case "started": {
-      const queued = view.confirm({ intentId: m.intentId, session: m.session });
-      if (!queued) return;
+      const confirmed = view.confirm({ intentId: m.intentId, session: m.session });
+      if (!confirmed) return;
       renderCost(m.session);
-      for (const input of queued) send({ kind: "user", ...input });
+      for (const queued of confirmed.inputs) send({ kind: "user", ...queued });
+      if (confirmed.adopted) requestHistory(m.session, true);
       return;
     }
     case "session": if (view.update(m.session)) renderCost(m.session); return;
@@ -151,6 +153,8 @@ function onDown(m: DownMsg) {
 function renderHealth(h: Health) {
   health = h;
   const providerId = view.session?.provider ?? h.selectedProvider;
+  const settingState = settingsControl.acceptHealth({ health: h, provider: providerId });
+  if (settingState.error) bubble("error", `Settings update failed: ${settingState.error}`);
   const provider = h.providers.find(item => item.provider === providerId);
   const mcp = h.figmaMcp === "up" ? "Figma MCP up" : "Figma MCP off";
   const failed = (h.servers ?? []).filter(s => s.status !== "connected").map(s => `${s.name}: ${s.status}${s.error ? ` (${s.error})` : ""}`);
@@ -158,7 +162,7 @@ function renderHealth(h: Health) {
   const error = h.error ?? provider?.error;
   setStatus(error ?? `${providerName} ${provider?.version ?? provider?.status ?? "starting…"}${provider?.model ? ` · ${provider.model.replace(/^claude-/, "")}` : ""} · ${mcp}`, error ? "bad" : h.figmaMcp === "up" && !failed.length ? "ok" : "warn");
   statusEl.title = [h.figmaMcp === "up" ? "" : "Figma desktop MCP server is off: Dev Mode → inspect panel → Enable desktop MCP server. The review still works without it.", ...failed].filter(Boolean).join("\n");
-  const settings = h.settings.providers[providerId];
+  const settings = settingState.settings;
   const choices = providerSettingOptions({ health: provider, settings });
   modelSel.replaceChildren(...choices.models.map(model => new Option(model.label, model.value)));
   effortSel.replaceChildren(...choices.efforts.map(effort => new Option(effort.label, effort.value)));
@@ -175,7 +179,7 @@ function renderCost(s: SessionRecord) {
 
 // ---- provider-neutral activity -------------------------------------------
 function onEvent(event: ReviewEvent) {
-  if (!eventBelongsToSession({ event, session: view.session })) return;
+  if (view.bufferEvent(event) || !eventBelongsToSession({ event, session: view.session })) return;
   if (event.type === "text_start") {
     items.set(event.itemId, { element: assistant(""), markdown: "" });
   } else if (event.type === "text_delta") {
@@ -229,6 +233,12 @@ function permissionCard(id: string, tool: string, input: Record<string, unknown>
   card.append(ctl);
 }
 
+function requestHistory(session: SessionRef, retainSession = false) {
+  const intentId = `history-${Date.now().toString(36)}-${++intentCounter}`;
+  view.beginHistory({ intentId, session, retainSession });
+  send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session });
+}
+
 function renderSessions() {
   sessionsEl.innerHTML = "";
   sessionsEl.append(el("h4", "", "History"));
@@ -239,10 +249,7 @@ function renderSessions() {
     title.append(el("b", "", s.title), el("span", "", `${provider} · ${s.pageName} · ${s.updatedAt.slice(0, 16).replace("T", " ")} · ${sessionCostLabel({ session: s, precision: 2 })} · ${s.turns} turn${s.turns === 1 ? "" : "s"}`));
     row.append(title, btn("Open", () => {
       leaveView("Opened a History session");
-      const intentId = `history-${Date.now().toString(36)}-${++intentCounter}`;
-      const session = { provider: s.provider, sessionId: s.sessionId };
-      view.beginHistory({ intentId, session }); sessionsEl.hidden = true;
-      send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session });
+      requestHistory(s); sessionsEl.hidden = true;
     }));
     sessionsEl.append(row);
   }
@@ -252,17 +259,14 @@ function renderSessions() {
 const pushSettings = () => {
   if (!health) return;
   const provider = view.session?.provider ?? health.selectedProvider;
-  const settings: Settings = {
-    ...health.settings,
-    providers: { ...health.settings.providers, [provider]: { model: modelSel.value, effort: effortSel.value } },
-  };
-  send({ kind: "settings", settings });
+  send(settingsControl.request({ provider, settings: { model: modelSel.value, effort: effortSel.value } }));
 };
 modelSel.onchange = effortSel.onchange = pushSettings;
 $("btn-settings").onclick = () => { settingsEl.hidden = !settingsEl.hidden; sessionsEl.hidden = true; };
 
 // ---- composer -------------------------------------------------------------
 function start(anchor: Anchor, text: string, resume?: SessionRef) {
+  if (!admission.admit({ onBlocked: () => toMain({ kind: "notify", text: "Wait for the bridge connection, then send again." }) })) return;
   if (view.starting) return;
   const intentId = `${Date.now().toString(36)}-${++intentCounter}`;
   view.begin({ intentId, retainSession: !!resume });
@@ -273,20 +277,24 @@ function start(anchor: Anchor, text: string, resume?: SessionRef) {
 }
 /** History → Open: show the past conversation; the session itself is resumed by the next message. */
 function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
-  if (!view.confirmHistory({ intentId: m.intentId, session: m.session })) return;
+  const confirmed = view.confirmHistory({ intentId: m.intentId, session: m.session });
+  if (!confirmed) return;
   clearChat();
-  renderCost(m.session);
-  opened = m.attached ? undefined : m.session;
+  renderCost(confirmed.session);
+  opened = m.attached ? undefined : confirmed.session;
   for (const h of m.messages) {
     if (h.role === "tool") h.name === "stopped" ? bubble("chip stopped", "Stopped") : chip(h.name, h.input);
     else if (h.role === "assistant") assistant(md(h.text));
     else bubble("msg user", h.text); // user message or ask_user answer
   }
+  for (const event of confirmed.events) onEvent(event);
+  if (busy) chat.append(working);
   chat.scrollTop = chat.scrollHeight;
 }
 function submit() {
   const text = input.value.trim();
   if (!text) return;
+  if (!admission.admit({ onBlocked: () => toMain({ kind: "notify", text: "Still connecting to the bridge. Your message is kept here." }) })) return;
   input.value = ""; autosize();
   if (view.starting) { bubble("msg user", text); view.queue({ text, selection: [...ctx.selection] }); return; }
   if (!view.session) return start({ type: "page", nodeIds: [] }, text);

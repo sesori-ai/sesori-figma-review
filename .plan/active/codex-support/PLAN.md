@@ -2,7 +2,8 @@
 
 Status: Steps 1 and 2 squash-merged as `232048a` and `ece1379d6768ecc032d6f030933034007d357910`. Older cutover
 checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not merged.
-Step 3 normalized activation is implemented and locally validated, awaiting parent review/publication.
+Step 3's first implementation review rejected the checkpoint. Parent-qualified fixes are implemented locally;
+a fresh independent review remains required before publication.
 
 ## Goal and locked user direction
 
@@ -250,7 +251,9 @@ installers, and Windows support is out of scope. Preserve the existing automatic
 ## Implementation series
 
 Soft cap: 1,500 changed lines per PR including tests, moves, generated files and docs. These are estimates, not a
-reason to compress code or skip parity. If a slice grows beyond its coherent boundary, update the fixed series
+reason to compress code or skip parity. Parent approved a Step-3-only ceiling of 2,100 because atomic activation
+requires deterministic production-seam proof for demonstrated settings/start/reconnect/terminal ownership failures;
+this exception does not apply to later steps. If a slice grows beyond its coherent boundary, update the fixed series
 before opening it. No bulk vendoring of the 847-file generated protocol: use a focused validated projection and
 reproducible inspection against the qualified schema. No hand edits to generated files.
 

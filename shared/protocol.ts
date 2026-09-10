@@ -59,6 +59,7 @@ export type Health = {
   settings: Settings;
   providers: ProviderHealth[];
   servers?: { name: string; status: string; error?: string }[];
+  settingsResult?: { requestId: string; accepted: boolean; error?: string };
   error?: string;
 };
 
@@ -96,7 +97,13 @@ export type UpMsg =
   | { kind: "reply"; id: string; result: ToolResult | PermissionDecision }
   | { kind: "interrupt" }
   | { kind: "close"; reason: string }
-  | { kind: "settings"; settings: Settings }
+  | {
+      kind: "settings";
+      requestId: string;
+      provider: ProviderId;
+      settings: ProviderSettings;
+      selectedProvider?: ProviderId;
+    }
   | { kind: "health" };
 
 // ---- bridge -> plugin -------------------------------------------------------

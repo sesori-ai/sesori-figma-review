@@ -1,8 +1,8 @@
-import type { NodeRef, SessionRecord, SessionRef } from "../../shared/protocol.ts";
+import type { NodeRef, ReviewEvent, SessionRecord, SessionRef } from "../../shared/protocol.ts";
 
 export type QueuedInput = { text: string; selection: NodeRef[] };
-type StartIntent = { kind: "start"; id: string; inputs: QueuedInput[] };
-type HistoryIntent = { kind: "history"; id: string; session: SessionRef };
+type StartIntent = { kind: "start"; id: string; inputs: QueuedInput[]; adopted: boolean };
+type HistoryIntent = { kind: "history"; id: string; session: SessionRef; events: ReviewEvent[]; latest?: SessionRecord };
 type ViewIntent = StartIntent | HistoryIntent;
 const sameSession = (left: SessionRecord, right: SessionRecord) =>
   left.provider === right.provider && left.sessionId === right.sessionId;
@@ -18,48 +18,65 @@ export class ConversationView {
 
   begin(args: { intentId: string; retainSession: boolean }) {
     this.cancelCards({ reason: "Session replaced" });
-    this.intent = { kind: "start", id: args.intentId, inputs: [] };
+    this.intent = { kind: "start", id: args.intentId, inputs: [], adopted: false };
     if (!args.retainSession) this.current = undefined;
   }
-  beginHistory(args: { intentId: string; session: SessionRef }) {
-    this.intent = { kind: "history", id: args.intentId, session: args.session };
-    this.current = undefined;
+  beginHistory(args: { intentId: string; session: SessionRef; retainSession?: boolean }) {
+    this.intent = { kind: "history", id: args.intentId, session: args.session, events: [] };
+    if (!args.retainSession) this.current = undefined;
   }
   queue(input: QueuedInput) { if (this.intent?.kind === "start") this.intent.inputs.push(input); }
-  confirm(args: { intentId: string; session: SessionRecord }): QueuedInput[] | undefined {
+  confirm(args: { intentId: string; session: SessionRecord }): { inputs: QueuedInput[]; adopted: boolean } | undefined {
     if (this.intent?.kind !== "start" || this.intent.id !== args.intentId) return;
-    const queued = this.intent.inputs;
+    const result = { inputs: this.intent.inputs, adopted: this.intent.adopted };
     this.intent = undefined;
     this.current = args.session;
-    return queued;
+    return result;
   }
-  confirmHistory(args: { intentId: string; session: SessionRecord }): boolean {
-    if (this.intent?.kind !== "history" || this.intent.id !== args.intentId) return false;
+  confirmHistory(args: { intentId: string; session: SessionRecord }): { events: ReviewEvent[]; session: SessionRecord } | undefined {
+    if (this.intent?.kind !== "history" || this.intent.id !== args.intentId) return;
+    const result = { events: this.intent.events, session: this.intent.latest ?? args.session };
     this.intent = undefined;
-    this.current = args.session;
+    this.current = result.session;
+    return result;
+  }
+  bufferEvent(event: ReviewEvent): boolean {
+    if (this.intent?.kind !== "history" || !this.current || event.session.provider !== this.current.provider
+      || event.session.sessionId !== this.current.sessionId) return false;
+    this.intent.events.push(event);
     return true;
   }
   /** Reconcile one authoritative connection snapshot without retrying lost work. */
-  reconcile(args: { intentId?: string; session?: SessionRecord }): { queued: QueuedInput[]; cancelled: QueuedInput[] } {
-    const cancelled: QueuedInput[] = [];
+  reconcile(args: { intentId?: string; session?: SessionRecord }): {
+    queued: QueuedInput[];
+    cancelled: QueuedInput[];
+    adoptedStart: boolean;
+    cancelledStart: boolean;
+  } {
+    const result = { queued: [] as QueuedInput[], cancelled: [] as QueuedInput[], adoptedStart: false, cancelledStart: false };
     if (this.intent?.kind === "start") {
       if (args.intentId === this.intent.id) {
-        if (!args.session?.sessionId) return { queued: [], cancelled };
-        return { queued: this.confirm({ intentId: this.intent.id, session: args.session }) ?? [], cancelled };
+        if (!args.session?.sessionId) return result;
+        const confirmed = this.confirm({ intentId: this.intent.id, session: args.session });
+        result.queued = confirmed?.inputs ?? [];
+        return result;
       }
-      cancelled.push(...this.intent.inputs);
+      result.cancelled.push(...this.intent.inputs);
+      result.cancelledStart = true;
       this.intent = undefined;
     } else if (this.intent?.kind === "history") this.intent = undefined;
     if (args.session?.sessionId) this.current = args.session;
-    else if (args.intentId && args.session) {
+    else if (args.intentId) {
       this.current = undefined;
-      this.intent = { kind: "start", id: args.intentId, inputs: [] };
+      this.intent = { kind: "start", id: args.intentId, inputs: [], adopted: true };
+      result.adoptedStart = true;
     }
-    return { queued: [], cancelled };
+    return result;
   }
   update(session: SessionRecord): boolean {
     if (!this.current || !sameSession(this.current, session)) return false;
     this.current = session;
+    if (this.intent?.kind === "history") this.intent.latest = session;
     return true;
   }
   disconnect(args: { reason: string }) { this.cancelCards(args); }

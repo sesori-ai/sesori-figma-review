@@ -11,7 +11,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
-| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Implemented and independently validated on local `codex-support-step-3`; awaiting parent review/publication |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Initial implementation review rejected; parent-qualified fixes implemented locally; fresh independent review required |
 | 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
@@ -39,6 +39,13 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - Step 3 live activation smoke used Claude Haiku/low, isolated home/free port and four-turn/$0.10 process limits.
   It proved busy steering through a question card, Stop cancellation, idle reconnect, native history, and nonzero
   cumulative usage/cost after resume through a recreated bridge/query process.
+- First Step 3 review disposition: accepted provider-change derivation, handshake admission, and production-seam
+  evidence findings. Qualified the settings finding: simple model→effort DOM edits were already correct, while stale
+  health replacement and concurrent whole-document persistence were real. Parent also required pending-start/fresh
+  attachment history and terminal ownership fixes. Deterministic tests now use ordinary dependency injection through
+  the production receive/onUp/pump paths; fresh independent review remains pending.
+- Parent approved a Step-3-only 2,100-line ceiling because these demonstrated atomic-cutover failures and their
+  integration proof cannot safely fit the normal 1,500 soft cap. The exception does not apply to later steps.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
 
