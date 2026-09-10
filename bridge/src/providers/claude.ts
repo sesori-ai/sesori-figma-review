@@ -9,6 +9,7 @@ import {
   type ProviderHealth,
   type ProviderSettings,
   type ReviewEvent,
+  type SessionRecord,
   type SessionRef,
   type Usage,
 } from "../../../shared/protocol.ts";
@@ -38,6 +39,23 @@ export const addClaudeUsage = (total: Usage, value: unknown): Usage => {
     cacheWrite: total.cacheWrite + number(usage?.cache_creation_input_tokens),
   };
 };
+const sumUsage = (left: Usage, right: Usage): Usage => ({
+  input: left.input + right.input,
+  output: left.output + right.output,
+  cacheRead: left.cacheRead + right.cacheRead,
+  cacheWrite: left.cacheWrite + right.cacheWrite,
+});
+
+/** Live stream values are provisional per turn; final result usage commits once without double counting. */
+export class ClaudeUsageTracker {
+  private turn = zeroUsage();
+  private committed: Usage;
+  constructor(args: { committed: Usage }) { this.committed = args.committed; }
+  messageStart(value: unknown): Usage { this.turn = addClaudeUsage(this.turn, value); return this.snapshot(); }
+  messageDelta(value: unknown): Usage { this.turn = addClaudeUsage(this.turn, value); return this.snapshot(); }
+  complete(value: unknown): Usage { this.committed = addClaudeUsage(this.committed, value); this.turn = zeroUsage(); return this.snapshot(); }
+  snapshot(): Usage { return sumUsage(this.committed, this.turn); }
+}
 
 function userMessage(args: { text: string; selection: NodeRef[]; context?: string }): SDKUserMessage {
   const selection = args.selection.length ? args.selection.map(n => `${n.name} (${n.type} ${n.id})`).join(", ") : "none";
@@ -104,49 +122,59 @@ function options(args: {
 
 function ref(args: { sessionId: string }): SessionRef { return { provider: "claude", sessionId: args.sessionId }; }
 
-function displayEvents(args: { message: unknown; sessionId: string; interrupted: boolean }): ReviewEvent[] {
-  const message = object(args.message);
-  if (!message || !args.sessionId) return [];
-  const session = ref({ sessionId: args.sessionId });
-  const type = message.type;
-  if (type === "stream_event" && !message.parent_tool_use_id) {
-    const event = object(message.event);
-    const eventType = event?.type;
-    const index = number(event?.index);
-    const itemId = `${typeof message.uuid === "string" ? message.uuid : "stream"}:${index}`;
-    if (eventType === "content_block_start" && object(event?.content_block)?.type === "text") return [{ type: "text_start", session, itemId }];
-    const delta = object(event?.delta);
-    if (eventType === "content_block_delta" && delta?.type === "text_delta" && typeof delta.text === "string") {
-      return [{ type: "text_delta", session, itemId, text: delta.text }];
-    }
-    if (eventType === "content_block_stop") return [{ type: "text_end", session, itemId }];
-  }
-  if (type === "assistant") {
-    const content = object(message.message)?.content;
-    const events: ReviewEvent[] = [];
-    for (const blockValue of Array.isArray(content) ? content : []) {
-      const block = object(blockValue);
-      if (block?.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
-        events.push({ type: "tool", session, itemId: block.id, name: block.name, input: object(block.input) ?? {} });
+export class ClaudeDisplayMapper {
+  private messageId?: string;
+
+  map(args: { message: unknown; sessionId: string; interrupted: boolean }): ReviewEvent[] {
+    const message = object(args.message);
+    if (!message || !args.sessionId) return [];
+    const session = ref({ sessionId: args.sessionId });
+    const type = message.type;
+    if (type === "stream_event" && !message.parent_tool_use_id) {
+      const event = object(message.event);
+      const eventType = event?.type;
+      if (eventType === "message_start") {
+        const id = object(event?.message)?.id;
+        this.messageId = typeof id === "string" ? id : undefined;
+        return [];
       }
+      if (eventType === "message_stop") { this.messageId = undefined; return []; }
+      if (!this.messageId) return [];
+      const itemId = `${args.sessionId}:${this.messageId}:${number(event?.index)}`;
+      if (eventType === "content_block_start" && object(event?.content_block)?.type === "text") return [{ type: "text_start", session, itemId }];
+      const delta = object(event?.delta);
+      if (eventType === "content_block_delta" && delta?.type === "text_delta" && typeof delta.text === "string") {
+        return [{ type: "text_delta", session, itemId, text: delta.text }];
+      }
+      if (eventType === "content_block_stop") return [{ type: "text_end", session, itemId }];
     }
-    if (message.error) events.push({ type: "error", session, itemId: `error:${Date.now()}`, message: `Claude error: ${String(message.error)}` });
-    return events;
+    if (type === "assistant") {
+      const content = object(message.message)?.content;
+      const events: ReviewEvent[] = [];
+      for (const blockValue of Array.isArray(content) ? content : []) {
+        const block = object(blockValue);
+        if (block?.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
+          events.push({ type: "tool", session, itemId: block.id, name: block.name, input: object(block.input) ?? {} });
+        }
+      }
+      if (message.error) events.push({ type: "error", session, itemId: `error:${Date.now()}`, message: `Claude error: ${String(message.error)}` });
+      return events;
+    }
+    if (type === "system" && message.subtype === "status" && message.status === "compacting") {
+      return [{ type: "status", session, itemId: `status:${Date.now()}`, text: "Compacting context…" }];
+    }
+    if (type === "result") {
+      const failed = message.is_error === true;
+      return [{
+        type: "turn_end",
+        session,
+        itemId: `turn:${Date.now()}`,
+        outcome: args.interrupted ? "interrupted" : failed ? "failed" : "completed",
+        message: failed && !args.interrupted ? String(message.result ?? message.subtype ?? "Claude turn failed") : undefined,
+      }];
+    }
+    return [];
   }
-  if (type === "system" && message.subtype === "status" && message.status === "compacting") {
-    return [{ type: "status", session, itemId: `status:${Date.now()}`, text: "Compacting context…" }];
-  }
-  if (type === "result") {
-    const failed = message.is_error === true;
-    return [{
-      type: "turn_end",
-      session,
-      itemId: `turn:${Date.now()}`,
-      outcome: args.interrupted ? "interrupted" : failed ? "failed" : "completed",
-      message: failed && !args.interrupted ? String(message.result ?? message.subtype ?? "Claude turn failed") : undefined,
-    }];
-  }
-  return [];
 }
 
 class ClaudeSession implements ReviewSession {
@@ -154,11 +182,15 @@ class ClaudeSession implements ReviewSession {
   readonly output: AsyncIterable<ProviderOutput>;
   private interrupted = false;
 
-  constructor(private readonly query: Query, private readonly push: (message: SDKUserMessage | null) => void, baseUsage: Usage, baseCost: number) {
+  constructor(args: { query: Query; push: (message: SDKUserMessage | null) => void; baseRecord: SessionRecord }) {
+    this.query = args.query;
+    this.push = args.push;
     const self = this;
     this.output = (async function* () {
       let sessionId = "";
-      let usage = baseUsage;
+      const usage = new ClaudeUsageTracker({ committed: args.baseRecord.usage });
+      const display = new ClaudeDisplayMapper();
+      let confirmedCost = { usd: args.baseRecord.costUsd, status: args.baseRecord.costStatus };
       for await (const sdkMessage of self.query) {
         const message = object(sdkMessage);
         if (message?.type === "system" && message.subtype === "init" && typeof message.session_id === "string") {
@@ -177,13 +209,21 @@ class ClaudeSession implements ReviewSession {
             servers: servers.map(server => ({ name: server.name, status: server.status, error: server.error })),
           };
         }
-        for (const event of displayEvents({ message: sdkMessage, sessionId, interrupted: self.interrupted })) yield { kind: "event", event };
+        for (const event of display.map({ message: sdkMessage, sessionId, interrupted: self.interrupted })) yield { kind: "event", event };
+        if (message?.type === "stream_event") {
+          const event = object(message.event);
+          const streamUsage = event?.type === "message_start" ? object(event.message)?.usage : event?.type === "message_delta" ? event.usage : undefined;
+          if (streamUsage) {
+            const snapshot = event?.type === "message_start" ? usage.messageStart(streamUsage) : usage.messageDelta(streamUsage);
+            yield { kind: "usage", usage: snapshot, cost: confirmedCost, turnCompleted: false };
+          }
+        }
         if (message?.type === "result") {
-          usage = addClaudeUsage(usage, message.usage);
+          confirmedCost = { usd: args.baseRecord.costUsd + number(message.total_cost_usd), status: "reported" };
           yield {
             kind: "usage",
-            usage,
-            cost: { usd: baseCost + number(message.total_cost_usd), status: "reported" },
+            usage: usage.complete(message.usage),
+            cost: confirmedCost,
             turnCompleted: true,
           };
           self.interrupted = false;
@@ -191,6 +231,9 @@ class ClaudeSession implements ReviewSession {
       }
     })();
   }
+
+  private readonly query: Query;
+  private readonly push: (message: SDKUserMessage | null) => void;
 
   send(args: { text: string; selection: NodeRef[]; context?: string }) { this.push(userMessage(args)); }
   async interrupt() { this.interrupted = true; await this.query.interrupt(); }
@@ -241,7 +284,7 @@ export class ClaudeProvider implements ReviewProvider {
     resume?: string;
     settings: ProviderSettings;
     boundary: ProviderRequestBoundary;
-    baseRecord: { usage: Usage; costUsd: number };
+    baseRecord: SessionRecord;
   }): Promise<ReviewSession> {
     const input = inputStream();
     let sdkQuery: Query | undefined;
@@ -251,7 +294,7 @@ export class ClaudeProvider implements ReviewProvider {
       try { sdkQuery = (await warm.query).query(input.stream); } catch (error) { this.args.log("pre-warmed query unusable, starting cold", error); }
     }
     sdkQuery ??= query({ prompt: input.stream, options: options({ ...args, version: this.args.version, log: this.args.log }) });
-    return new ClaudeSession(sdkQuery, input.push, args.baseRecord.usage, args.baseRecord.costUsd);
+    return new ClaudeSession({ query: sdkQuery, push: input.push, baseRecord: args.baseRecord });
   }
 
   readHistory(args: { dir: string; sessionId: string }): HistoryItem[] { return readClaudeTranscript(args); }
@@ -296,4 +339,4 @@ export function readClaudeTranscript(args: { dir: string; sessionId: string }): 
   return out;
 }
 
-export { displayEvents as normalizeClaudeDisplayEvents, zeroUsage as zeroClaudeUsage };
+export { zeroUsage as zeroClaudeUsage };

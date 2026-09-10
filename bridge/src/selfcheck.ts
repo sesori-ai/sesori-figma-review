@@ -7,7 +7,8 @@ import { join } from "node:path";
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "figma-review-"));
 process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "claude-config-"));
 const { installPlugin, readAllow, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
-const { addClaudeUsage, normalizeClaudeDisplayEvents, readClaudeTranscript } = await import("./providers/claude.ts");
+const { addClaudeUsage, ClaudeDisplayMapper, ClaudeUsageTracker, readClaudeTranscript } = await import("./providers/claude.ts");
+const { applyRequestCancellation, canConsumeOwnedReply, requestOwnerIsActive } = await import("./request-policy.ts");
 
 const manifest = installPlugin(); // needs a plugin build; tolerate its absence so `check` also runs before `build`
 if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"') && readFileSync(join(process.env.SESORI_REVIEW_HOME, "plugin/dist/ui.html"), "utf8").includes("Sesori Review"), "plugin is copied next to the workspaces");
@@ -73,17 +74,46 @@ assert.deepEqual(readSessions(dir).map(session => [session.provider, session.ses
 writeFileSync(join(dir, "sessions.json"), JSON.stringify([{ ...legacy, provider: "future" }]));
 assert.throws(() => readSessions(dir), /Unsupported provider "future"/, "unknown session provider is never sent to Claude");
 
-// Claude adapter owns cumulative process accounting and normalized display projection.
+// Live stream usage changes before result; final per-turn totals replace provisional values without double counting.
 let usage = addClaudeUsage(zeroUsage(), { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 });
 usage = addClaudeUsage(usage, { input_tokens: 1, output_tokens: 1 });
 assert.deepEqual(usage, { input: 11, output: 21, cacheRead: 100, cacheWrite: 7 });
+const usageTracker = new ClaudeUsageTracker({ committed: zeroUsage() });
+assert.deepEqual(usageTracker.messageStart({ input_tokens: 10, cache_read_input_tokens: 50 }), { input: 10, output: 0, cacheRead: 50, cacheWrite: 0 });
+assert.deepEqual(usageTracker.messageDelta({ output_tokens: 20 }), { input: 10, output: 20, cacheRead: 50, cacheWrite: 0 });
+assert.deepEqual(usageTracker.complete({ input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 50 }), { input: 10, output: 20, cacheRead: 50, cacheWrite: 0 });
+assert.deepEqual(usageTracker.messageStart({ input_tokens: 2 }), { input: 12, output: 20, cacheRead: 50, cacheWrite: 0 });
+assert.deepEqual(usageTracker.complete({ input_tokens: 2, output_tokens: 3 }), { input: 12, output: 23, cacheRead: 50, cacheWrite: 0 });
+
+// Message id + block index, not changing stream-envelope UUID, correlates text across native responses.
 const session = { provider: "claude" as const, sessionId: "s1" };
-assert.deepEqual(normalizeClaudeDisplayEvents({
-  message: { type: "stream_event", uuid: "m1", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } } },
-  sessionId: "s1", interrupted: false,
-}), [{ type: "text_delta", session, itemId: "m1:0", text: "Hello" }]);
-assert.deepEqual(normalizeClaudeDisplayEvents({
-  message: { type: "assistant", message: { content: [{ type: "tool_use", id: "tool1", name: "mcp__figma__focus", input: { nodeId: "1:2" } }] } },
-  sessionId: "s1", interrupted: false,
-}), [{ type: "tool", session, itemId: "tool1", name: "mcp__figma__focus", input: { nodeId: "1:2" } }]);
+const display = new ClaudeDisplayMapper();
+const map = (message: unknown) => display.map({ message, sessionId: "s1", interrupted: false });
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-1", event: { type: "message_start", message: { id: "msg-a" } } }), []);
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-2", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } }), [
+  { type: "text_start", session, itemId: "s1:msg-a:0" },
+]);
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-3", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } } }), [
+  { type: "text_delta", session, itemId: "s1:msg-a:0", text: "Hello" },
+]);
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-4", event: { type: "content_block_stop", index: 0 } }), [
+  { type: "text_end", session, itemId: "s1:msg-a:0" },
+]);
+map({ type: "stream_event", uuid: "envelope-5", event: { type: "message_stop" } });
+map({ type: "stream_event", uuid: "envelope-6", event: { type: "message_start", message: { id: "msg-b" } } });
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-7", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } })[0],
+  { type: "text_start", session, itemId: "s1:msg-b:0" });
+assert.deepEqual(map({ type: "assistant", message: { content: [{ type: "tool_use", id: "tool1", name: "mcp__figma__focus", input: { nodeId: "1:2" } }] } }), [
+  { type: "tool", session, itemId: "tool1", name: "mcp__figma__focus", input: { nodeId: "1:2" } },
+]);
+
+// Stop cancels one turn's cards but preserves owner for same-session follow-up tools; teardown fences late calls.
+const activeOwners = new Set(["session-owner"]);
+applyRequestCancellation({ activeOwners, owner: "session-owner", scope: "turn" });
+assert.equal(requestOwnerIsActive({ activeOwners, owner: "session-owner" }), true, "focus/ask_user remain available after Stop");
+const currentSocket = {}, replacedSocket = {};
+assert.equal(canConsumeOwnedReply({ activeOwners, owner: "session-owner", requestSocket: currentSocket, replySocket: replacedSocket }), false);
+assert.equal(canConsumeOwnedReply({ activeOwners, owner: "session-owner", requestSocket: currentSocket, replySocket: currentSocket }), true);
+applyRequestCancellation({ activeOwners, owner: "session-owner", scope: "session" });
+assert.equal(requestOwnerIsActive({ activeOwners, owner: "session-owner" }), false, "closed session rejects late tools");
 console.log("selfcheck ok");

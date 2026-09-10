@@ -49,8 +49,17 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   captured and deactivated; async starts use one generation reservation and close stale completions; only absent
   legacy provider tags migrate to Claude while unknown tags fail explicitly. Focused migration/UI assertions added.
   No real Figma rendering claim is made.
-- Post-review-fix Claude smoke passed on isolated port 43061 with Haiku/low and the same $0.10/three-turn bounds:
+- Post-first-review Claude smoke passed on isolated port 43061 with Haiku/low and the same $0.10/three-turn bounds:
   normalized focus round trip, one reported-cost turn, 22,590 tokens and positive $0.0117 cost. Owned fixture removed.
+- Parent audit then found four ordinary-flow regressions. Fixes preserve request-owner activity across Stop, restore
+  provisional live usage without terminal effects/double counting, correlate text through native message id + block
+  index across changing envelope UUIDs, queue startup follow-ups until session identity, and reject foreign-socket
+  replies. Automated fixtures cover each seam. Enhanced Haiku/low smoke on isolated port 43064 proved cancelled
+  `ask_user` → interrupted turn → same-session `focus` follow-up, live tokens while busy, stable confirmed cost,
+  started-block text accumulation, and two final turns: 34,487 tokens, positive $0.0241 cost. Owned fixture removed.
+- Review repairs and required ordinary-flow fixtures bring Step 2 to about 1,650 changed lines, slightly above the
+  1,500 soft cap. Splitting would publish the provider seam with known Stop, usage, stream identity, or startup
+  regressions, so the coherent repair stays in Step 2 rather than omitting proof or shipping a broken intermediary.
 
 ## Qualification gates before user-facing Codex exposure
 

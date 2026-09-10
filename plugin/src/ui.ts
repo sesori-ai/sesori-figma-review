@@ -2,7 +2,7 @@
 // between the bridge and the sandbox (tool calls go down to code.ts, replies come back up).
 import { marked } from "marked";
 import { BRIDGE_PORT, PROTOCOL_VERSION, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type ReviewEvent, type SessionRecord, type SessionRef, type Settings, type UpMsg } from "../../shared/protocol.ts";
-import { eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
+import { composerRoute, drainStartupInputs, eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
 
 declare const __VERSION__: string; // injected by build.mjs from package.json
 const md = (s: string) => marked.parse(s.replace(/</g, "&lt;"), { async: false }) as string; // raw HTML from the model is shown as text
@@ -18,6 +18,8 @@ let sessions: SessionRecord[] = [];
 let pendingAsk: { id: string; answer: (text: string) => void; cancel: (reason?: string) => void } | undefined;
 let opened: SessionRecord | undefined; // session shown via History → Open but not yet resumed
 let health: Health | undefined;
+let starting = false;
+const startupInputs: { text: string; selection: NodeRef[] }[] = [];
 const items = new Map<string, { element: HTMLElement; markdown: string }>();
 const cards = new Map<string, (reason?: string) => void>();
 
@@ -82,14 +84,21 @@ function onDown(m: DownMsg) {
   switch (m.kind) {
     case "health": return renderHealth(m.health);
     case "sessions": sessions = m.sessions; if (!sessionsEl.hidden) renderSessions(); return;
-    case "session": live = m.session; return renderCost(m.session);
+    case "session": {
+      live = m.session; renderCost(m.session);
+      if (starting) {
+        starting = false;
+        for (const queued of drainStartupInputs({ inputs: startupInputs })) send({ kind: "user", ...queued });
+      }
+      return;
+    }
     case "history": return showHistory(m);
     case "tool": return m.tool === "ask_user" ? askCard(m.id, m.args) : toMain(m);
     case "permission": return permissionCard(m.id, m.tool, m.input);
     case "cancel_request": cards.get(m.id)?.(m.reason); cards.delete(m.id); return;
     case "event": return onEvent(m.event);
     case "busy": stopBtn.hidden = !m.busy; $("btn-flow").hidden = m.busy; if (m.busy) { empty.remove(); chat.append(working); chat.scrollTop = chat.scrollHeight; } else { working.remove(); } return;
-    case "error": bubble("error", m.message); return;
+    case "error": starting = false; startupInputs.length = 0; bubble("error", m.message); return;
   }
 }
 
@@ -207,6 +216,8 @@ $("btn-settings").onclick = () => { settingsEl.hidden = !settingsEl.hidden; sess
 
 // ---- composer -------------------------------------------------------------
 function start(anchor: Anchor, text: string, resume?: SessionRef) {
+  if (starting) return;
+  starting = true; startupInputs.length = 0;
   if (!resume) { clearChat(); live = undefined; }
   opened = undefined; settingsEl.hidden = sessionsEl.hidden = true;
   bubble("msg user", text);
@@ -228,9 +239,11 @@ function submit() {
   const text = input.value.trim();
   if (!text) return;
   input.value = ""; autosize();
-  if (!live) return start({ type: "page", nodeIds: [] }, text);
-  if (opened) return start(opened.anchor, text, { provider: opened.provider, sessionId: opened.sessionId }); // first message after Open resumes native session
+  const route = composerRoute({ starting, hasLiveSession: !!live, hasOpenedSession: !!opened });
+  if (route === "start") return start({ type: "page", nodeIds: [] }, text);
+  if (route === "resume") return start(opened!.anchor, text, { provider: opened!.provider, sessionId: opened!.sessionId });
   bubble("msg user", text);
+  if (route === "queue") { startupInputs.push({ text, selection: [...ctx.selection] }); return; }
   send({ kind: "user", text, selection: ctx.selection }); // delivered mid-turn as steering; Stop interrupts
 }
 const autosize = () => { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 120)}px`; };
@@ -243,6 +256,6 @@ $("btn-selection").onclick = () => {
   if (!ctx.selection.length) return toMain({ kind: "notify", text: "Select something first" });
   start({ type: "selection", nodeIds: ctx.selection.map(n => n.id) }, `Review the selected node(s): ${selText()}. Focus each one, assess clarity and dev-readiness, and propose annotations.`);
 };
-$("btn-new").onclick = () => { clearChat(); chat.append(empty); live = undefined; costEl.textContent = ""; settingsEl.hidden = sessionsEl.hidden = true; input.focus(); };
+$("btn-new").onclick = () => { clearChat(); chat.append(empty); live = undefined; starting = false; startupInputs.length = 0; costEl.textContent = ""; settingsEl.hidden = sessionsEl.hidden = true; input.focus(); };
 $("btn-history").onclick = () => { sessionsEl.hidden = !sessionsEl.hidden; settingsEl.hidden = true; if (!sessionsEl.hidden) renderSessions(); };
 stopBtn.onclick = () => send({ kind: "interrupt" });

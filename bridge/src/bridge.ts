@@ -17,6 +17,7 @@ import {
 } from "../../shared/protocol.ts";
 import { ClaudeProvider } from "./providers/claude.ts";
 import type { ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
+import { applyRequestCancellation, canConsumeOwnedReply, requestOwnerIsActive } from "./request-policy.ts";
 import { hasClaudeAuth, installPlugin, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
 
 const emitWarning = process.emitWarning.bind(process); // SDK warns that allowedTools bypasses canUseTool; that is the editable auto-approve list by design
@@ -43,7 +44,7 @@ function ask(args: {
   onDrop: ToolResult | PermissionDecision;
 }): Promise<ToolResult | PermissionDecision> {
   return new Promise(resolve => {
-    if (!activeRequestOwners.has(args.owner)) return resolve(args.onDrop);
+    if (!requestOwnerIsActive({ activeOwners: activeRequestOwners, owner: args.owner })) return resolve(args.onDrop);
     const ws = clients.get(args.fileId);
     if (!live(ws)) return resolve(args.onDrop);
     const id = randomUUID();
@@ -52,14 +53,19 @@ function ask(args: {
   });
 }
 
-function cancelRequests(args: { owner: string; reason: string }) {
-  activeRequestOwners.delete(args.owner);
+function cancelOutstandingRequests(args: { owner: string; reason: string }) {
+  applyRequestCancellation({ activeOwners: activeRequestOwners, owner: args.owner, scope: "turn" });
   for (const [id, request] of pending) {
     if (request.owner !== args.owner) continue;
     pending.delete(id);
     request.resolve(request.onDrop);
     request.ws.send(JSON.stringify({ kind: "cancel_request", id, reason: args.reason } satisfies DownMsg));
   }
+}
+
+function deactivateRequestOwner(args: { owner: string; reason: string }) {
+  applyRequestCancellation({ activeOwners: activeRequestOwners, owner: args.owner, scope: "session" });
+  cancelOutstandingRequests(args);
 }
 
 const disconnected: ToolResult = {
@@ -105,7 +111,7 @@ function prepareProvider(args: { provider: ReviewProvider; fileId: string; dir: 
   for (const [otherKey, otherOwner] of preparedOwners) {
     if (otherKey !== key && otherKey.startsWith(`${args.provider.id}:`)) {
       preparedOwners.delete(otherKey);
-      cancelRequests({ owner: otherOwner, reason: "Another workspace was prepared" });
+      deactivateRequestOwner({ owner: otherOwner, reason: "Another workspace was prepared" });
     }
   }
   const owner = preparedOwners.get(key) ?? randomUUID();
@@ -159,12 +165,12 @@ async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
       baseRecord: record,
     });
   } catch (error) {
-    cancelRequests({ owner, reason: "Session failed to start" });
+    deactivateRequestOwner({ owner, reason: "Session failed to start" });
     if (generation === startGeneration) throw error;
     return;
   }
   if (generation !== startGeneration) {
-    cancelRequests({ owner, reason: "Superseded while starting" });
+    deactivateRequestOwner({ owner, reason: "Superseded while starting" });
     session.close();
     return;
   }
@@ -181,7 +187,7 @@ function endConversation(reason: string) {
   if (!conv) return;
   const current = conv;
   conv = undefined;
-  cancelRequests({ owner: current.owner, reason });
+  deactivateRequestOwner({ owner: current.owner, reason });
   current.session.close();
   send(current.fileId, { kind: "busy", busy: false });
 }
@@ -203,12 +209,16 @@ async function pump(current: Conversation) {
         current.record.usage = output.usage;
         current.record.costUsd = output.cost.usd;
         current.record.costStatus = output.cost.status;
-        if (output.turnCompleted) current.record.turns++;
-        current.record.updatedAt = now();
-        saveSession(current.dir, current.record);
-        send(current.fileId, { kind: "session", session: current.record });
-        send(current.fileId, { kind: "sessions", sessions: readSessions(current.dir) });
-        send(current.fileId, { kind: "busy", busy: false });
+        if (output.turnCompleted) {
+          current.record.turns++;
+          current.record.updatedAt = now();
+          saveSession(current.dir, current.record);
+          send(current.fileId, { kind: "session", session: current.record });
+          send(current.fileId, { kind: "sessions", sessions: readSessions(current.dir) });
+          send(current.fileId, { kind: "busy", busy: false });
+        } else {
+          send(current.fileId, { kind: "session", session: current.record });
+        }
       }
     }
   } catch (error) {
@@ -216,7 +226,7 @@ async function pump(current: Conversation) {
     send(current.fileId, { kind: "error", message: `Session error: ${error instanceof Error ? error.message : String(error)}` });
   } finally {
     if (conv === current) {
-      cancelRequests({ owner: current.owner, reason: "Session ended" });
+      deactivateRequestOwner({ owner: current.owner, reason: "Session ended" });
       conv = undefined;
       send(current.fileId, { kind: "busy", busy: false });
     }
@@ -272,13 +282,14 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
       return send(conv.fileId, { kind: "busy", busy: true });
     case "reply": {
       const request = pending.get(message.id);
+      if (!request || !canConsumeOwnedReply({ activeOwners: activeRequestOwners, owner: request.owner, requestSocket: request.ws, replySocket: ws })) return;
       pending.delete(message.id);
-      request?.resolve(message.result);
+      request.resolve(message.result);
       return;
     }
     case "interrupt":
       if (conv && conv.fileId === ws.fileId) {
-        cancelRequests({ owner: conv.owner, reason: "Turn stopped" });
+        cancelOutstandingRequests({ owner: conv.owner, reason: "Turn stopped" });
         await conv.session.interrupt();
       }
       return;
@@ -291,7 +302,7 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
       if (dir && selected) {
         const key = preparedKey({ provider: selected.id, fileId: ws.fileId! });
         const preparedOwner = preparedOwners.get(key);
-        if (preparedOwner) cancelRequests({ owner: preparedOwner, reason: "Settings changed" });
+        if (preparedOwner) deactivateRequestOwner({ owner: preparedOwner, reason: "Settings changed" });
         preparedOwners.delete(key);
         prepareProvider({ provider: selected, fileId: ws.fileId!, dir, settings: message.settings.providers[message.settings.provider] });
       }

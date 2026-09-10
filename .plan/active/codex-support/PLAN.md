@@ -406,6 +406,11 @@ No unrelated style rewrite, new framework, background service, mobile bridge cha
   model descriptors provider-owned, carry cost provenance through the provider seam, render unavailable cost
   explicitly, capture/deactivate request ownership, reserve asynchronous starts, and reject unknown provider tags.
   Focused checks cover generic selector data, unavailable cost, and migration rejection; parent owns publication.
+- Parent's subsequent Step 2 audit found Stop owner deactivation, terminal-only usage, unstable stream item identity,
+  startup follow-up replacement, and foreign-socket reply acceptance. Local fixes split turn cancellation from owner
+  teardown, restore provisional usage without terminal side effects, key blocks by native message id + index, queue
+  startup steering until session identity, and validate reply socket/owner. Deterministic fixtures plus a bounded
+  Haiku Stop/ask/follow-up smoke cover these ordinary flows.
 - Runtime qualification not run: dynamic image calls, human-wait duration, replay of answers, effective native
   permission profile/config isolation, live settings at a new model invocation, and per-route dollar estimates.
 - If qualification exposes a genuine missing feature, keep the plan blocked and present the concrete gap to the
