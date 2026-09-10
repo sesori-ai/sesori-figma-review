@@ -133,7 +133,9 @@ assert.equal(provider.health({ settings: { model: "haiku", effort: "low" } }).st
 
 type Native = NonNullable<ConstructorParameters<typeof ClaudeProvider>[0]["native"]>;
 type WarmCall = { options: Parameters<Native["warm"]>[0]["options"]; pending: ReturnType<typeof deferred<FakeWarm>> };
-const lifecycle = (coldMessages: unknown[] = [], coldError?: Error, streamError?: Error, closeError?: Error) => {
+const lifecycle = (args: {
+  messages?: unknown[]; coldError?: Error; streamError?: Error; closeError?: Error;
+} = {}) => {
   const warmCalls: WarmCall[] = [], coldQueries: FakeQuery[] = [];
   const coldOptions: Parameters<Native["cold"]>[0]["options"][] = [];
   const native: Native = {
@@ -143,8 +145,8 @@ const lifecycle = (coldMessages: unknown[] = [], coldError?: Error, streamError?
       return pending.promise;
     },
     cold: ({ options }) => {
-      if (coldError) throw coldError;
-      const query = new FakeQuery(coldMessages, [], streamError, closeError);
+      if (args.coldError) throw args.coldError;
+      const query = new FakeQuery(args.messages ?? [], [], args.streamError, args.closeError);
       coldQueries.push(query); coldOptions.push(options); return query;
     },
   };
@@ -215,7 +217,7 @@ try {
 }
 
 const factoryError = new Error("cold factory failed");
-const factoryAttempt = lifecycle([], factoryError);
+const factoryAttempt = lifecycle({ coldError: factoryError });
 await assert.rejects(factoryAttempt.provider.start({ ...warmArgs(allowBoundary("factory")), baseRecord }),
   error => error === factoryError);
 assert.equal(factoryAttempt.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "unavailable");
@@ -250,7 +252,7 @@ assert.equal(currentWarm.queries, 1, "matching warm query is consumed");
 assert.equal(cached.coldQueries.length, 0);
 
 // New prepare/dispose while consumed warm awaits fences stale success and uses a cold query for the requested start.
-const consumed = lifecycle([nativeInit, nativeResult]);
+const consumed = lifecycle({ messages: [nativeInit, nativeResult] });
 consumed.provider.prepare(warmArgs(firstBoundary));
 const consumedStart = consumed.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
 consumed.provider.prepare(warmArgs(reboundBoundary, { model: "sonnet", effort: "low" }));
@@ -266,13 +268,12 @@ assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "lo
 const replacementCallbacks = consumed.callbacks();
 await drain(consumedSession.output);
 assert.equal(consumed.callbacks(), replacementCallbacks, "superseded session init/terminal cannot publish readiness");
-consumedSession.close();
 consumed.provider.dispose();
 await Promise.resolve();
 assert.equal(replacementWarm.closes, 1);
 assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "low" } }).status, "starting");
 
-const overlappingCold = lifecycle([nativeInit]);
+const overlappingCold = lifecycle({ messages: [nativeInit] });
 overlappingCold.provider.prepare(warmArgs(firstBoundary));
 const olderStart = overlappingCold.provider.start({ ...warmArgs(firstBoundary), baseRecord });
 const newerSession = await overlappingCold.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
@@ -296,7 +297,7 @@ await Promise.resolve();
 assert.equal(disposedWarm.closes, 1);
 assert.equal(disposed.callbacks(), 1, "dispose publishes once; stale resolution stays fenced");
 assert.equal(disposed.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
-const disposedConsumed = lifecycle([nativeInit, nativeResult]);
+const disposedConsumed = lifecycle({ messages: [nativeInit, nativeResult] });
 disposedConsumed.provider.prepare(warmArgs(firstBoundary));
 const startBeforeDispose = disposedConsumed.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
 disposedConsumed.provider.dispose();
@@ -310,9 +311,8 @@ const disposedCallbacks = disposedConsumed.callbacks();
 await drain(disposedSession.output);
 assert.equal(disposedConsumed.callbacks(), disposedCallbacks, "disposed session init stays fenced");
 assert.equal(disposedConsumed.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
-disposedSession.close();
 
-const closedBeforeInit = lifecycle([nativeInit]);
+const closedBeforeInit = lifecycle({ messages: [nativeInit] });
 const closedSession = await closedBeforeInit.provider.start({ ...warmArgs(firstBoundary), baseRecord });
 closedSession.close();
 const closedCallbacks = closedBeforeInit.callbacks();
@@ -321,7 +321,7 @@ assert.equal(closedBeforeInit.callbacks(), closedCallbacks, "closed session init
 assert.equal(closedBeforeInit.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
 
 const beforeInitError = new Error("stream failed before init");
-const beforeInitFailure = lifecycle([], undefined, beforeInitError);
+const beforeInitFailure = lifecycle({ streamError: beforeInitError });
 const beforeInitSession = await beforeInitFailure.provider.start({ ...warmArgs(firstBoundary), baseRecord });
 await assert.rejects(drain(beforeInitSession.output), error => error === beforeInitError);
 assert.deepEqual([beforeInitFailure.provider.health({ settings: { model: "haiku", effort: "low" } }).status,
@@ -330,7 +330,7 @@ assert.throws(() => beforeInitSession.send({ text: "closed", selection: [] }), /
 await assert.rejects(beforeInitSession.applySettings({ settings: { model: "sonnet", effort: "low" } }), /session is closed/);
 
 const afterInitError = new Error("stream failed after init"), cleanupError = new Error("cleanup failed");
-const afterInitFailure = lifecycle([nativeInit], undefined, afterInitError, cleanupError);
+const afterInitFailure = lifecycle({ messages: [nativeInit], streamError: afterInitError, closeError: cleanupError });
 const afterInitSession = await afterInitFailure.provider.start({ ...warmArgs(firstBoundary), baseRecord });
 const afterInitOutput = afterInitSession.output[Symbol.asyncIterator]();
 assert.equal((await afterInitOutput.next()).value?.kind, "initialized");
@@ -497,11 +497,14 @@ const idleStopSession = await sessionWith(idleStopQuery);
 await idleStopSession.interrupt();
 assert.equal(idleStopQuery.interrupts, 0, "idle Stop does not taint or call native control");
 idleStopSession.send({ text: "next turn", selection: [] });
-const idleOutputs = [];
-for await (const output of idleStopSession.output) idleOutputs.push(output);
-assert.equal(turnOutcome(idleOutputs), "completed", "idle Stop cannot mark next turn interrupted");
+const idleOutput = idleStopSession.output[Symbol.asyncIterator]();
+await idleOutput.next(); // init
+const idleTurnEnd = await idleOutput.next();
+assert.equal(turnOutcome([idleTurnEnd.value!]), "completed", "idle Stop cannot mark next turn interrupted");
+assert.equal(idleStopQuery.closes, 0, "turn-end observation keeps live session open");
 await idleStopSession.interrupt();
-assert.equal(idleStopQuery.interrupts, 0, "late Stop after natural result is idle");
+assert.equal(idleStopQuery.interrupts, 0, "late Stop after natural result is live and idle");
+idleStopSession.close();
 
 const retryStopQuery = new FakeQuery();
 const retryStopSession = await sessionWith(retryStopQuery);

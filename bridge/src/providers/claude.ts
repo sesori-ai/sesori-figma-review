@@ -340,54 +340,56 @@ class ClaudeSession implements ReviewSession {
         resumed: args.resumed,
       });
       const display = new ClaudeDisplayMapper();
-      try { for await (const sdkMessage of self.query) {
-        const message = object(sdkMessage);
-        const streamEvent = message?.type === "stream_event" ? object(message.event) : undefined;
-        if (streamEvent?.type === "message_start") self.activeTurn ??= { interrupted: false };
-        const completedTurn = message?.type === "result" ? self.activeTurn : undefined;
-        if (completedTurn?.interrupt) await completedTurn.interrupt.catch(() => {});
-        if (message?.type === "result" && self.activeTurn === completedTurn) self.activeTurn = undefined;
-        if (message?.type === "system" && message.subtype === "init" && typeof message.session_id === "string") {
-          sessionId = message.session_id;
-          const servers = await refreshServerStatuses({
-            query: self.query,
-            fallback: serverStatuses(message.mcp_servers),
-            timeoutMs: args.mcpStatusTimeoutMs,
-            log: args.log,
-          });
-          const health: ProviderHealth = {
-            provider: "claude",
-            status: "ready",
-            version: typeof message.claude_code_version === "string" ? message.claude_code_version : undefined,
-            model: typeof message.model === "string" ? message.model : undefined,
-            models: claudeModels(),
-          };
-          args.onInitialized(health);
-          yield { kind: "initialized", sessionId, health, servers };
-        }
-        for (const event of display.map({
-          message: sdkMessage,
-          sessionId,
-          interrupted: (completedTurn ?? self.activeTurn)?.interrupted ?? false,
-        })) yield { kind: "event", event };
-        if (message?.type === "stream_event") {
-          const event = object(message.event);
-          const streamUsage = event?.type === "message_start" ? object(event.message)?.usage : event?.type === "message_delta" ? event.usage : undefined;
-          if (streamUsage) {
-            const snapshot = event?.type === "message_start" ? usage.messageStart(streamUsage) : usage.messageDelta(streamUsage);
-            yield { kind: "usage", usage: snapshot, cost: cost.snapshot(), turnCompleted: false };
+      try {
+        for await (const sdkMessage of self.query) {
+          const message = object(sdkMessage);
+          const streamEvent = message?.type === "stream_event" ? object(message.event) : undefined;
+          if (streamEvent?.type === "message_start") self.activeTurn ??= { interrupted: false };
+          const completedTurn = message?.type === "result" ? self.activeTurn : undefined;
+          if (completedTurn?.interrupt) await completedTurn.interrupt.catch(() => {}); // Caller retains rejection.
+          if (message?.type === "result" && self.activeTurn === completedTurn) self.activeTurn = undefined;
+          if (message?.type === "system" && message.subtype === "init" && typeof message.session_id === "string") {
+            sessionId = message.session_id;
+            const servers = await refreshServerStatuses({
+              query: self.query,
+              fallback: serverStatuses(message.mcp_servers),
+              timeoutMs: args.mcpStatusTimeoutMs,
+              log: args.log,
+            });
+            const health: ProviderHealth = {
+              provider: "claude",
+              status: "ready",
+              version: typeof message.claude_code_version === "string" ? message.claude_code_version : undefined,
+              model: typeof message.model === "string" ? message.model : undefined,
+              models: claudeModels(),
+            };
+            args.onInitialized(health);
+            yield { kind: "initialized", sessionId, health, servers };
+          }
+          for (const event of display.map({
+            message: sdkMessage,
+            sessionId,
+            interrupted: (completedTurn ?? self.activeTurn)?.interrupted ?? false,
+          })) yield { kind: "event", event };
+          if (message?.type === "stream_event") {
+            const event = object(message.event);
+            const streamUsage = event?.type === "message_start" ? object(event.message)?.usage : event?.type === "message_delta" ? event.usage : undefined;
+            if (streamUsage) {
+              const snapshot = event?.type === "message_start" ? usage.messageStart(streamUsage) : usage.messageDelta(streamUsage);
+              yield { kind: "usage", usage: snapshot, cost: cost.snapshot(), turnCompleted: false };
+            }
+          }
+          if (message?.type === "result") {
+            args.log("[claude-accounting]", JSON.stringify({ resultUsage: message.usage, totalCostUsd: message.total_cost_usd }));
+            yield {
+              kind: "usage",
+              usage: usage.complete(message.usage),
+              cost: cost.complete(message.total_cost_usd),
+              turnCompleted: true,
+            };
           }
         }
-        if (message?.type === "result") {
-          args.log("[claude-accounting]", JSON.stringify({ resultUsage: message.usage, totalCostUsd: message.total_cost_usd }));
-          yield {
-            kind: "usage",
-            usage: usage.complete(message.usage),
-            cost: cost.complete(message.total_cost_usd),
-            turnCompleted: true,
-          };
-        }
-      } } catch (error) {
+      } catch (error) {
         self.finish({ cause: error });
         throw error;
       } finally { self.finish(); }
