@@ -125,7 +125,7 @@ export class ClaudeCostTracker {
       this.current = { usd: this.current.usd, status: "unavailable" };
       return this.snapshot();
     }
-    this.current = { usd: Math.max(this.current.usd, this.baseUsd + nativeCumulativeUsd), status: "reported" };
+    this.current = { usd: this.baseUsd + nativeCumulativeUsd, status: "reported" };
     return this.snapshot();
   }
   snapshot() { return { ...this.current }; }
@@ -336,8 +336,15 @@ class ClaudeSession implements ReviewSession {
   private readonly push: (message: SDKUserMessage | null) => void;
   private readonly log: (...values: unknown[]) => void;
 
-  send(args: { text: string; selection: NodeRef[]; context?: string }) { this.push(userMessage(args)); }
-  async interrupt() { this.interrupted = true; await this.query.interrupt(); }
+  send(args: { text: string; selection: NodeRef[]; context?: string }) {
+    if (this.closed) throw new Error("Claude session is closed");
+    this.push(userMessage(args));
+  }
+  async interrupt() {
+    if (this.closed) return;
+    this.interrupted = true;
+    await this.query.interrupt();
+  }
   applySettings(args: { settings: ProviderSettings }): Promise<void> {
     const requested = { ...args.settings };
     const update = this.settingsQueue.then(async () => {
@@ -420,8 +427,14 @@ export class ClaudeProvider implements ReviewProvider {
     };
   }
 
+  private closeResolvedWarm(query: NativeWarmQuery, reason: string) {
+    try { query.close(); }
+    catch (error) { this.args.log(`${reason}: failed to close warm query`, error); }
+  }
+
   private closeWarm(entry: WarmEntry, reason: string) {
-    entry.query.then(query => query.close(), error => this.args.log(`${reason}: warm query failed before close`, error));
+    entry.query.then(query => this.closeResolvedWarm(query, reason))
+      .catch(error => this.args.log(`${reason}: warm query failed before close`, error));
   }
 
   prepare(args: { fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary }) {
@@ -470,17 +483,19 @@ export class ClaudeProvider implements ReviewProvider {
     if (warm && (!args.resume && matchesWarm(warm, args))) {
       warm.delegate.current = args.boundary;
       this.warm = undefined;
+      let resolved: NativeWarmQuery | undefined;
       try {
-        const resolved = await warm.query;
+        resolved = await warm.query;
         if (this.runtime?.owner === warm) {
           nativeQuery = resolved.query(input.stream);
           this.runtime = { owner: warm, prepared: true };
           this.args.onPrepared();
         } else {
-          resolved.close();
+          this.closeResolvedWarm(resolved, "stale consumed warm query");
           this.args.log("discarded stale consumed warm query");
         }
       } catch (error) {
+        if (resolved) this.closeResolvedWarm(resolved, "unusable consumed warm query");
         if (this.runtime?.owner === warm) {
           this.runtime = undefined;
           this.args.onPrepared();

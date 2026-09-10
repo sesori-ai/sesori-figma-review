@@ -69,9 +69,18 @@ class FakeQuery implements AsyncIterable<unknown> {
 class FakeWarm {
   closes = 0;
   queries = 0;
+  queryThrows = false;
+  closeThrows = false;
   constructor(readonly nativeQuery = new FakeQuery()) {}
-  query(_prompt: AsyncIterable<unknown>) { this.queries++; return this.nativeQuery; }
-  close() { this.closes++; }
+  query(_prompt: AsyncIterable<unknown>) {
+    this.queries++;
+    if (this.queryThrows) throw new Error("warm query consume failed");
+    return this.nativeQuery;
+  }
+  close() {
+    this.closes++;
+    if (this.closeThrows) throw new Error("warm close failed");
+  }
 }
 const deferred = <T>() => {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -124,8 +133,11 @@ const lifecycle = () => {
     cold: ({ options }) => { const query = new FakeQuery(); coldQueries.push(query); coldOptions.push(options); return query; },
   };
   let callbacks = 0;
-  const provider = new ClaudeProvider({ version: "test", log: () => {}, onPrepared: () => callbacks++, native });
-  return { provider, warmCalls, coldQueries, coldOptions, callbacks: () => callbacks };
+  const logs: unknown[][] = [];
+  const provider = new ClaudeProvider({
+    version: "test", log: (...values) => logs.push(values), onPrepared: () => callbacks++, native,
+  });
+  return { provider, warmCalls, coldQueries, coldOptions, logs, callbacks: () => callbacks };
 };
 const warmArgs = (boundary: ReturnType<typeof allowBoundary>, settings = { model: "haiku", effort: "low" }) => ({
   fileId: "adapter-file", dir: workspace, settings, boundary,
@@ -205,6 +217,29 @@ rejected.warmCalls[0].pending.reject(new Error("startup failed"));
 await rejectedStart;
 assert.equal(rejected.coldQueries.length, 1, "failed consumed warm falls back cold");
 
+const consumeThrows = lifecycle();
+consumeThrows.provider.prepare(warmArgs(firstBoundary));
+const unusableWarm = new FakeWarm();
+unusableWarm.queryThrows = true;
+consumeThrows.warmCalls[0].pending.resolve(unusableWarm);
+await Promise.resolve();
+await consumeThrows.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
+assert.equal(unusableWarm.queries, 1);
+assert.equal(unusableWarm.closes, 1, "warm resource closes when query consumption throws");
+assert.equal(consumeThrows.coldQueries.length, 1, "consume throw falls back cold");
+
+const closeThrows = lifecycle();
+closeThrows.provider.prepare(warmArgs(firstBoundary));
+const uncloseableWarm = new FakeWarm();
+uncloseableWarm.closeThrows = true;
+closeThrows.warmCalls[0].pending.resolve(uncloseableWarm);
+await Promise.resolve();
+closeThrows.provider.dispose();
+await Promise.resolve();
+assert.equal(uncloseableWarm.closes, 1);
+assert.ok(closeThrows.logs.some(values => String(values[0]).includes("failed to close warm query")),
+  "synchronous warm close failure is handled and logged");
+
 const mismatched = lifecycle();
 mismatched.provider.prepare(warmArgs(firstBoundary, { model: "opus", effort: "high" }));
 const mismatchedWarm = new FakeWarm();
@@ -261,7 +296,16 @@ rollbackQuery.failEfforts = 1;
 rollbackQuery.failModelCalls.add(2);
 await assert.rejects(rollbackSession.applySettings({ settings: { model: "sonnet", effort: "high" } }), /session closed/);
 assert.equal(rollbackQuery.closes, 1, "failed rollback closes unknown-state session");
+assert.throws(() => rollbackSession.send({ text: "must reject", selection: [] }), /session is closed/);
+await rollbackSession.interrupt();
+assert.equal(rollbackQuery.interrupts, 0, "closed session interrupt settles without native control");
 await assert.rejects(rollbackSession.applySettings({ settings: { model: "opus", effort: "low" } }), /session is closed/);
+const explicitlyClosedQuery = new FakeQuery();
+const explicitlyClosed = await sessionWith(explicitlyClosedQuery);
+explicitlyClosed.close();
+assert.throws(() => explicitlyClosed.send({ text: "must reject", selection: [] }), /session is closed/);
+await explicitlyClosed.interrupt();
+assert.equal(explicitlyClosedQuery.interrupts, 0);
 
 // Actual session iteration keeps native init MCP status if refresh fails, then emits normalized accounting.
 const initQuery = new FakeQuery([
@@ -316,6 +360,8 @@ for (const invalid of [undefined, Number.NaN, Number.POSITIVE_INFINITY, -1]) {
   assert.deepEqual(resumedCost.complete(invalid), { usd: 1.75, status: "unavailable" });
 }
 assert.deepEqual(resumedCost.complete(0.4), { usd: 1.9, status: "reported" }, "valid native cost recovers reporting");
+assert.deepEqual(resumedCost.complete(0.2), { usd: 1.7, status: "reported" },
+  "each valid native cumulative snapshot replaces rather than max-clamps");
 
 const nativeSession = "11111111-1111-4111-8111-111111111111";
 const session = { provider: "claude" as const, sessionId: nativeSession };
