@@ -266,8 +266,8 @@ reproducible inspection against the qualified schema. No hand edits to generated
 
 - **What / why:** Add provider identities, qualified refs, normalized events/health/models/cost types, provider
   interfaces, neutral validated Figma catalog, and complete unwired Claude adapter with native history, lifecycle,
-  usage/cost and stream mapping. Keep released UI/wire/settings/session behavior active and unchanged. Legacy bridge
-  may consume the exact neutral tool catalog and shared stateless transcript projection without adapter activation.
+  usage/cost and stream mapping. Keep released UI/wire/settings/session behavior and legacy bridge/workspace/selfcheck
+  byte-identical to master; defer exact catalog/history adoption to the atomic Step 3 activation.
 - **Complexity:** Additive foundation; target approximately 750–1,000 changed lines.
 - **Risk and test focus:** Adapter contract typing, schema neutrality, transcript projection, mixed block identity,
   per-response live usage, per-turn result usage, immutable resumed cost, and warm/dispose truthfulness.
@@ -278,6 +278,7 @@ reproducible inspection against the qualified schema. No hand edits to generated
 
 - **What / why:** Atomically wire the adapter into live bridge sessions; migrate provider-qualified records/settings;
   activate protocol v3, connection snapshot, single view intent, History/cards/controls and self-owned smoke safety.
+  Adopt the exact neutral catalog/history projection, remove the legacy SDK path, and retain its UUID integration proof.
   Preserve every valid finding from closed PR #2 without copying obsolete coordination.
 - **Complexity:** Coordinated live cutover; target approximately 1,300–1,550 changed lines.
 - **Risk and test focus:** Legacy settings/history/cost, start/reconnect/close ownership, protocol mismatch both ways,

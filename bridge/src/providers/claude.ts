@@ -309,7 +309,7 @@ export class ClaudeDisplayMapper {
 class ClaudeSession implements ReviewSession {
   readonly provider = "claude" as const;
   readonly output: AsyncIterable<ProviderOutput>;
-  private activeTurn?: { interrupted: boolean };
+  private activeTurn?: { interrupted: boolean; interrupt?: Promise<void> };
   private effectiveSettings: ProviderSettings;
   private settingsQueue = Promise.resolve();
   private closed = false;
@@ -322,7 +322,7 @@ class ClaudeSession implements ReviewSession {
     resumed: boolean;
     mcpStatusTimeoutMs: number;
     onInitialized: (health: ProviderHealth) => void;
-    onClose: () => void;
+    onClose: (failure?: { cause: unknown }) => void;
     log: (...values: unknown[]) => void;
   }) {
     this.query = args.query;
@@ -340,12 +340,13 @@ class ClaudeSession implements ReviewSession {
         resumed: args.resumed,
       });
       const display = new ClaudeDisplayMapper();
-      for await (const sdkMessage of self.query) {
+      try { for await (const sdkMessage of self.query) {
         const message = object(sdkMessage);
         const streamEvent = message?.type === "stream_event" ? object(message.event) : undefined;
         if (streamEvent?.type === "message_start") self.activeTurn ??= { interrupted: false };
         const completedTurn = message?.type === "result" ? self.activeTurn : undefined;
-        if (message?.type === "result") self.activeTurn = undefined;
+        if (completedTurn?.interrupt) await completedTurn.interrupt.catch(() => {});
+        if (message?.type === "result" && self.activeTurn === completedTurn) self.activeTurn = undefined;
         if (message?.type === "system" && message.subtype === "init" && typeof message.session_id === "string") {
           sessionId = message.session_id;
           const servers = await refreshServerStatuses({
@@ -386,14 +387,17 @@ class ClaudeSession implements ReviewSession {
             turnCompleted: true,
           };
         }
-      }
+      } } catch (error) {
+        self.finish({ cause: error });
+        throw error;
+      } finally { self.finish(); }
     })();
   }
 
   private readonly query: NativeQuery;
   private readonly push: (message: SDKUserMessage | null) => void;
   private readonly log: (...values: unknown[]) => void;
-  private readonly onClose: () => void;
+  private readonly onClose: (failure?: { cause: unknown }) => void;
 
   send(args: { text: string; selection: NodeRef[]; context?: string }) {
     if (this.closed) throw new Error("Claude session is closed");
@@ -403,12 +407,14 @@ class ClaudeSession implements ReviewSession {
   async interrupt() {
     const turn = this.activeTurn;
     if (this.closed || !turn || turn.interrupted) return;
-    turn.interrupted = true;
-    try { await this.query.interrupt(); }
-    catch (error) {
-      if (this.activeTurn === turn) turn.interrupted = false;
-      throw error;
-    }
+    if (turn.interrupt) return turn.interrupt;
+    const attempt = this.query.interrupt().then(() => {
+      if (this.activeTurn === turn) turn.interrupted = true;
+    }).finally(() => {
+      if (this.activeTurn === turn) turn.interrupt = undefined;
+    });
+    turn.interrupt = attempt;
+    return attempt;
   }
   applySettings(args: { settings: ProviderSettings }): Promise<void> {
     const requested = { ...args.settings };
@@ -433,13 +439,15 @@ class ClaudeSession implements ReviewSession {
     this.settingsQueue = update.catch(error => this.log("Claude settings update failed", error));
     return update;
   }
-  close() {
+  private finish(failure?: { cause: unknown }) {
     if (this.closed) return;
     this.closed = true;
-    this.push(null);
-    try { this.query.close(); }
-    finally { this.onClose(); }
+    this.activeTurn = undefined;
+    try { this.push(null); } catch (error) { this.log("Claude session input cleanup failed", error); }
+    try { this.query.close(); } catch (error) { this.log("Claude session query cleanup failed", error); }
+    this.onClose(failure);
   }
+  close() { this.finish(); }
 }
 
 const claudeModels = () => CLAUDE_MODELS.map(([value, label]) => ({ value, label, efforts: [...CLAUDE_EFFORTS] }));
@@ -588,13 +596,21 @@ export class ClaudeProvider implements ReviewProvider {
       this.warm = undefined;
       this.closeWarm(warm, "incompatible warm query");
     }
-    if (!nativeQuery) {
-      nativeQuery = this.native.cold({
+    const ownsRuntime = () => this.runtime?.owner === runtimeOwner;
+    try {
+      nativeQuery ??= this.native.cold({
         prompt: input.stream,
         options: options({ ...startArgs, version: this.args.version, log: this.args.log }),
       });
+    } catch (error) {
+      if (ownsRuntime()) {
+        this.runtime = { owner: runtimeOwner, error: `Claude failed to start: ${error instanceof Error ? error.message : String(error)}` };
+        try { this.args.onPrepared(); }
+        catch (notifyError) { this.args.log("Claude startup failure notification failed", notifyError); }
+      }
+      input.push(null);
+      throw error;
     }
-    const ownsRuntime = () => this.runtime?.owner === runtimeOwner;
     return new ClaudeSession({
       query: nativeQuery,
       push: input.push,
@@ -607,9 +623,11 @@ export class ClaudeProvider implements ReviewProvider {
         this.runtime = { owner: runtimeOwner, prepared: true, version: health.version };
         this.args.onPrepared();
       },
-      onClose: () => {
+      onClose: failure => {
         if (!ownsRuntime()) return;
-        this.runtime = undefined;
+        this.runtime = failure
+          ? { owner: runtimeOwner, error: `Claude session failed: ${failure.cause instanceof Error ? failure.cause.message : String(failure.cause)}` }
+          : undefined;
         this.args.onPrepared();
       },
       log: this.args.log,

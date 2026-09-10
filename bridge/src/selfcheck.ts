@@ -29,18 +29,16 @@ workspaceFor("file1", "Checkout redesign");
 assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "edited by a teammate", "user-owned files are never overwritten");
 assert.ok(readFileSync(join(dir, ".claude/skills/review-flow/SKILL.md"), "utf8").startsWith("---"), "the skill is refreshed on every start");
 
-const session1 = "11111111-1111-4111-8111-111111111111";
-const session2 = "22222222-2222-4222-8222-222222222222";
-const rec = { sessionId: session1, title: "t", anchor: { type: "flow" as const, nodeIds: [] }, pageId: "0:1", pageName: "Page 1", createdAt: "a", updatedAt: "a", turns: 1, costUsd: 0.5, usage: zeroUsage() };
+const rec = { sessionId: "s1", title: "t", anchor: { type: "flow" as const, nodeIds: [] }, pageId: "0:1", pageName: "Page 1", createdAt: "a", updatedAt: "a", turns: 1, costUsd: 0.5, usage: zeroUsage() };
 saveSession(dir, rec);
 saveSession(dir, { ...rec, turns: 2, costUsd: 0.9 });
-saveSession(dir, { ...rec, sessionId: session2 });
-assert.deepEqual(readSessions(dir).map(s => [s.sessionId, s.turns, s.costUsd]), [[session1, 2, 0.9], [session2, 1, 0.5]], "upsert keeps one record per session");
+saveSession(dir, { ...rec, sessionId: "s2" });
+assert.deepEqual(readSessions(dir).map(s => [s.sessionId, s.turns, s.costUsd]), [["s1", 2, 0.9], ["s2", 1, 0.5]], "upsert keeps one record per session");
 
 // History → Open reads Claude Code's transcript: our context lines stripped, ask_user answers kept, tool results/meta/thinking dropped.
 const slug = join(process.env.CLAUDE_CONFIG_DIR!, "projects", dir.replace(/[^a-zA-Z0-9]/g, "-"));
 mkdirSync(slug, { recursive: true });
-writeFileSync(join(slug, `${session1}.jsonl`), [
+writeFileSync(join(slug, "s1.jsonl"), [
   { type: "user", message: { content: '[Figma file "F", page "P" (0:1). Anchor: flow]\nReview the flow.\n[Current selection: none]' } },
   { type: "user", isMeta: true, message: { content: [{ type: "text", text: "skill body" }] } },
   { type: "assistant", message: { content: [{ type: "thinking", thinking: "hmm" }, { type: "tool_use", id: "t1", name: "mcp__figma__ask_user", input: { question: "Next?" } }] } },
@@ -51,7 +49,7 @@ writeFileSync(join(slug, `${session1}.jsonl`), [
   { type: "user", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } },
   "not json",
 ].map(l => typeof l === "string" ? l : JSON.stringify(l)).join("\n"));
-assert.deepEqual(readTranscript(dir, session1), [
+assert.deepEqual(readTranscript(dir, "s1"), [
   { role: "user", text: "Review the flow." },
   { role: "tool", name: "mcp__figma__ask_user", input: { question: "Next?" } },
   { role: "answer", text: "Next" },
@@ -59,8 +57,7 @@ assert.deepEqual(readTranscript(dir, session1), [
   { role: "assistant", text: "**Screen 1** looks fine." },
   { role: "tool", name: "stopped", input: {} },
 ]);
-assert.deepEqual(readTranscript(dir, "33333333-3333-4333-8333-333333333333"), []);
-assert.throws(() => readTranscript(dir, "../../outside"), /Invalid Claude native session id/);
+assert.deepEqual(readTranscript(dir, "missing"), []);
 
 // Per-turn totals from the result message are accumulated on the session record; missing fields count as 0.
 let u = addUsage(zeroUsage(), { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 });

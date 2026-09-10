@@ -31,8 +31,10 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 ## Step 2 replacement foundation
 
 - Full implementation stays at `origin/codex-support-step-2` (`f7265eb`); superseded PR #2 was not merged.
-- Dormant foundation adds normalized contracts, neutral tools and Claude tests; live wire/UI remain unchanged.
-- Step 3 retains all ownership, protocol, view, close, settings, accounting, smoke and qualification obligations below.
+- Dormant foundation adds normalized contracts, neutral tools and Claude tests; released bridge/workspace/selfcheck stay
+  byte-identical to master, with catalog/history reuse adapter-only.
+- Step 3 retains all ownership, protocol, view, close, settings, accounting, smoke and qualification obligations below,
+  plus exact legacy catalog/history adoption, legacy SDK removal and the UUID integration assertion.
 - Historical smokes used Claude Haiku/low, isolated homes/free ports and four-turn/$0.10 limits.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
