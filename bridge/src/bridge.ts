@@ -8,6 +8,9 @@ import { BRIDGE_PORT, FIGMA_MCP_URL, type DownMsg, type Health, type NodeRef, ty
 import { readFileSync } from "node:fs";
 import { addUsage, hasClaudeAuth, installPlugin, readAllow, readSessions, readSettings, readTranscript, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
 
+const emitWarning = process.emitWarning.bind(process); // ponytail: the SDK warns that allowedTools bypasses canUseTool; that is our auto-approve list by design
+process.emitWarning = ((w: any, ...rest: any[]) => { if (!/canUseTool/.test(String(w))) emitWarning(w, ...rest); }) as typeof process.emitWarning;
+
 const VERSION: string = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version; // root package: same depth from bridge/src and bridge/dist, and it ships in the tarball
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 const now = () => new Date().toISOString();
@@ -243,6 +246,6 @@ new WebSocketServer({ port: BRIDGE_PORT, host: "127.0.0.1" }).on("connection", (
 log(`bridge ${VERSION} listening on ws://127.0.0.1:${BRIDGE_PORT}` + (process.env.APP_REPO ? ` · app repo ${process.env.APP_REPO}` : ""));
 const manifest = installPlugin();
 console.log(manifest
-  ? `\nSesori Figma Review is running. Keep this terminal open.\n\nFirst time? Add the plugin to Figma desktop once:\n  Plugins → Development → Import plugin from manifest… → ${manifest}\nThen run it from Plugins → Development → Sesori Figma Review.\n`
+  ? `\nSesori Review is running. Keep this terminal open.\n\nFirst time? Add the plugin to Figma desktop once:\n  Plugins → Development → Import plugin from manifest… → ${manifest}\nThen run it from Plugins → Development → Sesori Review.\n`
   : "\nPlugin build not found (run `npm run build`); the bridge is up but there is nothing to import into Figma.\n");
 if (!hasClaudeAuth()) console.log("No Claude credentials found: run `claude` once to sign in, or export ANTHROPIC_API_KEY. The plugin will show \"Claude failed to start\" until then.\n");

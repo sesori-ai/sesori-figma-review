@@ -1,4 +1,4 @@
-# Plan: Sesori Figma Review
+# Plan: Sesori Review
 
 ## Goal
 

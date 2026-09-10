@@ -120,7 +120,7 @@
 </linearGradient>
 </defs>
 </svg>
-  <text x="700" y="450" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="96" font-weight="700" fill="#fff" letter-spacing="-2">Sesori Figma Review</text>
+  <text x="700" y="450" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="96" font-weight="700" fill="#fff" letter-spacing="-2">Sesori Review</text>
   <text x="700" y="540" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="44" fill="#c9c2f5">Claude reviews your prototype, inside Figma.</text>
   <text x="700" y="610" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="30" fill="#8e86bf">Flow → screens → questions at the right spot → Dev Mode annotations</text>
 </svg>
