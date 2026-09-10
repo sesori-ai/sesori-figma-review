@@ -15,6 +15,7 @@ import {
   type ToolResult,
   type UpMsg,
 } from "../../shared/protocol.ts";
+import { isOwnedByFile, isRegisteredFileSocket, type FileOwned } from "./conversation-owner.ts";
 import { ClaudeProvider } from "./providers/claude.ts";
 import type { ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
 import { hasClaudeAuth, installPlugin, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
@@ -110,7 +111,8 @@ type Conversation = {
   servers?: Health["servers"];
 };
 let conv: Conversation | undefined;
-let startGeneration = 0;
+type StartReservation = FileOwned & { intentId: string };
+let startingRequest: StartReservation | undefined;
 const preparedOwners = new Map<string, string>();
 const preparedKey = (args: { provider: ProviderId; fileId: string }) => `${args.provider}:${args.fileId}`;
 const sameProviderSettings = (left: ReturnType<typeof readSettings>["providers"][ProviderId], right: ReturnType<typeof readSettings>["providers"][ProviderId]) =>
@@ -156,17 +158,24 @@ function newRecord(message: Extract<UpMsg, { kind: "start" }>, provider: Provide
 }
 
 async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
-  const generation = ++startGeneration; // reserves sole start slot before provider startup can yield
+  const reservation: StartReservation = { fileId: message.fileId, intentId: message.intentId };
+  startingRequest = reservation; // actual starts retain global one-conversation supersession
   endConversation("Started another session");
   const dir = workspaceFor(message.fileId, message.fileName);
   const settings = readSettings();
   const providerId = message.resume?.provider ?? settings.provider;
   const provider = providers[providerId];
-  if (!provider) return send(message.fileId, { kind: "error", message: `${providerId === "codex" ? "Codex" : providerId} is not available in this build.` });
+  if (!provider) {
+    if (startingRequest === reservation) startingRequest = undefined;
+    return send(message.fileId, { kind: "error", message: `${providerId === "codex" ? "Codex" : providerId} is not available in this build.` });
+  }
   const previous = message.resume
     ? readSessions(dir).find(session => session.provider === message.resume!.provider && session.sessionId === message.resume!.sessionId)
     : undefined;
-  if (message.resume && !previous) return send(message.fileId, { kind: "error", message: "Unknown provider-qualified session" });
+  if (message.resume && !previous) {
+    if (startingRequest === reservation) startingRequest = undefined;
+    return send(message.fileId, { kind: "error", message: "Unknown provider-qualified session" });
+  }
   const record = previous ?? newRecord(message, providerId);
   const key = preparedKey({ provider: providerId, fileId: message.fileId });
   const owner = !message.resume ? preparedOwners.get(key) ?? randomUUID() : randomUUID();
@@ -184,15 +193,16 @@ async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
     });
   } catch (error) {
     deactivateRequestOwner({ owner, reason: "Session failed to start" });
-    if (generation === startGeneration) throw error;
+    if (startingRequest === reservation) { startingRequest = undefined; throw error; }
     return;
   }
-  if (generation !== startGeneration) {
+  if (startingRequest !== reservation) {
     deactivateRequestOwner({ owner, reason: "Superseded while starting" });
     session.close();
     return;
   }
   const current: Conversation = { owner, intentId: message.intentId, fileId: message.fileId, dir, record, session, busy: true };
+  startingRequest = undefined;
   conv = current;
   const anchor = `Figma file "${message.fileName}", page "${message.pageName}" (${message.pageId}). Anchor: ${message.anchor.type}${message.anchor.nodeIds.length ? ` ${message.anchor.nodeIds.join(", ")}` : ""}`;
   session.send({ text: message.text, selection: message.selection, context: anchor });
@@ -317,10 +327,12 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
         await conv.session.interrupt();
       }
       return;
-    case "close":
-      startGeneration++;
-      endConversation(message.reason);
+    case "close": {
+      if (!ws.fileId || !isRegisteredFileSocket({ registeredSocket: clients.get(ws.fileId), requestSocket: ws })) return;
+      if (isOwnedByFile({ resource: startingRequest, fileId: ws.fileId })) startingRequest = undefined;
+      if (isOwnedByFile({ resource: conv, fileId: ws.fileId })) endConversation(message.reason);
       return;
+    }
     case "settings": {
       const previous = readSettings();
       const changed = (["claude", "codex"] as const).filter(provider =>

@@ -9,9 +9,18 @@ process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "claude-config-"));
 const { installPlugin, readAllow, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
 const { addClaudeUsage, ClaudeCostTracker, ClaudeDisplayMapper, ClaudeUsageTracker, readClaudeTranscript } = await import("./providers/claude.ts");
 const { FIGMA_TOOLS } = await import("./figma-tools.ts");
+const { isOwnedByFile, isRegisteredFileSocket } = await import("./conversation-owner.ts");
 
 assert.deepEqual(FIGMA_TOOLS.map(tool => tool.name), ["get_flow", "get_screen", "focus", "annotate", "ask_user"]);
 assert.ok(FIGMA_TOOLS.every(tool => tool.description && tool.schema), "providers share neutral Figma descriptions and validated schemas");
+const activeInA = { fileId: "file-a" }, startingInA = { fileId: "file-a", intentId: "start-a" };
+assert.equal(isOwnedByFile({ resource: activeInA, fileId: "file-b" }), false, "file B close cannot end file A active conversation");
+assert.equal(isOwnedByFile({ resource: startingInA, fileId: "file-b" }), false, "file B close cannot cancel file A startup");
+assert.equal(isOwnedByFile({ resource: activeInA, fileId: "file-a" }), true, "own-file close ends active conversation");
+assert.equal(isOwnedByFile({ resource: startingInA, fileId: "file-a" }), true, "own-file close cancels startup");
+const registeredSocket = {}, replacedSocket = {};
+assert.equal(isRegisteredFileSocket({ registeredSocket, requestSocket: replacedSocket }), false, "replaced socket cannot control current file");
+assert.equal(isRegisteredFileSocket({ registeredSocket, requestSocket: registeredSocket }), true);
 const manifest = installPlugin(); // needs a plugin build; tolerate its absence so `check` also runs before `build`
 if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"') && readFileSync(join(process.env.SESORI_REVIEW_HOME, "plugin/dist/ui.html"), "utf8").includes("Sesori Review"), "plugin is copied next to the workspaces");
 

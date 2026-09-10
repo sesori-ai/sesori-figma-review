@@ -30,8 +30,10 @@ assert.deepEqual(view.confirm({ intentId: "new", session: session("new-session")
 assert.equal((view.session as SessionRecord | undefined)?.sessionId, "new-session");
 assert.equal(view.update({ ...session("new-session"), turns: 1 }), true, "normal updates keep current view authoritative");
 assert.equal(view.update(session("old-session")), false, "late old-session update cannot hijack view");
+// Opening and dismissing the History list performs no view transition; current session remains continuable.
+assert.equal((view.session as SessionRecord | undefined)?.sessionId, "new-session", "browsing History alone preserves current session");
 
-// History during startup explicitly returns queued text and ignores late startup confirmation.
+// Choosing a History row during startup explicitly returns queued text and ignores late startup confirmation.
 const historyView = new ConversationView();
 historyView.begin({ intentId: "starting", retainSession: false });
 historyView.queue({ text: "queued", selection: [] });

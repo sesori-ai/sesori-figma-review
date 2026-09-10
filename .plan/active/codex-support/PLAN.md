@@ -413,7 +413,9 @@ No unrelated style rewrite, new framework, background service, mobile bridge cha
   message id + index, queue startup steering until session identity, and validate reply socket/owner. PR feedback
   then consolidated conversation activity/health, view/card ownership, immutable accounting baselines, warm callback
   fencing, handshake ordering, parser ordering, shared catalog exposure, mixed-block lifecycle, and stronger smoke
-  proofs. Deterministic fixtures plus bounded Haiku multi-turn smoke cover these ordinary flows.
+  proofs. Deterministic fixtures plus bounded Haiku multi-turn smoke cover these ordinary flows. Parent accepted the
+  coherent soft-cap exception; final pre-push fixes preserve browse/dismiss/continue and scope New/History close to
+  the registered socket's own active or `{ fileId, intentId }` pending start.
 - Runtime qualification not run: dynamic image calls, human-wait duration, replay of answers, effective native
   permission profile/config isolation, live settings at a new model invocation, and per-route dollar estimates.
 - If qualification exposes a genuine missing feature, keep the plan blocked and present the concrete gap to the

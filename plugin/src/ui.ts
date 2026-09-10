@@ -200,7 +200,11 @@ function renderSessions() {
     const provider = s.provider === "claude" ? "Claude" : "Codex";
     const cost = sessionCostLabel({ session: s, precision: 2 });
     title.append(el("b", "", s.title), el("span", "", `${provider} · ${s.pageName} · ${s.updatedAt.slice(0, 16).replace("T", " ")} · ${cost} · ${s.turns} turn${s.turns === 1 ? "" : "s"}`));
-    row.append(title, btn("Open", () => { sessionsEl.hidden = true; send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: s.provider, sessionId: s.sessionId } }); }));
+    row.append(title, btn("Open", () => {
+      leaveView("Opened a History session");
+      sessionsEl.hidden = true;
+      send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: s.provider, sessionId: s.sessionId } });
+    }));
     sessionsEl.append(row);
   }
 }
@@ -264,8 +268,7 @@ $("btn-selection").onclick = () => {
 };
 $("btn-new").onclick = () => { leaveView("Started a new view"); clearChat(); chat.append(empty); costEl.textContent = ""; settingsEl.hidden = sessionsEl.hidden = true; input.focus(); };
 $("btn-history").onclick = () => {
-  const opening = sessionsEl.hidden;
-  sessionsEl.hidden = !opening; settingsEl.hidden = true;
-  if (opening) { leaveView("Opened History"); renderSessions(); }
+  sessionsEl.hidden = !sessionsEl.hidden; settingsEl.hidden = true;
+  if (!sessionsEl.hidden) renderSessions();
 };
 stopBtn.onclick = () => send({ kind: "interrupt" });

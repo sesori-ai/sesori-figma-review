@@ -66,8 +66,13 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   stable confirmed cost, selected-Codex/live-Claude provider-scoped health, actual idle reconnect, and a second
   completed text turn. Three native result snapshots summed exactly to persisted 33,128 tokens; cost was $0.007259.
   Four-turn/$0.10 bounds applied; owned fixture/process/log removed.
-- PR feedback repairs and ordinary-flow fixtures bring Step 2 to 1,894 changed lines, 394 above the 1,500 soft cap.
-  Splitting would publish the provider seam
+- Parent accepted the coherent soft-cap exception rather than re-splitting. Final pre-push audit then moved view
+  cancellation from browsing the History list to choosing an actual row, preserving browse/dismiss/continue, and
+  replaced global numeric start generation with one `{ fileId, intentId }` reservation. New/History close now affects
+  only the registered socket's own active/pending file; file B cannot stop file A, while own-file close still cancels.
+  Focused view/ownership checks pass; no extra paid smoke was needed because native boundaries were unchanged.
+- PR feedback repairs and ordinary-flow fixtures bring Step 2 to 1,937 changed lines, 437 above the accepted
+  1,500 soft cap. Splitting would publish the provider seam
   with known activity, view/card, accounting, warm-start, handshake, parser, catalog, display, or smoke regressions,
   so the coherent repair stays with its proof rather than shipping a broken intermediary.
 
