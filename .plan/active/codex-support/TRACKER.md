@@ -41,6 +41,9 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   Owned fixture homes, logs, and bridge processes were removed. No login/global config was changed or copied.
 - User explicitly authorized bounded existing Claude/Codex sign-ins and acknowledged Claude API charges for remaining
   required smoke/regression work. Future steps need not request this again; retain isolation, spend bounds and privacy.
+- Live tests must use Haiku/low for Claude and the lowest-cost suitable image/tool-capable model reported by the Codex
+  catalog with low effort. Model-switching proof uses the cheapest compatible pair and tiny synthetic prompts. No
+  Opus/premium/high-effort routine tests; ask before any required expensive exception.
 - Independent implementation review remains required before Step 2 publication. No real Figma rendering claim is made.
 
 ## Qualification gates before user-facing Codex exposure

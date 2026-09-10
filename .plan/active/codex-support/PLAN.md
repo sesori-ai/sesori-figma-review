@@ -174,7 +174,11 @@ argument objects. Do not perpetuate `any` across newly changed external boundari
 Live-test authorization: the user explicitly approved bounded use of existing Claude and Codex sign-ins for this
 plan's required smoke/regression tests, including acknowledged Claude API charges. Tests must not change logins or
 global configuration, copy credentials, or expose account data. Use synthetic fixtures, isolated Sesori homes/free
-ports, low-cost models and native spend/turn bounds where available; clean up only owned processes and fixtures.
+ports, cheap models and native output/spend/turn bounds where available; clean up only owned processes and fixtures.
+Use Haiku with low effort for routine Claude tests. For Codex, use the lowest-cost suitable image/tool-capable model
+reported by the qualified model catalog with low effort. Model-switching proof uses the cheapest compatible pair and
+tiny synthetic prompts. Do not use Opus, premium, or high-effort models for routine tests; ask before any required
+expensive exception.
 
 ### Filesystem, permissions, and workspace parity
 
