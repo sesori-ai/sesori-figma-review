@@ -44,12 +44,6 @@ export type Settings = {
   providers: Record<ProviderId, ProviderSettings>;
 };
 
-/** Claude remains the only selectable provider until the Codex adapter is qualified. */
-export const CLAUDE_MODELS: readonly (readonly [value: string, label: string])[] = [
-  ["", "Default"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"],
-];
-export const CLAUDE_EFFORTS = ["", "low", "medium", "high", "xhigh", "max"] as const;
-
 export type ModelDescriptor = { value: string; label: string; efforts: string[] };
 export type ProviderHealth = {
   provider: ProviderId;

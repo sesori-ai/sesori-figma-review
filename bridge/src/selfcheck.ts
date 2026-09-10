@@ -18,6 +18,9 @@ writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.string
 assert.deepEqual(readSettings(), { ...defaults, providers: { ...defaults.providers, claude: { model: "opus", effort: "low" } } }, "legacy settings migrate as Claude preferences");
 saveSettings({ ...defaults, providers: { ...defaults.providers, claude: { model: "sonnet", effort: "high" } } });
 assert.equal(readSettings().providers.claude.model, "sonnet");
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ ...defaults, provider: "future" }));
+assert.throws(readSettings, /Unsupported provider "future"/, "unknown selected provider is not guessed as Claude");
+saveSettings(defaults);
 
 const dir = workspaceFor("file1", "Checkout redesign");
 assert.ok(readFileSync(join(dir, "CLAUDE.md"), "utf8").includes("Checkout redesign"));
@@ -67,6 +70,8 @@ assert.deepEqual(readClaudeTranscript({ dir, sessionId: "missing" }), []);
 const legacy = { ...rec, provider: undefined, costStatus: undefined, sessionId: "legacy" };
 writeFileSync(join(dir, "sessions.json"), JSON.stringify([legacy]));
 assert.deepEqual(readSessions(dir).map(session => [session.provider, session.sessionId, session.costStatus]), [["claude", "legacy", "reported"]]);
+writeFileSync(join(dir, "sessions.json"), JSON.stringify([{ ...legacy, provider: "future" }]));
+assert.throws(() => readSessions(dir), /Unsupported provider "future"/, "unknown session provider is never sent to Claude");
 
 // Claude adapter owns cumulative process accounting and normalized display projection.
 let usage = addClaudeUsage(zeroUsage(), { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 });

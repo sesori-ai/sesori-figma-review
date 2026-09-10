@@ -1,4 +1,5 @@
 import type {
+  CostStatus,
   HistoryItem,
   NodeRef,
   PermissionDecision,
@@ -20,7 +21,7 @@ export type ProviderRequestBoundary = {
 export type ProviderOutput =
   | { kind: "initialized"; sessionId: string; health: ProviderHealth; servers?: { name: string; status: string; error?: string }[] }
   | { kind: "event"; event: ReviewEvent }
-  | { kind: "usage"; usage: Usage; costUsd: number; turnCompleted: boolean };
+  | { kind: "usage"; usage: Usage; cost: { usd: number; status: CostStatus }; turnCompleted: boolean };
 
 export interface ReviewSession {
   readonly provider: ProviderId;

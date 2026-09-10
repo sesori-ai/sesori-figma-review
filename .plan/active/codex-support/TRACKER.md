@@ -10,7 +10,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | Step | Exact title | State |
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/7] | Squash-merged as `232048a` (PR #1); initial architecture review approved |
-| 2 | 🚧 [codex-support] Isolate Claude behind normalized review contracts [step 2/7] | Implemented and verified locally on `codex-support-step-2`; pending independent review/publication |
+| 2 | 🚧 [codex-support] Isolate Claude behind normalized review contracts [step 2/7] | Implemented and verified locally; first architecture review findings fixed; pending parent publication |
 | 3 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 3/7] | Not started |
 | 4 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 4/7] | Not started |
 | 5 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 5/7] | Not started |
@@ -33,10 +33,10 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   sessions, provider-keyed settings migration, cost provenance, request cancellation, and protocol version gating.
 - Removed raw Claude SDK wire/UI parsing and moved Claude lifecycle, transcript projection, and accounting into its adapter.
 - `npm ci`, `npm run check`, `npm run build`, and `git diff --check` pass in the supplied worktree.
-- Real Claude smoke passed with existing authorized sign-in, Haiku/low, synthetic focus request, three-turn and $0.10
-  SDK bounds, isolated `SESORI_REVIEW_HOME`, and override port 43059. Result: one normalized streamed response, shared
-  `focus` tool round trip, persisted provider/cost provenance, 22,605 tokens and positive $0.0046 reported cost on
-  final integrated head (port 43060).
+- Real Claude smoke passed before and after base reconciliation with existing authorized sign-in, Haiku/low, synthetic
+  focus request, three-turn and $0.10 SDK bounds, isolated `SESORI_REVIEW_HOME`, and ports 43059/43060. Final result:
+  one normalized streamed response, shared `focus` round trip, persisted provider/cost provenance, 22,605 tokens and
+  positive $0.0046 reported cost.
 - Isolated startup/plugin-copy/protocol-mismatch fixture passed on port 43058. Port 3055 was already occupied and untouched.
   Owned fixture homes, logs, and bridge processes were removed. No login/global config was changed or copied.
 - User explicitly authorized bounded existing Claude/Codex sign-ins and acknowledged Claude API charges for remaining
@@ -44,7 +44,13 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - Live tests must use Haiku/low for Claude and the lowest-cost suitable image/tool-capable model reported by the Codex
   catalog with low effort. Model-switching proof uses the cheapest compatible pair and tiny synthetic prompts. No
   Opus/premium/high-effort routine tests; ask before any required expensive exception.
-- Independent implementation review remains required before Step 2 publication. No real Figma rendering claim is made.
+- First architecture implementation review rejected six in-scope seams. All were fixed: model options now come from
+  provider health; cost value/status travel together and unavailable never renders as dollars; request owners are
+  captured and deactivated; async starts use one generation reservation and close stale completions; only absent
+  legacy provider tags migrate to Claude while unknown tags fail explicitly. Focused migration/UI assertions added.
+  No real Figma rendering claim is made.
+- Post-review-fix Claude smoke passed on isolated port 43061 with Haiku/low and the same $0.10/three-turn bounds:
+  normalized focus round trip, one reported-cost turn, 22,590 tokens and positive $0.0117 cost. Owned fixture removed.
 
 ## Qualification gates before user-facing Codex exposure
 
@@ -68,6 +74,9 @@ unrelated monorepo Section B workspace diagrams/layers skipped. Runtime qualific
 Later `a359823` packaging-baseline reconciliation was parent-reviewed only; it preserves the current install flow
 and adds artifact verification without changing provider architecture. Do not describe that revision as separately
 approved by the subagent.
+
+Step 2 first architecture implementation review: **REJECTED** with six valid in-scope findings. Fixes are applied and
+validated locally as recorded above; parent owns final review/publication.
 
 ## Retirement
 

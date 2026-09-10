@@ -388,8 +388,9 @@ reduction needs explicit user acceptance recorded here before retirement.
 Include directly caused cleanup in its owning step: remove the raw SDK wire payload and UI parser, move Claude
 history/usage ownership into its adapter, replace global Claude-only copy/model constants with provider descriptors,
 and remove duplicate tool schemas. Step 2 completed the raw payload/parser removal, moved Claude lifecycle/history/
-accounting behind the provider contract, and centralized the Figma catalog; legacy decode paths remain intentionally. Keep native transcript storage and legacy Claude decode compatibility; existing
-users need them. Keep historical root plan but correct/link stale current-behavior claims in the documentation step.
+accounting behind the provider contract, and centralized the Figma catalog. Only absent legacy provider tags decode
+as Claude; explicit unknown tags fail instead of reaching an adapter. Keep native transcript storage and legacy
+Claude decode compatibility; existing users need them. Keep historical root plan but correct/link stale current-behavior claims in the documentation step.
 No unrelated style rewrite, new framework, background service, mobile bridge changes, or socket-auth project.
 
 ## Review and unresolved evidence
@@ -401,6 +402,10 @@ No unrelated style rewrite, new framework, background service, mobile bridge cha
   provider-correct startup hints and automatic history reopen. Added packaged-artifact proof to the same L4 matrix;
   provider ownership/design is unchanged. These documentation/verification additions were parent-reviewed, not
   independently re-reviewed; the initial approval is not presented as a review of this later revision.
+- Step 2's first architecture implementation review was **REJECTED** with six valid findings. Local fixes now keep
+  model descriptors provider-owned, carry cost provenance through the provider seam, render unavailable cost
+  explicitly, capture/deactivate request ownership, reserve asynchronous starts, and reject unknown provider tags.
+  Focused checks cover generic selector data, unavailable cost, and migration rejection; parent owns publication.
 - Runtime qualification not run: dynamic image calls, human-wait duration, replay of answers, effective native
   permission profile/config isolation, live settings at a new model invocation, and per-route dollar estimates.
 - If qualification exposes a genuine missing feature, keep the plan blocked and present the concrete gap to the

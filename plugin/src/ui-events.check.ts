@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { ReviewEvent, SessionRecord } from "../../shared/protocol.ts";
-import { eventBelongsToSession, sessionCostLabel } from "./ui-events.ts";
+import { eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
 
 const session: SessionRecord = {
   provider: "claude",
@@ -23,4 +23,17 @@ assert.equal(eventBelongsToSession({ event: { ...event, session: { provider: "co
 assert.equal(eventBelongsToSession({ event: { ...event, session: { provider: "claude", sessionId: "other" } }, session }), false);
 assert.equal(sessionCostLabel({ session, precision: 3 }), "$0.123");
 assert.equal(sessionCostLabel({ session: { ...session, costStatus: "estimated" }, precision: 2 }), "~$0.12");
+assert.equal(sessionCostLabel({ session: { ...session, costUsd: 0, costStatus: "unavailable" }, precision: 3 }), "Cost unavailable");
+assert.deepEqual(providerSettingOptions({
+  health: {
+    provider: "codex", status: "ready", models: [
+      { value: "cheap", label: "Cheap", efforts: ["", "low"] },
+      { value: "image", label: "Image", efforts: ["", "medium"] },
+    ],
+  },
+  settings: { model: "cheap", effort: "low" },
+}), {
+  models: [{ value: "cheap", label: "Cheap" }, { value: "image", label: "Image" }],
+  efforts: [{ value: "", label: "Default" }, { value: "low", label: "low" }],
+});
 console.log("ui events check ok");

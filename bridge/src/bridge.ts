@@ -32,6 +32,7 @@ const port = Number(process.env.SESORI_REVIEW_PORT ?? BRIDGE_PORT);
 const clients = new Map<string, WebSocket>();
 type Pending = { ws: WebSocket; owner: string; resolve: (value: ToolResult | PermissionDecision) => void; onDrop: ToolResult | PermissionDecision };
 const pending = new Map<string, Pending>();
+const activeRequestOwners = new Set<string>();
 const live = (ws?: WebSocket): ws is WebSocket => !!ws && ws.readyState === ws.OPEN;
 const send = (fileId: string, message: DownMsg) => { const ws = clients.get(fileId); if (live(ws)) ws.send(JSON.stringify(message)); };
 
@@ -42,6 +43,7 @@ function ask(args: {
   onDrop: ToolResult | PermissionDecision;
 }): Promise<ToolResult | PermissionDecision> {
   return new Promise(resolve => {
+    if (!activeRequestOwners.has(args.owner)) return resolve(args.onDrop);
     const ws = clients.get(args.fileId);
     if (!live(ws)) return resolve(args.onDrop);
     const id = randomUUID();
@@ -51,6 +53,7 @@ function ask(args: {
 }
 
 function cancelRequests(args: { owner: string; reason: string }) {
+  activeRequestOwners.delete(args.owner);
   for (const [id, request] of pending) {
     if (request.owner !== args.owner) continue;
     pending.delete(id);
@@ -64,9 +67,9 @@ const disconnected: ToolResult = {
   isError: true,
 };
 const denied: PermissionDecision = { behavior: "deny", message: "Figma plugin disconnected" };
-const boundary = (fileId: string): ProviderRequestBoundary => ({
-  tool: request => ask({ fileId, owner: conv?.fileId === fileId ? conv.owner : fileId, message: { kind: "tool", tool: request.tool, args: request.args }, onDrop: disconnected }) as Promise<ToolResult>,
-  permission: request => ask({ fileId, owner: conv?.fileId === fileId ? conv.owner : fileId, message: { kind: "permission", ...request }, onDrop: denied }) as Promise<PermissionDecision>,
+const boundary = (args: { fileId: string; owner: string }): ProviderRequestBoundary => ({
+  tool: request => ask({ ...args, message: { kind: "tool", tool: request.tool, args: request.args }, onDrop: disconnected }) as Promise<ToolResult>,
+  permission: request => ask({ ...args, message: { kind: "permission", ...request }, onDrop: denied }) as Promise<PermissionDecision>,
 });
 
 const providerChanged = () => { for (const fileId of clients.keys()) send(fileId, { kind: "health", health: makeHealth() }); };
@@ -93,6 +96,23 @@ let claudeServers: Health["servers"];
 let claudeSessionHealth: ProviderHealth | undefined;
 type Conversation = { owner: string; fileId: string; dir: string; record: SessionRecord; session: ReviewSession };
 let conv: Conversation | undefined;
+let startGeneration = 0;
+const preparedOwners = new Map<string, string>();
+const preparedKey = (args: { provider: ProviderId; fileId: string }) => `${args.provider}:${args.fileId}`;
+
+function prepareProvider(args: { provider: ReviewProvider; fileId: string; dir: string; settings: ReturnType<typeof readSettings>["providers"][ProviderId] }) {
+  const key = preparedKey({ provider: args.provider.id, fileId: args.fileId });
+  for (const [otherKey, otherOwner] of preparedOwners) {
+    if (otherKey !== key && otherKey.startsWith(`${args.provider.id}:`)) {
+      preparedOwners.delete(otherKey);
+      cancelRequests({ owner: otherOwner, reason: "Another workspace was prepared" });
+    }
+  }
+  const owner = preparedOwners.get(key) ?? randomUUID();
+  preparedOwners.set(key, owner);
+  activeRequestOwners.add(owner);
+  args.provider.prepare({ ...args, boundary: boundary({ fileId: args.fileId, owner }) });
+}
 
 function newRecord(message: Extract<UpMsg, { kind: "start" }>, provider: ProviderId): SessionRecord {
   return {
@@ -106,12 +126,13 @@ function newRecord(message: Extract<UpMsg, { kind: "start" }>, provider: Provide
     updatedAt: now(),
     turns: 0,
     costUsd: 0,
-    costStatus: "reported",
+    costStatus: "unavailable",
     usage: zeroUsage(),
   };
 }
 
 async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
+  const generation = ++startGeneration; // reserves sole start slot before provider startup can yield
   endConversation("Started another session");
   const dir = workspaceFor(message.fileId, message.fileName);
   const settings = readSettings();
@@ -123,21 +144,37 @@ async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
     : undefined;
   if (message.resume && !previous) return send(message.fileId, { kind: "error", message: "Unknown provider-qualified session" });
   const record = previous ?? newRecord(message, providerId);
-  const session = await provider.start({
-    fileId: message.fileId,
-    dir,
-    resume: message.resume?.sessionId,
-    settings: settings.providers[providerId],
-    boundary: boundary(message.fileId),
-    baseRecord: record,
-  });
-  const current: Conversation = { owner: randomUUID(), fileId: message.fileId, dir, record, session };
+  const key = preparedKey({ provider: providerId, fileId: message.fileId });
+  const owner = !message.resume ? preparedOwners.get(key) ?? randomUUID() : randomUUID();
+  activeRequestOwners.add(owner);
+  if (!message.resume) preparedOwners.delete(key); // fresh sessions may claim prepared query and its captured owner
+  let session: ReviewSession;
+  try {
+    session = await provider.start({
+      fileId: message.fileId,
+      dir,
+      resume: message.resume?.sessionId,
+      settings: settings.providers[providerId],
+      boundary: boundary({ fileId: message.fileId, owner }),
+      baseRecord: record,
+    });
+  } catch (error) {
+    cancelRequests({ owner, reason: "Session failed to start" });
+    if (generation === startGeneration) throw error;
+    return;
+  }
+  if (generation !== startGeneration) {
+    cancelRequests({ owner, reason: "Superseded while starting" });
+    session.close();
+    return;
+  }
+  const current: Conversation = { owner, fileId: message.fileId, dir, record, session };
   conv = current;
   const anchor = `Figma file "${message.fileName}", page "${message.pageName}" (${message.pageId}). Anchor: ${message.anchor.type}${message.anchor.nodeIds.length ? ` ${message.anchor.nodeIds.join(", ")}` : ""}`;
   session.send({ text: message.text, selection: message.selection, context: anchor });
   send(message.fileId, { kind: "busy", busy: true });
   void pump(current);
-  provider.prepare({ fileId: message.fileId, dir, settings: settings.providers[providerId], boundary: boundary(message.fileId) });
+  prepareProvider({ provider, fileId: message.fileId, dir, settings: settings.providers[providerId] });
 }
 
 function endConversation(reason: string) {
@@ -164,7 +201,8 @@ async function pump(current: Conversation) {
         send(current.fileId, output);
       } else {
         current.record.usage = output.usage;
-        current.record.costUsd = output.costUsd;
+        current.record.costUsd = output.cost.usd;
+        current.record.costStatus = output.cost.status;
         if (output.turnCompleted) current.record.turns++;
         current.record.updatedAt = now();
         saveSession(current.dir, current.record);
@@ -215,7 +253,7 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
       send(message.fileId, { kind: "busy", busy: mine });
       const settings = readSettings();
       const selected = providers[settings.provider];
-      selected?.prepare({ fileId: message.fileId, dir, settings: settings.providers[settings.provider], boundary: boundary(message.fileId) });
+      if (selected) prepareProvider({ provider: selected, fileId: message.fileId, dir, settings: settings.providers[settings.provider] });
       return sendHealth(message.fileId);
     }
     case "start": return startConversation(message);
@@ -250,7 +288,13 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
       claude.dispose();
       const dir = ws.fileId ? workspaceFor(ws.fileId, "Figma file") : undefined;
       const selected = providers[message.settings.provider];
-      if (dir && selected) selected.prepare({ fileId: ws.fileId!, dir, settings: message.settings.providers[message.settings.provider], boundary: boundary(ws.fileId!) });
+      if (dir && selected) {
+        const key = preparedKey({ provider: selected.id, fileId: ws.fileId! });
+        const preparedOwner = preparedOwners.get(key);
+        if (preparedOwner) cancelRequests({ owner: preparedOwner, reason: "Settings changed" });
+        preparedOwners.delete(key);
+        prepareProvider({ provider: selected, fileId: ws.fileId!, dir, settings: message.settings.providers[message.settings.provider] });
+      }
       return send(ws.fileId!, { kind: "health", health: makeHealth() });
     }
     case "health": return sendHealth(ws.fileId!);

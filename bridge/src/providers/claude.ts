@@ -3,8 +3,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  CLAUDE_EFFORTS,
-  CLAUDE_MODELS,
   FIGMA_MCP_URL,
   type HistoryItem,
   type NodeRef,
@@ -17,6 +15,11 @@ import {
 import { createClaudeFigmaServer } from "../figma-tools.ts";
 import { readAllow } from "../workspace.ts";
 import type { ProviderOutput, ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./types.ts";
+
+const CLAUDE_EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
+const CLAUDE_MODELS: readonly (readonly [value: string, label: string])[] = [
+  ["", "Default"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"],
+];
 
 const SYSTEM = `You are a senior product designer and front-end lead doing a design review inside Figma, through a plugin chat panel.
 The user watches the canvas while you talk: call focus on a node before discussing it, and cover one screen per message.
@@ -177,7 +180,12 @@ class ClaudeSession implements ReviewSession {
         for (const event of displayEvents({ message: sdkMessage, sessionId, interrupted: self.interrupted })) yield { kind: "event", event };
         if (message?.type === "result") {
           usage = addClaudeUsage(usage, message.usage);
-          yield { kind: "usage", usage, costUsd: baseCost + number(message.total_cost_usd), turnCompleted: true };
+          yield {
+            kind: "usage",
+            usage,
+            cost: { usd: baseCost + number(message.total_cost_usd), status: "reported" },
+            turnCompleted: true,
+          };
           self.interrupted = false;
         }
       }

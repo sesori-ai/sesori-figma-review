@@ -1,8 +1,8 @@
 // UI iframe: the only user-facing surface. WebSocket client to the bridge, chat renderer, and relay
 // between the bridge and the sandbox (tool calls go down to code.ts, replies come back up).
 import { marked } from "marked";
-import { BRIDGE_PORT, CLAUDE_EFFORTS, CLAUDE_MODELS, PROTOCOL_VERSION, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type ReviewEvent, type SessionRecord, type SessionRef, type Settings, type UpMsg } from "../../shared/protocol.ts";
-import { eventBelongsToSession, sessionCostLabel } from "./ui-events.ts";
+import { BRIDGE_PORT, PROTOCOL_VERSION, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type ReviewEvent, type SessionRecord, type SessionRef, type Settings, type UpMsg } from "../../shared/protocol.ts";
+import { eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
 
 declare const __VERSION__: string; // injected by build.mjs from package.json
 const md = (s: string) => marked.parse(s.replace(/</g, "&lt;"), { async: false }) as string; // raw HTML from the model is shown as text
@@ -103,7 +103,11 @@ function renderHealth(h: Health) {
   const error = h.error ?? provider?.error;
   setStatus(error ?? `${providerName} ${provider?.version ?? provider?.status ?? "starting…"}${provider?.model ? ` · ${provider.model.replace(/^claude-/, "")}` : ""} · ${mcp}`, error ? "bad" : h.figmaMcp === "up" && !failed.length ? "ok" : "warn");
   statusEl.title = [h.figmaMcp === "up" ? "" : "Figma desktop MCP server is off: Dev Mode → inspect panel → Enable desktop MCP server. The review still works without it.", ...failed].filter(Boolean).join("\n");
-  const settings = h.settings.providers[providerId]; modelSel.value = settings.model; effortSel.value = settings.effort;
+  const settings = h.settings.providers[providerId];
+  const choices = providerSettingOptions({ health: provider, settings });
+  modelSel.replaceChildren(...choices.models.map(model => new Option(model.label, model.value)));
+  effortSel.replaceChildren(...choices.efforts.map(effort => new Option(effort.label, effort.value)));
+  modelSel.value = settings.model; effortSel.value = settings.effort;
   $("about").textContent = `Sesori Review ${__VERSION__} · bridge ${h.bridge}${provider?.version ? ` · ${providerName} ${provider.version}` : ""}`;
   if (h.bridge !== __VERSION__ && !drift.isConnected) {
     drift.textContent = `Plugin ${__VERSION__} and bridge ${h.bridge} differ. Update bridge with ${INSTALL}@latest and refresh plugin from Figma.`;
@@ -188,8 +192,6 @@ function renderSessions() {
 }
 
 // ---- settings --------------------------------------------------------------
-for (const [value, label] of CLAUDE_MODELS) modelSel.append(new Option(label, value));
-for (const effort of CLAUDE_EFFORTS) effortSel.append(new Option(effort || "Default", effort));
 const pushSettings = () => {
   if (!health) return;
   const provider = live?.provider ?? health.selectedProvider;

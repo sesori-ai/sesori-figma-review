@@ -56,17 +56,25 @@ const blankSettings = (): Settings => ({
 const object = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 const text = (value: unknown): string => typeof value === "string" ? value : "";
+const providerId = (value: unknown, source: string): ProviderId => {
+  if (value === undefined || value === "claude") return "claude"; // absent is the only legacy migration case
+  if (value === "codex") return "codex";
+  throw new Error(`Unsupported provider ${JSON.stringify(value)} in ${source}`);
+};
 
 export function readSettings(): Settings {
   if (!existsSync(settingsPath())) return blankSettings();
   const raw = object(JSON.parse(readFileSync(settingsPath(), "utf8")));
   if (!raw) return blankSettings();
   const providers = object(raw.providers);
-  if (!providers) return { ...blankSettings(), providers: { ...blankSettings().providers, claude: { model: text(raw.model), effort: text(raw.effort) } } };
+  if (!providers) {
+    if (raw.provider !== undefined && raw.provider !== "claude") throw new Error("Provider-keyed settings are missing");
+    return { ...blankSettings(), providers: { ...blankSettings().providers, claude: { model: text(raw.model), effort: text(raw.effort) } } };
+  }
   const claude = object(providers.claude);
   const codex = object(providers.codex);
   return {
-    provider: raw.provider === "codex" ? "codex" : "claude",
+    provider: providerId(raw.provider, "settings.json"),
     providers: {
       claude: { model: text(claude?.model), effort: text(claude?.effort) },
       codex: { model: text(codex?.model), effort: text(codex?.effort) },
@@ -83,7 +91,7 @@ function decodeSession(value: unknown): SessionRecord | undefined {
   const anchor = object(raw?.anchor);
   const usage = object(raw?.usage);
   if (!raw || !anchor || !usage || typeof raw.sessionId !== "string") return;
-  const provider: ProviderId = raw.provider === "codex" ? "codex" : "claude";
+  const provider = providerId(raw.provider, "sessions.json");
   return {
     provider,
     sessionId: raw.sessionId,
