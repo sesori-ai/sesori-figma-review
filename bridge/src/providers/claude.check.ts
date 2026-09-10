@@ -1,24 +1,106 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReviewProvider } from "./types.ts";
 
-process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "claude-adapter-"));
+const testRoots = [mkdtempSync(join(tmpdir(), "claude-adapter-")), mkdtempSync(join(tmpdir(), "review-adapter-"))];
+process.env.CLAUDE_CONFIG_DIR = testRoots[0];
+process.env.SESORI_REVIEW_HOME = testRoots[1];
+process.on("exit", () => testRoots.forEach(root => rmSync(root, { recursive: true, force: true })));
 const {
   addClaudeUsage,
   ClaudeCostTracker,
   ClaudeDisplayMapper,
   ClaudeProvider,
   ClaudeUsageTracker,
+  createClaudeBoundaryDelegate,
   readClaudeTranscript,
   zeroClaudeUsage,
 } = await import("./claude.ts");
 const { FIGMA_TOOLS } = await import("../figma-tools.ts");
+const { workspaceFor } = await import("../workspace.ts");
+const workspace = workspaceFor("adapter-file", "Adapter fixture");
 
 assert.deepEqual(FIGMA_TOOLS.map(tool => tool.name), ["get_flow", "get_screen", "focus", "annotate", "ask_user"]);
-assert.ok(FIGMA_TOOLS.every(tool => tool.description && tool.schema));
-assert.equal(FIGMA_TOOLS.find(tool => tool.name === "get_screen")!.schema.safeParse({ nodeId: 4 }).success, false);
+assert.deepEqual(FIGMA_TOOLS.map(tool => tool.description), [
+  "Prototype flow of the user's current Figma page: screens (id, name, size) and transitions (from, to, trigger, navigation, via which element). Falls back to listing top-level frames when the page has no prototype flow.",
+  "PNG screenshot of a node plus its layer tree (ids, names, types, bounds relative to the node, text, existing annotations). Works for whole screens and for single components.",
+  "Select a node and scroll/zoom the user's canvas to it. Call it before discussing a node so the user sees what you mean.",
+  "Attach a Dev Mode annotation (markdown) to a node, appended to what is already there.",
+  "Ask the user a question about a specific spot in the design. Focuses their canvas on nodeId (if given), shows the question with optional choice buttons in the plugin, and waits for the answer. Returns the answer and the user's current selection.",
+]);
+assert.equal(FIGMA_TOOLS[1].schema.shape.scale.description, "Export scale, default 1; use 2 for small components");
+assert.equal(FIGMA_TOOLS[0].schema.safeParse({}).success, true);
+assert.equal(FIGMA_TOOLS[1].schema.safeParse({ nodeId: "1:2", scale: 2 }).success, true);
+assert.equal(FIGMA_TOOLS[1].schema.safeParse({ nodeId: 4 }).success, false);
+assert.equal(FIGMA_TOOLS[2].schema.safeParse({ nodeId: "1:2" }).success, true);
+assert.equal(FIGMA_TOOLS[3].schema.safeParse({ nodeId: "1:2", markdown: "Note" }).success, true);
+assert.equal(FIGMA_TOOLS[4].schema.safeParse({ question: "Next?", options: ["1", "2", "3", "4", "5"] }).success, false);
+
+class FakeQuery implements AsyncIterable<unknown> {
+  readonly models: (string | undefined)[] = [];
+  readonly efforts: (string | null)[] = [];
+  interrupts = 0;
+  closes = 0;
+  failEfforts = 0;
+  failModelCalls = new Set<number>();
+  nextEffortGate?: Promise<void>;
+  constructor(readonly messages: unknown[] = [], readonly statuses: unknown = []) {}
+  async *[Symbol.asyncIterator]() { yield* this.messages; }
+  async interrupt() { this.interrupts++; }
+  async setModel(model?: string) {
+    this.models.push(model);
+    if (this.failModelCalls.delete(this.models.length)) throw new Error("setModel failed");
+  }
+  async applyFlagSettings(settings: { effortLevel: string | null }) {
+    this.efforts.push(settings.effortLevel);
+    const gate = this.nextEffortGate;
+    this.nextEffortGate = undefined;
+    if (gate) await gate;
+    if (this.failEfforts-- > 0) throw new Error("effort failed");
+  }
+  async mcpServerStatus() {
+    if (this.statuses instanceof Error) throw this.statuses;
+    return this.statuses as { name: string; status: string; error?: string }[];
+  }
+  close() { this.closes++; }
+}
+class FakeWarm {
+  closes = 0;
+  queries = 0;
+  constructor(readonly nativeQuery = new FakeQuery()) {}
+  query(_prompt: AsyncIterable<unknown>) { this.queries++; return this.nativeQuery; }
+  close() { this.closes++; }
+}
+const deferred = <T>() => {
+  let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+  return { promise: new Promise<T>((yes, no) => { resolve = yes; reject = no; }), resolve, reject };
+};
+const baseRecord = {
+  provider: "claude" as const,
+  sessionId: "11111111-1111-4111-8111-111111111111",
+  title: "Fixture",
+  anchor: { type: "page" as const, nodeIds: [] },
+  pageId: "0:1",
+  pageName: "Page",
+  createdAt: "2026-01-01T00:00:00Z",
+  updatedAt: "2026-01-01T00:00:00Z",
+  turns: 0,
+  costUsd: 0,
+  costStatus: "unavailable" as const,
+  usage: zeroClaudeUsage(),
+};
+const allowBoundary = (label: string) => ({
+  tool: async () => ({ content: [{ type: "text" as const, text: label }] }),
+  permission: async () => ({ behavior: "deny" as const, message: label }),
+});
+const delegated = createClaudeBoundaryDelegate(allowBoundary("old"));
+delegated.current = allowBoundary("new");
+assert.deepEqual(await delegated.boundary.tool({ tool: "focus", args: { nodeId: "1:2" } }),
+  { content: [{ type: "text", text: "new" }] });
+assert.deepEqual(await delegated.boundary.permission({ tool: "Write", input: {} }),
+  { behavior: "deny", message: "new" });
 
 let preparedCallbacks = 0;
 const provider: ReviewProvider = new ClaudeProvider({ version: "test", log: () => {}, onPrepared: () => preparedCallbacks++ });
@@ -27,6 +109,182 @@ assert.deepEqual(provider.health({ settings: { model: "haiku", effort: "low" } }
 provider.dispose();
 assert.equal(preparedCallbacks, 1);
 assert.equal(provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
+
+type Native = NonNullable<ConstructorParameters<typeof ClaudeProvider>[0]["native"]>;
+type WarmCall = { options: Parameters<Native["warm"]>[0]["options"]; pending: ReturnType<typeof deferred<FakeWarm>> };
+const lifecycle = () => {
+  const warmCalls: WarmCall[] = [], coldQueries: FakeQuery[] = [];
+  const coldOptions: Parameters<Native["cold"]>[0]["options"][] = [];
+  const native: Native = {
+    warm: ({ options }) => {
+      const pending = deferred<FakeWarm>();
+      warmCalls.push({ options, pending });
+      return pending.promise;
+    },
+    cold: ({ options }) => { const query = new FakeQuery(); coldQueries.push(query); coldOptions.push(options); return query; },
+  };
+  let callbacks = 0;
+  const provider = new ClaudeProvider({ version: "test", log: () => {}, onPrepared: () => callbacks++, native });
+  return { provider, warmCalls, coldQueries, coldOptions, callbacks: () => callbacks };
+};
+const warmArgs = (boundary: ReturnType<typeof allowBoundary>, settings = { model: "haiku", effort: "low" }) => ({
+  fileId: "adapter-file", dir: workspace, settings, boundary,
+});
+
+// Same immutable options rebind boundary; changed model replaces pending warm and stale resolution cannot win.
+const cached = lifecycle();
+const firstBoundary = allowBoundary("first"), reboundBoundary = allowBoundary("rebound");
+cached.provider.prepare(warmArgs(firstBoundary));
+cached.provider.prepare(warmArgs(reboundBoundary));
+assert.equal(cached.warmCalls.length, 1, "same warm options do not restart native startup");
+const canUseTool = cached.warmCalls[0].options.canUseTool!;
+const permission = await canUseTool("Write", {}, {} as Parameters<typeof canUseTool>[2]);
+assert.deepEqual(permission, { behavior: "deny", message: "rebound" }, "warm permission boundary delegates to latest owner");
+cached.provider.prepare(warmArgs(reboundBoundary, { model: "sonnet", effort: "low" }));
+assert.equal(cached.warmCalls.length, 2, "model change replaces warm query");
+const staleWarm = new FakeWarm();
+cached.warmCalls[0].pending.resolve(staleWarm);
+await Promise.resolve();
+assert.equal(staleWarm.closes, 1);
+assert.equal(cached.callbacks(), 0, "stale replaced warm resolution cannot publish health");
+assert.equal(cached.provider.health({ settings: { model: "sonnet", effort: "low" } }).status, "starting");
+const currentWarm = new FakeWarm();
+cached.warmCalls[1].pending.resolve(currentWarm);
+await Promise.resolve();
+assert.equal(cached.callbacks(), 1);
+assert.equal(cached.provider.health({ settings: { model: "sonnet", effort: "low" } }).status, "ready");
+await cached.provider.start({
+  ...warmArgs(allowBoundary("start"), { model: "sonnet", effort: "low" }), baseRecord,
+});
+assert.equal(currentWarm.queries, 1, "matching warm query is consumed");
+assert.equal(cached.coldQueries.length, 0);
+
+// New prepare/dispose while consumed warm awaits fences stale success and uses a cold query for the requested start.
+const consumed = lifecycle();
+consumed.provider.prepare(warmArgs(firstBoundary));
+const consumedStart = consumed.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
+consumed.provider.prepare(warmArgs(reboundBoundary, { model: "sonnet", effort: "low" }));
+const consumedWarm = new FakeWarm();
+consumed.warmCalls[0].pending.resolve(consumedWarm);
+await consumedStart;
+assert.equal(consumedWarm.closes, 1);
+assert.equal(consumed.coldQueries.length, 1, "stale consumed warm falls back cold");
+const replacementWarm = new FakeWarm();
+consumed.warmCalls[1].pending.resolve(replacementWarm);
+await Promise.resolve();
+assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "low" } }).status, "ready");
+consumed.provider.dispose();
+await Promise.resolve();
+assert.equal(replacementWarm.closes, 1);
+assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "low" } }).status, "starting");
+
+const disposed = lifecycle();
+disposed.provider.prepare(warmArgs(firstBoundary));
+disposed.provider.dispose();
+const disposedWarm = new FakeWarm();
+disposed.warmCalls[0].pending.resolve(disposedWarm);
+await Promise.resolve();
+assert.equal(disposedWarm.closes, 1);
+assert.equal(disposed.callbacks(), 1, "dispose publishes once; stale resolution stays fenced");
+assert.equal(disposed.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
+const disposedConsumed = lifecycle();
+disposedConsumed.provider.prepare(warmArgs(firstBoundary));
+const startBeforeDispose = disposedConsumed.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
+disposedConsumed.provider.dispose();
+const staleAfterDispose = new FakeWarm();
+disposedConsumed.warmCalls[0].pending.resolve(staleAfterDispose);
+await startBeforeDispose;
+assert.equal(staleAfterDispose.closes, 1);
+assert.equal(disposedConsumed.coldQueries.length, 1);
+assert.equal(disposedConsumed.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
+
+const rejected = lifecycle();
+rejected.provider.prepare(warmArgs(firstBoundary));
+const rejectedStart = rejected.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
+rejected.warmCalls[0].pending.reject(new Error("startup failed"));
+await rejectedStart;
+assert.equal(rejected.coldQueries.length, 1, "failed consumed warm falls back cold");
+
+const mismatched = lifecycle();
+mismatched.provider.prepare(warmArgs(firstBoundary, { model: "opus", effort: "high" }));
+const mismatchedWarm = new FakeWarm();
+mismatched.warmCalls[0].pending.resolve(mismatchedWarm);
+await Promise.resolve();
+await mismatched.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
+await Promise.resolve();
+assert.equal(mismatchedWarm.closes, 1, "start never consumes a previous, potentially pricier settings entry");
+assert.equal(mismatched.coldQueries.length, 1);
+assert.equal(mismatched.coldOptions[0].model, "haiku");
+assert.equal(mismatched.coldOptions[0].effort, "low");
+const effortChanged = lifecycle();
+effortChanged.provider.prepare(warmArgs(firstBoundary));
+effortChanged.provider.prepare(warmArgs(firstBoundary, { model: "haiku", effort: "high" }));
+assert.equal(effortChanged.warmCalls.length, 2, "effort change replaces warm query");
+const oldEffortWarm = new FakeWarm(), newEffortWarm = new FakeWarm();
+effortChanged.warmCalls[0].pending.resolve(oldEffortWarm);
+effortChanged.warmCalls[1].pending.resolve(newEffortWarm);
+await Promise.resolve();
+assert.equal(oldEffortWarm.closes, 1);
+effortChanged.provider.dispose();
+await Promise.resolve();
+assert.equal(newEffortWarm.closes, 1);
+
+const sessionWith = async (query: FakeQuery) => {
+  const native: Native = { warm: async () => new FakeWarm(), cold: () => query };
+  const provider = new ClaudeProvider({ version: "test", log: () => {}, onPrepared: () => {}, native });
+  return provider.start({ ...warmArgs(firstBoundary), resume: baseRecord.sessionId, baseRecord });
+};
+
+// Partial update rolls back; updates serialize, while Stop stays independent of the settings queue.
+const settingsQuery = new FakeQuery();
+const settingsSession = await sessionWith(settingsQuery);
+settingsQuery.failEfforts = 1;
+await assert.rejects(settingsSession.applySettings({ settings: { model: "sonnet", effort: "high" } }), /effort failed/);
+assert.deepEqual(settingsQuery.models, ["sonnet", "haiku"]);
+assert.deepEqual(settingsQuery.efforts, ["high", "low"]);
+const effortGate = deferred<void>();
+settingsQuery.nextEffortGate = effortGate.promise;
+const firstUpdate = settingsSession.applySettings({ settings: { model: "sonnet", effort: "medium" } });
+await Promise.resolve(); await Promise.resolve();
+const secondUpdate = settingsSession.applySettings({ settings: { model: "opus", effort: "low" } });
+await Promise.resolve();
+assert.equal(settingsQuery.models.at(-1), "sonnet", "second settings update waits for first");
+await settingsSession.interrupt();
+assert.equal(settingsQuery.interrupts, 1, "Stop is independent of settings serialization");
+effortGate.resolve();
+await firstUpdate; await secondUpdate;
+assert.deepEqual(settingsQuery.models.slice(-2), ["sonnet", "opus"]);
+
+const rollbackQuery = new FakeQuery();
+const rollbackSession = await sessionWith(rollbackQuery);
+rollbackQuery.failEfforts = 1;
+rollbackQuery.failModelCalls.add(2);
+await assert.rejects(rollbackSession.applySettings({ settings: { model: "sonnet", effort: "high" } }), /session closed/);
+assert.equal(rollbackQuery.closes, 1, "failed rollback closes unknown-state session");
+await assert.rejects(rollbackSession.applySettings({ settings: { model: "opus", effort: "low" } }), /session is closed/);
+
+// Actual session iteration keeps native init MCP status if refresh fails, then emits normalized accounting.
+const initQuery = new FakeQuery([
+  { type: "system", subtype: "init", session_id: baseRecord.sessionId, claude_code_version: "test", model: "haiku",
+    mcp_servers: [{ name: "figma", status: "failed", error: "not connected" }, { name: "figma-desktop", status: "disconnected" }] },
+  { type: "result", is_error: false, usage: { input_tokens: 2, output_tokens: 3 }, total_cost_usd: 0.01 },
+], new Error("refresh failed"));
+const initLogs: unknown[][] = [];
+const initNative: Native = { warm: async () => new FakeWarm(), cold: () => initQuery };
+const initProvider = new ClaudeProvider({ version: "test", log: (...values) => initLogs.push(values), onPrepared: () => {}, native: initNative });
+const initSession = await initProvider.start({ ...warmArgs(firstBoundary), resume: baseRecord.sessionId, baseRecord });
+const outputs = [];
+for await (const output of initSession.output) outputs.push(output);
+const initialized = outputs.find(output => output.kind === "initialized");
+assert.deepEqual(initialized?.servers, [
+  { name: "figma", status: "failed", error: "not connected" },
+  { name: "figma-desktop", status: "disconnected", error: undefined },
+]);
+assert.ok(initLogs.some(values => String(values[0]).includes("using init snapshot")));
+assert.deepEqual(outputs.at(-1), {
+  kind: "usage", usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0 },
+  cost: { usd: 0.01, status: "reported" }, turnCompleted: true,
+});
 
 let usage = addClaudeUsage(zeroClaudeUsage(), {
   input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 100, cache_creation_input_tokens: 7,
@@ -54,37 +312,43 @@ assert.deepEqual(responses.complete({ input_tokens: 22, output_tokens: 12, cache
 const resumedCost = new ClaudeCostTracker({ baseUsd: 1.5, baseStatus: "reported" });
 assert.deepEqual(resumedCost.complete(0.1), { usd: 1.6, status: "reported" });
 assert.deepEqual(resumedCost.complete(0.25), { usd: 1.75, status: "reported" }, "cost uses immutable resume baseline");
+for (const invalid of [undefined, Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+  assert.deepEqual(resumedCost.complete(invalid), { usd: 1.75, status: "unavailable" });
+}
+assert.deepEqual(resumedCost.complete(0.4), { usd: 1.9, status: "reported" }, "valid native cost recovers reporting");
 
-const session = { provider: "claude" as const, sessionId: "s1" };
+const nativeSession = "11111111-1111-4111-8111-111111111111";
+const session = { provider: "claude" as const, sessionId: nativeSession };
 const display = new ClaudeDisplayMapper();
-const map = (message: unknown) => display.map({ message, sessionId: "s1", interrupted: false });
+const map = (message: unknown) => display.map({ message, sessionId: nativeSession, interrupted: false });
 assert.deepEqual(map({ type: "stream_event", uuid: "a", event: { type: "message_start", message: { id: "msg" } } }), []);
 assert.deepEqual(map({ type: "stream_event", uuid: "b", event: { type: "content_block_start", index: 0, content_block: { type: "thinking" } } }), []);
 assert.deepEqual(map({ type: "stream_event", uuid: "c", event: { type: "content_block_stop", index: 0 } }), []);
 assert.deepEqual(map({ type: "stream_event", uuid: "d", event: { type: "content_block_start", index: 1, content_block: { type: "text" } } }),
-  [{ type: "text_start", session, itemId: "s1:msg:1" }]);
+  [{ type: "text_start", session, itemId: `${nativeSession}:msg:1` }]);
 assert.deepEqual(map({ type: "stream_event", uuid: "e", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Hi" } } }),
-  [{ type: "text_delta", session, itemId: "s1:msg:1", text: "Hi" }]);
+  [{ type: "text_delta", session, itemId: `${nativeSession}:msg:1`, text: "Hi" }]);
 assert.deepEqual(map({ type: "stream_event", uuid: "f", event: { type: "content_block_stop", index: 1 } }),
-  [{ type: "text_end", session, itemId: "s1:msg:1" }]);
+  [{ type: "text_end", session, itemId: `${nativeSession}:msg:1` }]);
 assert.deepEqual(map({ type: "assistant", message: { content: [{ type: "tool_use", id: "t", name: "mcp__figma__focus", input: { nodeId: "1:2" } }] } }),
   [{ type: "tool", session, itemId: "t", name: "mcp__figma__focus", input: { nodeId: "1:2" } }]);
 
 const dir = join(tmpdir(), "adapter workspace");
 const transcriptDir = join(process.env.CLAUDE_CONFIG_DIR, "projects", dir.replace(/[^a-zA-Z0-9]/g, "-"));
 mkdirSync(transcriptDir, { recursive: true });
-writeFileSync(join(transcriptDir, "s1.jsonl"), [
+writeFileSync(join(transcriptDir, `${nativeSession}.jsonl`), [
   { type: "user", message: { content: "[Figma file F]\nReview.\n[Current selection: none]" } },
-  { type: "assistant", message: { content: [{ type: "thinking", thinking: "hidden" }, { type: "tool_use", id: "q", name: "mcp__figma__ask_user", input: { question: "Next?" } }] } },
+  { type: "assistant", message: { content: [{ type: "thinking", thinking: "hidden" }, { type: "image", source: { data: "hidden" } }, { type: "tool_use", id: "q", name: "mcp__figma__ask_user", input: { question: "Next?" } }] } },
   { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "q", content: "Next\n[Current selection: none]" }] } },
   { type: "assistant", message: { content: [{ type: "text", text: "Done" }] } },
 ].map(value => JSON.stringify(value)).join("\n"));
-assert.deepEqual(readClaudeTranscript({ dir, sessionId: "s1" }), [
+assert.deepEqual(readClaudeTranscript({ dir, sessionId: nativeSession }), [
   { role: "user", text: "Review." },
   { role: "tool", name: "mcp__figma__ask_user", input: { question: "Next?" } },
   { role: "answer", text: "Next" },
   { role: "assistant", text: "Done" },
 ]);
-assert.deepEqual(readClaudeTranscript({ dir, sessionId: "missing" }), []);
+assert.deepEqual(readClaudeTranscript({ dir, sessionId: "33333333-3333-4333-8333-333333333333" }), []);
+assert.throws(() => readClaudeTranscript({ dir, sessionId: "../../outside" }), /Invalid Claude native session id/);
 
 console.log("claude adapter check ok");

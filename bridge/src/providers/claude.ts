@@ -1,7 +1,4 @@
-import { createSdkMcpServer, query, startup, tool, type Options, type Query, type SDKUserMessage, type WarmQuery } from "@anthropic-ai/claude-agent-sdk";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { createSdkMcpServer, query, startup, tool, type Options, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
   FIGMA_MCP_URL,
   type CostStatus,
@@ -16,7 +13,39 @@ import {
 } from "../../../shared/protocol.ts";
 import { FIGMA_TOOLS } from "../figma-tools.ts";
 import { readAllow } from "../workspace.ts";
+import { readClaudeTranscript } from "./claude-history.ts";
 import type { ProviderOutput, ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./types.ts";
+
+type NativeServerStatus = { name: string; status: string; error?: string };
+type NativeQuery = AsyncIterable<unknown> & {
+  interrupt(): Promise<void>;
+  setModel(model?: string): Promise<void>;
+  applyFlagSettings(settings: { effortLevel: string | null }): Promise<void>;
+  mcpServerStatus(): Promise<NativeServerStatus[]>;
+  close(): void;
+};
+type NativeWarmQuery = { query(prompt: AsyncIterable<SDKUserMessage>): NativeQuery; close(): void };
+type NativeFactory = {
+  cold(args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }): NativeQuery;
+  warm(args: { options: Options }): Promise<NativeWarmQuery>;
+};
+const wrapQuery = (sdkQuery: Query): NativeQuery => ({
+  [Symbol.asyncIterator]: () => sdkQuery[Symbol.asyncIterator](),
+  interrupt: async () => { await sdkQuery.interrupt(); },
+  setModel: model => sdkQuery.setModel(model),
+  applyFlagSettings: settings => sdkQuery.applyFlagSettings({
+    effortLevel: settings.effortLevel as Parameters<Query["applyFlagSettings"]>[0]["effortLevel"],
+  }),
+  mcpServerStatus: () => sdkQuery.mcpServerStatus(),
+  close: () => sdkQuery.close(),
+});
+const DEFAULT_NATIVE: NativeFactory = {
+  cold: args => wrapQuery(query(args)),
+  warm: args => startup(args).then(warm => ({
+    query: prompt => wrapQuery(warm.query(prompt)),
+    close: () => warm.close(),
+  })),
+};
 
 const CLAUDE_EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const CLAUDE_MODELS: readonly (readonly [value: string, label: string])[] = [
@@ -40,6 +69,12 @@ export const addClaudeUsage = (total: Usage, value: unknown): Usage => {
     cacheWrite: total.cacheWrite + number(usage?.cache_creation_input_tokens),
   };
 };
+const serverStatuses = (value: unknown): { name: string; status: string; error?: string }[] =>
+  (Array.isArray(value) ? value : []).flatMap(item => {
+    const server = object(item);
+    if (typeof server?.name !== "string" || typeof server.status !== "string") return [];
+    return [{ name: server.name, status: server.status, error: typeof server.error === "string" ? server.error : undefined }];
+  });
 const sumUsage = (left: Usage, right: Usage): Usage => ({
   input: left.input + right.input,
   output: left.output + right.output,
@@ -86,7 +121,11 @@ export class ClaudeCostTracker {
     this.current = { usd: args.baseUsd, status: args.baseStatus };
   }
   complete(nativeCumulativeUsd: unknown) {
-    this.current = { usd: this.baseUsd + number(nativeCumulativeUsd), status: "reported" };
+    if (typeof nativeCumulativeUsd !== "number" || !Number.isFinite(nativeCumulativeUsd) || nativeCumulativeUsd < 0) {
+      this.current = { usd: this.current.usd, status: "unavailable" };
+      return this.snapshot();
+    }
+    this.current = { usd: Math.max(this.current.usd, this.baseUsd + nativeCumulativeUsd), status: "reported" };
     return this.snapshot();
   }
   snapshot() { return { ...this.current }; }
@@ -229,10 +268,21 @@ class ClaudeSession implements ReviewSession {
   readonly provider = "claude" as const;
   readonly output: AsyncIterable<ProviderOutput>;
   private interrupted = false;
+  private effectiveSettings: ProviderSettings;
+  private settingsQueue = Promise.resolve();
+  private closed = false;
 
-  constructor(args: { query: Query; push: (message: SDKUserMessage | null) => void; baseRecord: ProviderSessionRecord; log: (...values: unknown[]) => void }) {
+  constructor(args: {
+    query: NativeQuery;
+    push: (message: SDKUserMessage | null) => void;
+    baseRecord: ProviderSessionRecord;
+    settings: ProviderSettings;
+    log: (...values: unknown[]) => void;
+  }) {
     this.query = args.query;
     this.push = args.push;
+    this.effectiveSettings = { ...args.settings };
+    this.log = args.log;
     const self = this;
     this.output = (async function* () {
       let sessionId = "";
@@ -243,7 +293,9 @@ class ClaudeSession implements ReviewSession {
         const message = object(sdkMessage);
         if (message?.type === "system" && message.subtype === "init" && typeof message.session_id === "string") {
           sessionId = message.session_id;
-          const servers = await self.query.mcpServerStatus().catch(() => []);
+          let servers = serverStatuses(message.mcp_servers);
+          try { servers = serverStatuses(await self.query.mcpServerStatus()); }
+          catch (error) { args.log("failed to refresh Claude MCP status; using init snapshot", error); }
           yield {
             kind: "initialized",
             sessionId,
@@ -254,7 +306,7 @@ class ClaudeSession implements ReviewSession {
               model: typeof message.model === "string" ? message.model : undefined,
               models: claudeModels(),
             },
-            servers: servers.map(server => ({ name: server.name, status: server.status, error: server.error })),
+            servers,
           };
         }
         for (const event of display.map({ message: sdkMessage, sessionId, interrupted: self.interrupted })) yield { kind: "event", event };
@@ -280,26 +332,83 @@ class ClaudeSession implements ReviewSession {
     })();
   }
 
-  private readonly query: Query;
+  private readonly query: NativeQuery;
   private readonly push: (message: SDKUserMessage | null) => void;
+  private readonly log: (...values: unknown[]) => void;
 
   send(args: { text: string; selection: NodeRef[]; context?: string }) { this.push(userMessage(args)); }
   async interrupt() { this.interrupted = true; await this.query.interrupt(); }
-  async applySettings(args: { settings: ProviderSettings }) {
-    await this.query.setModel(args.settings.model || undefined);
-    await this.query.applyFlagSettings({ effortLevel: (args.settings.effort || null) as Parameters<Query["applyFlagSettings"]>[0]["effortLevel"] });
+  applySettings(args: { settings: ProviderSettings }): Promise<void> {
+    const requested = { ...args.settings };
+    const update = this.settingsQueue.then(async () => {
+      if (this.closed) throw new Error("Claude session is closed");
+      const previous = this.effectiveSettings;
+      try {
+        await this.query.setModel(requested.model || undefined);
+        await this.query.applyFlagSettings({ effortLevel: requested.effort || null });
+        this.effectiveSettings = requested;
+      } catch (error) {
+        try {
+          await this.query.setModel(previous.model || undefined);
+          await this.query.applyFlagSettings({ effortLevel: previous.effort || null });
+        } catch (rollbackError) {
+          this.close();
+          throw new Error(`Claude settings update failed and rollback failed; session closed: ${String(rollbackError)}`, { cause: error });
+        }
+        throw error;
+      }
+    });
+    this.settingsQueue = update.catch(error => this.log("Claude settings update failed", error));
+    return update;
   }
-  close() { this.push(null); this.query.close(); }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.push(null);
+    this.query.close();
+  }
 }
 
 const claudeModels = () => CLAUDE_MODELS.map(([value, label]) => ({ value, label, efforts: [...CLAUDE_EFFORTS] }));
 
+type BoundaryDelegate = { current: ProviderRequestBoundary; boundary: ProviderRequestBoundary };
+export const createClaudeBoundaryDelegate = (initial: ProviderRequestBoundary): BoundaryDelegate => {
+  const delegate: BoundaryDelegate = {
+    current: initial,
+    boundary: {
+      tool: request => delegate.current.tool(request),
+      permission: request => delegate.current.permission(request),
+    },
+  };
+  return delegate;
+};
+type WarmEntry = {
+  fileId: string;
+  dir: string;
+  settings: ProviderSettings;
+  delegate: BoundaryDelegate;
+  query: Promise<NativeWarmQuery>;
+};
+const matchesWarm = (entry: WarmEntry, args: {
+  fileId: string;
+  dir: string;
+  settings: ProviderSettings;
+  boundary: ProviderRequestBoundary;
+}) => entry.fileId === args.fileId && entry.dir === args.dir
+  && entry.settings.model === args.settings.model && entry.settings.effort === args.settings.effort;
+
 export class ClaudeProvider implements ReviewProvider {
   readonly id = "claude" as const;
-  private warm?: { dir: string; query: Promise<WarmQuery> };
-  private runtime?: { prepared?: boolean; error?: string };
+  private warm?: WarmEntry;
+  private runtime?: { owner: WarmEntry; prepared?: boolean; error?: string };
+  private readonly native: NativeFactory;
 
-  constructor(private readonly args: { version: string; log: (...values: unknown[]) => void; onPrepared: () => void }) {}
+  constructor(private readonly args: {
+    version: string;
+    log: (...values: unknown[]) => void;
+    onPrepared: () => void;
+    native?: NativeFactory;
+  }) { this.native = args.native ?? DEFAULT_NATIVE; }
 
   health(args: { settings: ProviderSettings }): ProviderHealth {
     return {
@@ -311,21 +420,37 @@ export class ClaudeProvider implements ReviewProvider {
     };
   }
 
+  private closeWarm(entry: WarmEntry, reason: string) {
+    entry.query.then(query => query.close(), error => this.args.log(`${reason}: warm query failed before close`, error));
+  }
+
   prepare(args: { fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary }) {
-    if (this.warm?.dir === args.dir) return;
+    if (this.warm && matchesWarm(this.warm, args)) {
+      this.warm.delegate.current = args.boundary;
+      return;
+    }
     const previous = this.warm;
     this.warm = undefined;
-    previous?.query.then(query => query.close()).catch(error => this.args.log("failed to close replaced warm query", error));
-    this.runtime = undefined;
-    const entry = { dir: args.dir, query: startup({ options: options({ ...args, version: this.args.version, log: this.args.log }) }) };
+    if (previous) this.closeWarm(previous, "replaced warm query");
+    const delegate = createClaudeBoundaryDelegate(args.boundary);
+    const entry: WarmEntry = {
+      fileId: args.fileId,
+      dir: args.dir,
+      settings: { ...args.settings },
+      delegate,
+      query: this.native.warm({
+        options: options({ ...args, boundary: delegate.boundary, version: this.args.version, log: this.args.log }),
+      }),
+    };
     this.warm = entry;
+    this.runtime = { owner: entry };
     entry.query.then(() => {
-      if (this.warm !== entry) return;
-      this.runtime = { prepared: true };
+      if (this.warm !== entry || this.runtime?.owner !== entry) return;
+      this.runtime = { owner: entry, prepared: true };
       this.args.onPrepared();
     }, error => {
-      if (this.warm !== entry) return;
-      this.runtime = { error: `Claude failed to start: ${error instanceof Error ? error.message : String(error)}` };
+      if (this.warm !== entry || this.runtime?.owner !== entry) return;
+      this.runtime = { owner: entry, error: `Claude failed to start: ${error instanceof Error ? error.message : String(error)}` };
       this.warm = undefined;
       this.args.onPrepared();
     });
@@ -340,21 +465,47 @@ export class ClaudeProvider implements ReviewProvider {
     baseRecord: ProviderSessionRecord;
   }): Promise<ReviewSession> {
     const input = inputStream();
-    let sdkQuery: Query | undefined;
-    if (!args.resume && this.warm?.dir === args.dir) {
-      const warm = this.warm;
+    let nativeQuery: NativeQuery | undefined;
+    const warm = this.warm;
+    if (warm && (!args.resume && matchesWarm(warm, args))) {
+      warm.delegate.current = args.boundary;
       this.warm = undefined;
       try {
-        sdkQuery = (await warm.query).query(input.stream);
-        this.runtime = { prepared: true };
-        this.args.onPrepared();
+        const resolved = await warm.query;
+        if (this.runtime?.owner === warm) {
+          nativeQuery = resolved.query(input.stream);
+          this.runtime = { owner: warm, prepared: true };
+          this.args.onPrepared();
+        } else {
+          resolved.close();
+          this.args.log("discarded stale consumed warm query");
+        }
       } catch (error) {
-        this.runtime = undefined;
+        if (this.runtime?.owner === warm) {
+          this.runtime = undefined;
+          this.args.onPrepared();
+        }
         this.args.log("pre-warmed query unusable, starting cold", error);
       }
+    } else if (warm) {
+      this.warm = undefined;
+      if (this.runtime?.owner === warm) {
+        this.runtime = undefined;
+        this.args.onPrepared();
+      }
+      this.closeWarm(warm, "incompatible warm query");
     }
-    sdkQuery ??= query({ prompt: input.stream, options: options({ ...args, version: this.args.version, log: this.args.log }) });
-    return new ClaudeSession({ query: sdkQuery, push: input.push, baseRecord: args.baseRecord, log: this.args.log });
+    nativeQuery ??= this.native.cold({
+      prompt: input.stream,
+      options: options({ ...args, version: this.args.version, log: this.args.log }),
+    });
+    return new ClaudeSession({
+      query: nativeQuery,
+      push: input.push,
+      baseRecord: args.baseRecord,
+      settings: args.settings,
+      log: this.args.log,
+    });
   }
 
   readHistory(args: { dir: string; sessionId: string }): HistoryItem[] { return readClaudeTranscript(args); }
@@ -362,47 +513,10 @@ export class ClaudeProvider implements ReviewProvider {
     const warm = this.warm;
     this.warm = undefined;
     this.runtime = undefined;
-    warm?.query.then(query => query.close()).catch(error => this.args.log("failed to close disposed warm query", error));
+    if (warm) this.closeWarm(warm, "disposed warm query");
     this.args.onPrepared();
   }
 }
 
-/** Claude Code native transcript projection. Hidden reasoning and screenshot bytes are excluded. */
-export function readClaudeTranscript(args: { dir: string; sessionId: string }): HistoryItem[] {
-  const root = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-  const path = join(root, "projects", args.dir.replace(/[^a-zA-Z0-9]/g, "-"), `${args.sessionId}.jsonl`);
-  if (!existsSync(path)) return [];
-  const out: HistoryItem[] = [];
-  const toolNames = new Map<string, string>();
-  const strip = (text: string) => text.split("\n").filter(line => !/^\[(Figma file |Current selection: )/.test(line)).join("\n").trim();
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    let parsed: unknown;
-    try { parsed = JSON.parse(line); } catch { continue; } // native transcripts can end with a partial line after interruption
-    const record = object(parsed);
-    const content = object(record?.message)?.content;
-    if (record?.type === "user" && !record.isMeta) {
-      if (typeof content === "string") out.push({ role: "user", text: strip(content) });
-      for (const blockValue of Array.isArray(content) ? content : []) {
-        const block = object(blockValue);
-        if (block?.type === "text" && typeof block.text === "string" && /^\[Request interrupted/.test(block.text)) {
-          out.push({ role: "tool", name: "stopped", input: {} });
-        } else if (block?.type === "tool_result" && typeof block.tool_use_id === "string" && toolNames.get(block.tool_use_id) === "mcp__figma__ask_user") {
-          const values = Array.isArray(block.content) ? block.content : [];
-          const answer = typeof block.content === "string" ? block.content : values.map(value => object(value)?.text ?? "").join("");
-          out.push({ role: "answer", text: strip(String(answer)) });
-        }
-      }
-    }
-    if (record?.type === "assistant") for (const blockValue of Array.isArray(content) ? content : []) {
-      const block = object(blockValue);
-      if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) out.push({ role: "assistant", text: block.text });
-      if (block?.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
-        toolNames.set(block.id, block.name);
-        out.push({ role: "tool", name: block.name, input: object(block.input) ?? {} });
-      }
-    }
-  }
-  return out;
-}
-
+export { readClaudeTranscript } from "./claude-history.ts";
 export { zeroUsage as zeroClaudeUsage };

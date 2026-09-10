@@ -79,7 +79,7 @@ Important observed contracts:
   be combined. Existing personal MCP/plugin/features may be enabled by default.
 
 These are schema/documentation findings, **not runtime proof**. `0.154.0` is a qualification candidate, not yet a
-supported release claim. Step 3/4 must qualify it and record the exact tested version and supported auth routes.
+supported release claim. Steps 4/5 must qualify it and record the exact tested version and supported auth routes.
 
 References:
 - <https://developers.openai.com/codex/app-server>
@@ -266,12 +266,13 @@ reproducible inspection against the qualified schema. No hand edits to generated
 
 - **What / why:** Add provider identities, qualified refs, normalized events/health/models/cost types, provider
   interfaces, neutral validated Figma catalog, and complete unwired Claude adapter with native history, lifecycle,
-  usage/cost and stream mapping. Keep released bridge/UI/wire/settings/session behavior active and unchanged.
+  usage/cost and stream mapping. Keep released UI/wire/settings/session behavior active and unchanged. Legacy bridge
+  may consume the exact neutral tool catalog and shared stateless transcript projection without adapter activation.
 - **Complexity:** Additive foundation; target approximately 750–1,000 changed lines.
 - **Risk and test focus:** Adapter contract typing, schema neutrality, transcript projection, mixed block identity,
   per-response live usage, per-turn result usage, immutable resumed cost, and warm/dispose truthfulness.
-- **Expected result:** Independently passing dormant provider foundation. No Codex exposure, migration, protocol bump,
-  or live bridge/UI behavior change.
+- **Expected result:** Independently passing dormant provider foundation. No Codex exposure, migration or protocol
+  bump. Legacy tool metadata/history output remain intact; unsafe non-native transcript IDs reject before file access.
 
 ### 3. 🚧 [codex-support] Activate normalized review workflows [step 3/8]
 

@@ -6,7 +6,8 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FIGMA_MCP_URL, type HistoryItem, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
+import { FIGMA_MCP_URL, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
+import { readClaudeTranscript } from "./providers/claude-history.ts";
 
 export const HOME = process.env.SESORI_REVIEW_HOME ?? join(homedir(), ".sesori-review");
 
@@ -58,35 +59,8 @@ export function saveSession(dir: string, rec: SessionRecord) {
   writeFileSync(join(dir, "sessions.json"), JSON.stringify([...rest, rec], null, 2) + "\n");
 }
 
-/** Past messages of a session, read from Claude Code's own transcript (~/.claude/projects/<cwd slug>/<id>.jsonl).
- *  ponytail: depends on the CLI's file layout; if it changes, log our own copy from pump() instead. */
-export function readTranscript(dir: string, sessionId: string): HistoryItem[] {
-  const root = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-  const path = join(root, "projects", dir.replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`);
-  if (!existsSync(path)) return [];
-  const out: HistoryItem[] = [];
-  const toolNames = new Map<string, string>();
-  const strip = (s: string) => s.split("\n").filter(l => !/^\[(Figma file |Current selection: )/.test(l)).join("\n").trim(); // our context lines
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    let l: any; try { l = JSON.parse(line); } catch { continue; }
-    const c = l?.message?.content;
-    if (l.type === "user" && !l.isMeta) {
-      if (typeof c === "string") out.push({ role: "user", text: strip(c) });
-      for (const b of Array.isArray(c) ? c : []) {
-        if (b.type === "text" && /^\[Request interrupted/.test(b.text)) out.push({ role: "tool", name: "stopped", input: {} });
-        else if (b.type === "tool_result" && toolNames.get(b.tool_use_id) === "mcp__figma__ask_user") {
-          const t = typeof b.content === "string" ? b.content : (b.content ?? []).map((x: any) => x.text ?? "").join("");
-          out.push({ role: "answer", text: strip(t) });
-        }
-      }
-    }
-    if (l.type === "assistant") for (const b of Array.isArray(c) ? c : []) {
-      if (b.type === "text" && b.text.trim()) out.push({ role: "assistant", text: b.text });
-      if (b.type === "tool_use") { toolNames.set(b.id, b.name); out.push({ role: "tool", name: b.name, input: b.input }); }
-    }
-  }
-  return out;
-}
+/** Legacy wrapper retained until normalized workflow activation. */
+export const readTranscript = (dir: string, sessionId: string) => readClaudeTranscript({ dir, sessionId });
 
 export const zeroUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 /** Add one turn's totals (the `usage` on the SDK result message; per-block assistant usage is not final). */

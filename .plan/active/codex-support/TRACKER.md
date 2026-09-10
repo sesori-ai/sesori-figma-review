@@ -10,7 +10,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | Step | Exact title | State |
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
-| 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Implemented and verified locally on `codex-support-foundations`; pending parent publication |
+| 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | PR #3 feedback fixed/verified locally; pending parent push and current-head review |
 | 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Not started; coordinated activation from preserved checkpoint obligations |
 | 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
@@ -34,8 +34,10 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   (https://github.com/sesori-ai/sesori-figma-review/pull/2) was closed as superseded, not merged or abandoned.
 - Foundation boundary: additive provider-neutral IDs/refs/events/health/model/cost contracts, provider interfaces,
   neutral Zod Figma catalog, complete dormant Claude adapter, and focused adapter/history/stream/accounting tests.
-  Released `UpMsg`/`DownMsg`/`Health`/`Settings`/`SessionRecord`, bridge flow, plugin UI and protocol remain active and
-  unchanged. This slice does not expose Codex, migrate persistence, or claim new UI/protocol behavior.
+  Released `UpMsg`/`DownMsg`/`Health`/`Settings`/`SessionRecord`, plugin UI and protocol remain active and unchanged.
+  Approved stateless reuse makes legacy bridge tools consume the exact neutral catalog and makes legacy history call
+  the shared Claude transcript leaf; metadata/output stay identical while unsafe non-native IDs now reject. This
+  slice does not expose Codex, migrate persistence, or claim new UI/protocol behavior.
 - Step 3 activation must retain valid checkpoint fixes: provider-scoped health/settings; immutable request/session
   ownership; protocol v3 mixed-version guidance; single connection/view intent for start/reconnect/History/cards;
   file-scoped close; settings-await fencing; normalized block identity/usage/cost; and self-owned bounded smoke.
@@ -43,11 +45,12 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   four-turn/$0.10 limits and no credential/config copying. They prove preserved intent, not this dormant foundation.
   Later live tests retain those rules. Codex tests use cheapest suitable catalog-reported image/tool-capable model and
   low effort; ask before premium/high-effort exceptions.
-- Foundation diff is 720 changed lines (688 additions, 32 deletions), within the cap and leaner than the rough
-  750–1,000 estimate without omitted proof. `npm ci`, workspace checks, focused Claude adapter check, both builds and `git diff --check` pass. Tests cover
-  neutral tool schemas/models, interface conformance, dispose health, native transcript filtering, provider-qualified
-  stream/tool mapping, text-only block lifecycle, cumulative response deltas, per-turn results and immutable resumed
-  cost. No live bridge/plugin file or legacy wire type changed; no paid/native turn was run for dormant wiring.
+- Foundation current diff is 1,240 changed lines (1,158 additions, 82 deletions), within the 1,500-line cap. `npm ci`, legacy workspace checks, focused mocked Claude adapter
+  checks, both builds and `git diff --check` pass. Tests cover exact legacy tool metadata/schema compatibility;
+  warm settings/boundary identity, replacement/consume/cold fallback/dispose/stale fencing; serialized settings,
+  rollback and fail-closed behavior; init MCP fallback; safe UUID transcript projection; normalized stream identity;
+  cumulative response/per-turn usage; and invalid/recovered immutable cost. No legacy wire/UI/session schema changed;
+  no paid/native turn was run for deterministic dormant-adapter fixes.
 
 ## Qualification gates before user-facing Codex exposure
 
@@ -71,6 +74,19 @@ Later `a359823` packaging-baseline reconciliation was parent-reviewed only; it p
 and adds artifact verification without changing provider architecture. Do not describe that revision as separately
 approved by the subagent. Closed PR #2 review findings remain obligations for Step 3 activation; neither its revised
 code nor this replacement foundation has a new architecture-approval claim.
+
+PR #3 current-head findings and local dispositions:
+
+| Review comment IDs | Disposition |
+| --- | --- |
+| 3981475303, 3981525719 | Fixed at warm-entry identity: immutable file/dir/settings match, safely rebound boundary delegate, stale consumed/replaced/disposed results fenced; mocked lifecycle paths covered. |
+| 3981475321, 3981525731 | Fixed: session-owned effective settings, serialized updates, rollback after partial failure, fail-closed session on rollback failure; Stop stays independent. |
+| 3981475312, 3981525775 | Fixed: normalized init MCP snapshot survives refresh rejection and failure is logged. |
+| 3981525724, 3981525785 | Fixed: UUID-only native IDs before path construction; one SDK-free transcript leaf serves legacy wrapper and adapter, preserving filtering/interruption/trailing lines. |
+| 3981525740 | Fixed: invalid/nonfinite/negative native cost preserves known amount as unavailable; later valid cumulative cost recovers reported status. |
+| 3981525759 | Fixed: exact released descriptions/hints/schemas restored; legacy bridge uses neutral catalog through unchanged old tool/reply flow. |
+| 3981525734 | Fixed: narrow injectable Claude-native factory; mocked prepare/start/session iteration, lifecycle, MCP and settings paths; owned temp roots auto-clean. |
+| 3981525766, 3981525781 | Fixed: usage/cost documented as replacement cumulative session snapshots; transport/native-session qualification refs corrected to Steps 4/5. |
 
 ## Retirement
 

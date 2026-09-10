@@ -3,9 +3,10 @@
 import { createSdkMcpServer, query, startup, tool, type Options, type Query, type SDKUserMessage, type WarmQuery } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import { z } from "zod";
+import type { ZodRawShape } from "zod";
 import { BRIDGE_PORT, FIGMA_MCP_URL, type DownMsg, type Health, type NodeRef, type PermissionDecision, type SessionRecord, type ToolResult, type UpMsg } from "../../shared/protocol.ts";
 import { readFileSync } from "node:fs";
+import { FIGMA_TOOLS } from "./figma-tools.ts";
 import { addUsage, hasClaudeAuth, installPlugin, readAllow, readSessions, readSettings, readTranscript, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
 
 const emitWarning = process.emitWarning.bind(process); // ponytail: the SDK warns that allowedTools bypasses canUseTool; that is our auto-approve list by design
@@ -34,21 +35,15 @@ function ask<T>(fileId: string, m: { kind: "tool"; tool: string; args: Record<st
 
 // ---- Figma tools (in-process MCP server; each call is executed by the plugin) --------
 const disconnected: ToolResult = { content: [{ type: "text", text: "The Figma plugin is not connected. Ask the user to reopen it." }], isError: true };
-const figmaTool = (fileId: string, name: string, description: string, shape: z.ZodRawShape) =>
+const figmaTool = (fileId: string, name: string, description: string, shape: ZodRawShape) =>
   tool(name, description, shape, args => ask(fileId, { kind: "tool", tool: name, args }, disconnected));
 
 // One server instance per query: an MCP server instance binds to a single transport.
-const figmaServer = (fileId: string) => createSdkMcpServer({ name: "figma", version: VERSION, tools: [
-  figmaTool(fileId, "get_flow", "Prototype flow of the user's current Figma page: screens (id, name, size) and transitions (from, to, trigger, navigation, via which element). Falls back to listing top-level frames when the page has no prototype flow.", {}),
-  figmaTool(fileId, "get_screen", "PNG screenshot of a node plus its layer tree (ids, names, types, bounds relative to the node, text, existing annotations). Works for whole screens and for single components.",
-    { nodeId: z.string().describe("Node id such as 12:34"), scale: z.number().min(0.25).max(3).optional().describe("Export scale, default 1; use 2 for small components") }),
-  figmaTool(fileId, "focus", "Select a node and scroll/zoom the user's canvas to it. Call it before discussing a node so the user sees what you mean.", { nodeId: z.string() }),
-  figmaTool(fileId, "annotate", "Attach a Dev Mode annotation (markdown) to a node, appended to what is already there.",
-    // .optional(), not .default(): the SDK's input validation rejected calls that omitted a defaulted field
-    { nodeId: z.string(), markdown: z.string().describe("Annotation body, markdown"), replace: z.boolean().optional().describe("Replace the node's existing annotations instead of appending; only when the user asked for it") }),
-  figmaTool(fileId, "ask_user", "Ask the user a question about a specific spot in the design. Focuses their canvas on nodeId (if given), shows the question with optional choice buttons in the plugin, and waits for the answer. Returns the answer and the user's current selection.",
-    { nodeId: z.string().optional(), question: z.string(), options: z.array(z.string()).max(4).optional() }),
-]});
+const figmaServer = (fileId: string) => createSdkMcpServer({
+  name: "figma",
+  version: VERSION,
+  tools: FIGMA_TOOLS.map(item => figmaTool(fileId, item.name, item.description, item.schema.shape)),
+});
 
 const SYSTEM = `You are a senior product designer and front-end lead doing a design review inside Figma, through a plugin chat panel.
 The user watches the canvas while you talk: call focus on a node before discussing it, and cover one screen per message.
