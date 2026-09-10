@@ -477,7 +477,7 @@ const matchesWarm = (entry: WarmEntry, args: {
 export class ClaudeProvider implements ReviewProvider {
   readonly id = "claude" as const;
   private warm?: WarmEntry;
-  private runtime?: { owner: object; prepared?: boolean; error?: string; version?: string; model?: string };
+  private runtime?: { owner: object; prepared?: boolean; error?: string; version?: string };
   private readonly native: NativeFactory;
 
   constructor(private readonly args: {
@@ -493,7 +493,7 @@ export class ClaudeProvider implements ReviewProvider {
       provider: "claude",
       status: this.runtime?.error ? "unavailable" : this.runtime?.prepared ? "ready" : "starting",
       version: this.runtime?.version,
-      model: this.runtime?.model ?? (args.settings.model || undefined),
+      model: args.settings.model || undefined,
       models: claudeModels(),
       error: this.runtime?.error,
     };
@@ -554,10 +554,15 @@ export class ClaudeProvider implements ReviewProvider {
     const input = inputStream();
     const startArgs = { ...args, allowedTools: [...readAllow(args.dir)] };
     let nativeQuery: NativeQuery | undefined;
-    let runtimeOwner: object | undefined;
     const warm = this.warm;
-    let mayOwnColdRuntime = !warm;
-    if (warm && (!args.resume && matchesWarm(warm, startArgs))) {
+    const useWarm = !!warm && !args.resume && matchesWarm(warm, startArgs);
+    const runtimeOwner = useWarm ? warm : {};
+    if (this.runtime?.owner !== runtimeOwner) {
+      const changedHealth = this.runtime?.prepared || this.runtime?.error;
+      this.runtime = { owner: runtimeOwner };
+      if (changedHealth) this.args.onPrepared();
+    }
+    if (warm && useWarm) {
       warm.delegate.current = args.boundary;
       this.warm = undefined;
       let resolved: NativeWarmQuery | undefined;
@@ -565,8 +570,7 @@ export class ClaudeProvider implements ReviewProvider {
         resolved = await warm.query;
         if (this.runtime?.owner === warm) {
           nativeQuery = resolved.query(input.stream);
-          runtimeOwner = warm;
-          this.runtime = { owner: warm, prepared: true };
+          this.runtime = { owner: runtimeOwner, prepared: true };
           this.args.onPrepared();
         } else {
           this.closeResolvedWarm(resolved, "stale consumed warm query");
@@ -574,36 +578,23 @@ export class ClaudeProvider implements ReviewProvider {
         }
       } catch (error) {
         if (resolved) this.closeResolvedWarm(resolved, "unusable consumed warm query");
-        if (this.runtime?.owner === warm) {
-          this.runtime = undefined;
-          mayOwnColdRuntime = true;
+        if (this.runtime?.owner === runtimeOwner && (this.runtime.prepared || this.runtime.error)) {
+          this.runtime = { owner: runtimeOwner };
           this.args.onPrepared();
         }
         this.args.log("pre-warmed query unusable, starting cold", error);
       }
     } else if (warm) {
       this.warm = undefined;
-      if (this.runtime?.owner === warm) {
-        this.runtime = undefined;
-        mayOwnColdRuntime = true;
-        this.args.onPrepared();
-      }
       this.closeWarm(warm, "incompatible warm query");
     }
-    if (!warm && this.runtime?.error) {
-      this.runtime = undefined;
-      this.args.onPrepared();
-    }
     if (!nativeQuery) {
-      const coldOwner = {};
       nativeQuery = this.native.cold({
         prompt: input.stream,
         options: options({ ...startArgs, version: this.args.version, log: this.args.log }),
       });
-      runtimeOwner = coldOwner;
-      if (mayOwnColdRuntime && !this.runtime) this.runtime = { owner: coldOwner };
     }
-    const ownsRuntime = () => !!runtimeOwner && this.runtime?.owner === runtimeOwner;
+    const ownsRuntime = () => this.runtime?.owner === runtimeOwner;
     return new ClaudeSession({
       query: nativeQuery,
       push: input.push,
@@ -612,8 +603,8 @@ export class ClaudeProvider implements ReviewProvider {
       resumed: !!args.resume,
       mcpStatusTimeoutMs: this.args.mcpStatusTimeoutMs ?? MCP_STATUS_TIMEOUT_MS,
       onInitialized: health => {
-        if (!runtimeOwner || !ownsRuntime()) return;
-        this.runtime = { owner: runtimeOwner, prepared: true, version: health.version, model: health.model };
+        if (!ownsRuntime()) return;
+        this.runtime = { owner: runtimeOwner, prepared: true, version: health.version };
         this.args.onPrepared();
       },
       onClose: () => {

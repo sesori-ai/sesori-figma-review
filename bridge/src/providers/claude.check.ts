@@ -249,12 +249,28 @@ assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "lo
 const replacementCallbacks = consumed.callbacks();
 for await (const _output of consumedSession.output) {}
 assert.equal(consumed.callbacks(), replacementCallbacks, "superseded session init cannot publish readiness");
-assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "low" } }).model, "sonnet");
 consumedSession.close();
 consumed.provider.dispose();
 await Promise.resolve();
 assert.equal(replacementWarm.closes, 1);
 assert.equal(consumed.provider.health({ settings: { model: "sonnet", effort: "low" } }).status, "starting");
+
+const overlappingCold = lifecycle([
+  { type: "system", subtype: "init", session_id: baseRecord.sessionId, model: "haiku", mcp_servers: [] },
+]);
+overlappingCold.provider.prepare(warmArgs(firstBoundary));
+const olderStart = overlappingCold.provider.start({ ...warmArgs(firstBoundary), baseRecord });
+const newerSession = await overlappingCold.provider.start({ ...warmArgs(reboundBoundary), baseRecord });
+for await (const _output of newerSession.output) {}
+assert.equal(overlappingCold.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "ready");
+const newerCallbacks = overlappingCold.callbacks();
+overlappingCold.warmCalls[0].pending.resolve(new FakeWarm());
+const olderSession = await olderStart;
+for await (const _output of olderSession.output) {}
+olderSession.close();
+assert.equal(overlappingCold.callbacks(), newerCallbacks, "older warm start cannot replace or clear newer cold health");
+assert.equal(overlappingCold.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "ready");
+newerSession.close();
 
 const disposed = lifecycle();
 disposed.provider.prepare(warmArgs(firstBoundary));
@@ -537,11 +553,13 @@ assert.deepEqual(initialized?.servers, [
   { name: "figma-desktop", status: "disconnected", error: undefined },
 ]);
 assert.ok(initLogs.some(values => String(values[0]).includes("using init snapshot")));
-const resumedHealth = initProvider.health({ settings: { model: "sonnet", effort: "low" } });
+const resumedHealth = initProvider.health({ settings: { model: "haiku", effort: "low" } });
 assert.equal(resumedHealth.status, "ready");
 assert.equal(resumedHealth.version, "test");
-assert.equal(resumedHealth.model, "haiku", "native init model overrides requested fallback");
+assert.equal(resumedHealth.model, "haiku");
 assert.equal(initCallbacks, 1, "resumed cold init publishes provider readiness once");
+await initSession.applySettings({ settings: { model: "sonnet", effort: "high" } });
+assert.equal(initProvider.health({ settings: { model: "sonnet", effort: "high" } }).model, "sonnet");
 assert.deepEqual(outputs.at(-1), {
   kind: "usage", usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0 },
   cost: { usd: 0.01, status: "unavailable" }, turnCompleted: true,

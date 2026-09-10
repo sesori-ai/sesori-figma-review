@@ -30,20 +30,12 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 ## Step 2 replacement foundation
 
-- Full implementation stays immutable at `origin/codex-support-step-2` commit `f7265eb`; oversized PR #2 was closed
-  as superseded, not merged or abandoned.
-- This dormant foundation adds normalized contracts, neutral validated tools, Claude adapter and focused tests. Legacy
-  wire/UI/session schemas remain active; exact catalog and transcript-leaf reuse preserve metadata and output. Codex,
-  persistence migration and new UI/protocol behavior remain excluded.
-- Step 3 retains provider-scoped ownership/settings/health, protocol-v3 mismatch handling, one view intent, file-scoped
-  close, settings fencing, normalized identity/accounting, and bounded smoke obligations.
-- Historical smokes used Claude Haiku/low, isolated homes/free ports and four-turn/$0.10 limits. Later Claude/Codex
-  tests retain the recorded credential, model and spend rules.
-- **Historical checkpoint `cfe0ec8`:** 1,532 changed lines (1,450 additions, 82 deletions), with all checks passing.
-  Parent accepts a standing foundation review-fix tail up to 1,650 total lines only for existing lifecycle,
-  accounting and safety repairs plus proof, never Step 3 activation. Tests cover catalog/schema reuse, warm/cold
-  lifecycle and init fencing, settings, MCP fallback, transcript/stream/accounting, and fail-closed env limits.
-  No paid/native turn was run for deterministic dormant-adapter fixes.
+- Full implementation stays at `origin/codex-support-step-2` (`f7265eb`); superseded PR #2 was not merged.
+- Dormant foundation adds normalized contracts, neutral tools and Claude tests; live wire/UI remain unchanged.
+- Step 3 retains all ownership, protocol, view, close, settings, accounting, smoke and qualification obligations below.
+- Historical smokes used Claude Haiku/low, isolated homes/free ports and four-turn/$0.10 limits.
+- **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
+  foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
 
 ## Qualification gates before user-facing Codex exposure
 
