@@ -2,7 +2,7 @@ import type { ReviewEvent, SessionRecord } from "../../shared/protocol.ts";
 
 /** Prevent late/interleaved native events from rendering into another provider session. */
 export function eventBelongsToSession(args: { event: ReviewEvent; session?: SessionRecord }): boolean {
-  if (!args.session?.sessionId) return true;
+  if (!args.session?.sessionId) return false;
   return args.event.session.provider === args.session.provider && args.event.session.sessionId === args.session.sessionId;
 }
 

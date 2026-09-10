@@ -17,6 +17,7 @@ const session: SessionRecord = {
   usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
 };
 const event: ReviewEvent = { type: "text_delta", session: { provider: "claude", sessionId: "claude-session" }, itemId: "i1", text: "Hi" };
+assert.equal(eventBelongsToSession({ event }), false, "events wait for an authoritative session identity");
 assert.equal(eventBelongsToSession({ event, session }), true);
 assert.equal(eventBelongsToSession({ event: { ...event, session: { provider: "codex", sessionId: "claude-session" } }, session }), false);
 assert.equal(eventBelongsToSession({ event: { ...event, session: { provider: "claude", sessionId: "other" } }, session }), false);
