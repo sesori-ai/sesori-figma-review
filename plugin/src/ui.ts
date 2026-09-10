@@ -16,6 +16,7 @@ let textRaw = ""; // its markdown source so far; re-rendered on every delta (pon
 let sessions: SessionRecord[] = [];
 let pendingAsk: ((text: string) => void) | undefined; // open ask_user card; a composer message answers it instead of queueing behind it
 let stopping = false; // Stop was clicked; the next result is the interrupt, not an error
+let opened: SessionRecord | undefined; // session shown via History → Open but not yet resumed
 
 const el = (tag: string, cls = "", text = "") => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const btn = (label: string, onClick: () => void, cls = "") => { const b = el("button", cls, label) as HTMLButtonElement; b.onclick = onClick; return b; };
@@ -49,6 +50,7 @@ function onDown(m: DownMsg) {
     case "health": return renderHealth(m.health);
     case "sessions": sessions = m.sessions; if (!sessionsEl.hidden) renderSessions(); return;
     case "session": live = m.session; return renderCost(m.session);
+    case "history": return showHistory(m);
     case "tool": return m.tool === "ask_user" ? askCard(m.id, m.args) : toMain(m);
     case "permission": return permissionCard(m.id, m.tool, m.input);
     case "sdk": return onSdk(m.msg);
@@ -127,23 +129,36 @@ function renderSessions() {
   for (const s of [...sessions].reverse()) {
     const row = el("div", "row");
     row.append(el("span", "title", s.title), el("span", "muted", `${s.pageName} · ${s.updatedAt.slice(0, 16).replace("T", " ")} · $${s.costUsd.toFixed(2)}`));
-    row.append(btn("Resume", () => { sessionsEl.hidden = true; start(s.anchor, "Resuming this review from Figma. Recap where we left off and what is still open.", s.sessionId); }));
+    row.append(btn("Open", () => { sessionsEl.hidden = true; send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, sessionId: s.sessionId }); }));
     sessionsEl.append(row);
   }
 }
 
 // ---- composer -------------------------------------------------------------
 function start(anchor: Anchor, text: string, resume?: string) {
-  chat.innerHTML = ""; textEl = undefined; pendingAsk = undefined; costEl.textContent = "";
-  live = { sessionId: resume ?? "" } as SessionRecord; // placeholder until the bridge sends `session`
+  if (!resume) { chat.innerHTML = ""; live = { sessionId: "" } as SessionRecord; } // placeholder until the bridge sends `session`
+  textEl = undefined; pendingAsk = undefined; opened = undefined;
   bubble("msg user", text);
   send({ kind: "start", fileId: ctx.fileId, fileName: ctx.fileName, pageId: ctx.pageId, pageName: ctx.pageName, anchor, resume, text, selection: ctx.selection });
+}
+/** History → Open: show the past conversation; the session itself is resumed by the next message. */
+function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
+  chat.innerHTML = ""; textEl = undefined; pendingAsk = undefined;
+  live = m.session; renderCost(m.session);
+  opened = m.attached ? undefined : m.session;
+  for (const h of m.messages) {
+    if (h.role === "tool") bubble("chip", h.name === "stopped" ? "stopped" : `⚙ ${toolLabel(h.name)} ${summarize(h.input)}`);
+    else if (h.role === "assistant") bubble("msg assistant").innerHTML = md(h.text);
+    else bubble("msg user", h.text); // user message or ask_user answer
+  }
+  chat.scrollTop = chat.scrollHeight;
 }
 function submit() {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
   if (!live) return start({ type: "page", nodeIds: [] }, text);
+  if (opened) return start(opened.anchor, text, opened.sessionId); // first message after Open resumes the session
   if (pendingAsk) return pendingAsk(text); // Claude is waiting on a question: this is the answer
   bubble("msg user", text);
   send({ kind: "user", text, selection: ctx.selection }); // delivered mid-turn as steering; Stop interrupts
@@ -156,6 +171,6 @@ $("btn-selection").onclick = () => {
   if (!ctx.selection.length) return toMain({ kind: "notify", text: "Select something first" });
   start({ type: "selection", nodeIds: ctx.selection.map(n => n.id) }, `Review the selected node(s): ${selText()}. Focus each one, assess clarity and dev-readiness, and propose annotations.`);
 };
-$("btn-new").onclick = () => { chat.innerHTML = ""; live = undefined; pendingAsk = undefined; costEl.textContent = ""; input.focus(); };
+$("btn-new").onclick = () => { chat.innerHTML = ""; live = undefined; pendingAsk = undefined; opened = undefined; costEl.textContent = ""; input.focus(); };
 $("btn-history").onclick = () => { sessionsEl.hidden = !sessionsEl.hidden; if (!sessionsEl.hidden) renderSessions(); };
 stopBtn.onclick = () => { stopping = true; send({ kind: "interrupt" }); };

@@ -48,6 +48,8 @@ export type UpMsg =
     }
   /** Follow-up message. Delivered mid-turn as steering; the bridge never queues it. */
   | { kind: "user"; text: string; selection: NodeRef[] }
+  /** History → Open: bridge answers with `history` (past messages). The session is resumed on the next `start`. */
+  | { kind: "open"; fileId: string; fileName: string; sessionId: string }
   /** Answer to a `tool` (ToolResult) or `permission` (PermissionDecision) request. */
   | { kind: "reply"; id: string; result: ToolResult | PermissionDecision }
   /** Stop button: interrupt the running turn. */
@@ -66,9 +68,16 @@ export type Health = {
   error?: string;
 };
 
+/** One rendered item of a past conversation, read from the Claude Code transcript. */
+export type HistoryItem =
+  | { role: "user" | "assistant" | "answer"; text: string }
+  | { role: "tool"; name: string; input: Record<string, unknown> };
+
 export type DownMsg =
   | { kind: "health"; health: Health }
   | { kind: "sessions"; sessions: SessionRecord[] }
+  /** Past messages of an opened session; `attached` when that session is the one currently running. */
+  | { kind: "history"; session: SessionRecord; messages: HistoryItem[]; attached: boolean }
   /** Current session created or updated (cost, tokens, turns). */
   | { kind: "session"; session: SessionRecord }
   /** Run a Figma tool and reply with a ToolResult. `ask_user` is handled by the plugin UI. */

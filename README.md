@@ -53,7 +53,8 @@ and the Figma MCP server are all reachable; hover it for details.
 - **Review flow** – reviews the prototype flow of the current page (starting points → reactions), then each screen.
 - **Review selection** – select frames or components first, then click. The review is anchored to them.
 - **New chat** – empty conversation anchored to the current page; just type a question.
-- **History** – earlier sessions for this file, with cost. *Resume* continues one.
+- **History** – earlier sessions for this file, with cost. *Open* shows the whole past conversation; your next
+  message continues that session with all its context.
 - Typing while Claude is working **steers** it: the message is merged into the running turn. **Stop** interrupts.
   While a question card is open, whatever you type in the composer answers that question.
 - Your current selection is attached to every message, so "make this one bigger" works.

@@ -59,7 +59,7 @@ bridge/smoke.mjs            fake plugin for an end-to-end run without Figma
 | `canUseTool` | everything else (writes outside notes/) | becomes a permission card in the plugin |
 | `disallowedTools` | `AskUserQuestion` | replaced by `ask_user`, which focuses the canvas first |
 | `includePartialMessages` | true | text streams into the chat as it is generated |
-| `resume` | session id | for History → Resume |
+| `resume` | session id | first message after History → Open |
 
 A fresh session for the connected file is pre-warmed with `startup()` as soon as the plugin says hello, and again
 after every start, so "Review flow" does not pay the CLI boot.
@@ -121,6 +121,17 @@ UI: focus input.nodeId if present · card with markdown preview · Allow / Deny
 UI ──reply{behavior}──► bridge → {behavior:"allow", updatedInput} | {behavior:"deny", message}
 ```
 
+### History → Open
+
+```
+UI ──open{sessionId}──► bridge: readTranscript(): parse ~/.claude/projects/<cwd slug>/<sessionId>.jsonl
+bridge ──history{session, messages, attached}──► UI: render past user/assistant/tool/answer items
+next composer message ──► UI ──start{resume: sessionId, text}──► bridge (chat is kept, not cleared)
+```
+
+The transcript is Claude Code's own file (our context lines are stripped, tool results and thinking dropped), so
+opening costs nothing; the CLI only spawns when the user actually continues.
+
 ### Steer and Stop
 
 ```
@@ -134,7 +145,7 @@ UI ──interrupt──► bridge: query.interrupt() → the turn ends with a r
 - Plugin closes: every pending `tool`/`permission` request resolves with an error result / deny so the agent is
   not stuck. The session keeps running; reopening the plugin re-attaches (`hello` → `session`).
 - Bridge restarts: the plugin reconnects every 2 s and shows "bridge offline" meanwhile. The live session is lost
-  but can be resumed from History (Claude Code persisted the transcript).
+  but can be reopened from History (Claude Code persisted the transcript).
 - New `start` while a session runs: the old query is closed and its input stream ended.
 
 ## Cost and token accounting

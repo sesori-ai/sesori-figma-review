@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import { BRIDGE_PORT, FIGMA_MCP_URL, type DownMsg, type Health, type NodeRef, type PermissionDecision, type SessionRecord, type ToolResult, type UpMsg } from "../../shared/protocol.ts";
-import { addUsage, readAllow, readSessions, saveSession, workspaceFor, zeroUsage } from "./workspace.ts";
+import { addUsage, readAllow, readSessions, readTranscript, saveSession, workspaceFor, zeroUsage } from "./workspace.ts";
 
 const VERSION = "0.1.0";
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
@@ -202,8 +202,15 @@ async function onUp(ws: WebSocket & { fileId?: string }, m: UpMsg) {
       return sendHealth(m.fileId);
     }
     case "start": return startConv(m);
+    case "open": {
+      const dir = workspaceFor(m.fileId, m.fileName);
+      const session = readSessions(dir).find(s => s.sessionId === m.sessionId);
+      if (!session) return send(m.fileId, { kind: "error", message: "Unknown session" });
+      const attached = conv?.rec.sessionId === m.sessionId;
+      return send(m.fileId, { kind: "history", session: attached ? conv!.rec : session, messages: readTranscript(dir, m.sessionId), attached });
+    }
     case "user":
-      if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or resume from History." });
+      if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or open one from History." });
       conv.push(userMessage(m.text, m.selection)); // Claude Code merges it into the running turn between tool calls (steer)
       return send(conv.fileId, { kind: "busy", busy: true });
     case "reply": { const p = pending.get(m.id); pending.delete(m.id); p?.resolve(m.result); return; }
