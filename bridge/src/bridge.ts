@@ -1,246 +1,268 @@
-// Headless local harness: WebSocket server for the Figma plugin + Claude Agent SDK session manager.
-// The user never talks to this process; every interaction happens in the plugin UI.
-import { createSdkMcpServer, query, startup, tool, type Options, type Query, type SDKUserMessage, type WarmQuery } from "@anthropic-ai/claude-agent-sdk";
+// Headless local harness: WebSocket server for the Figma plugin and one provider-neutral conversation owner.
 import { randomUUID } from "node:crypto";
-import { WebSocketServer, type WebSocket } from "ws";
-import { z } from "zod";
-import { BRIDGE_PORT, FIGMA_MCP_URL, type DownMsg, type Health, type NodeRef, type PermissionDecision, type SessionRecord, type ToolResult, type UpMsg } from "../../shared/protocol.ts";
 import { readFileSync } from "node:fs";
-import { addUsage, hasClaudeAuth, installPlugin, readAllow, readSessions, readSettings, readTranscript, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
+import { WebSocketServer, type WebSocket } from "ws";
+import {
+  BRIDGE_PORT,
+  FIGMA_MCP_URL,
+  PROTOCOL_VERSION,
+  type DownMsg,
+  type Health,
+  type PermissionDecision,
+  type ProviderHealth,
+  type ProviderId,
+  type SessionRecord,
+  type ToolResult,
+  type UpMsg,
+} from "../../shared/protocol.ts";
+import { ClaudeProvider } from "./providers/claude.ts";
+import type { ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
+import { hasClaudeAuth, installPlugin, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
 
-const VERSION: string = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version; // root package: same depth from bridge/src and bridge/dist, and it ships in the tarball
-const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
+const VERSION: string = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
+const log = (...values: unknown[]) => console.log(new Date().toISOString(), ...values);
 const now = () => new Date().toISOString();
+const port = Number(process.env.SESORI_REVIEW_PORT ?? BRIDGE_PORT);
 
-// ---- plugin connections (one per open Figma file, keyed by fileId) ----------------
 const clients = new Map<string, WebSocket>();
-const pending = new Map<string, { ws: WebSocket; resolve: (v: any) => void; onDrop: unknown }>();
+type Pending = { ws: WebSocket; owner: string; resolve: (value: ToolResult | PermissionDecision) => void; onDrop: ToolResult | PermissionDecision };
+const pending = new Map<string, Pending>();
 const live = (ws?: WebSocket): ws is WebSocket => !!ws && ws.readyState === ws.OPEN;
-const send = (fileId: string, m: DownMsg) => { const ws = clients.get(fileId); if (live(ws)) ws.send(JSON.stringify(m)); };
+const send = (fileId: string, message: DownMsg) => { const ws = clients.get(fileId); if (live(ws)) ws.send(JSON.stringify(message)); };
 
-/** Send a request to the file's plugin and wait for its `reply`; resolves with `onDrop` if the plugin is gone. */
-function ask<T>(fileId: string, m: { kind: "tool"; tool: string; args: Record<string, unknown> } | { kind: "permission"; tool: string; input: Record<string, unknown> }, onDrop: T): Promise<T> {
+function ask(args: {
+  fileId: string;
+  owner: string;
+  message: { kind: "tool"; tool: string; args: Record<string, unknown> } | { kind: "permission"; tool: string; input: Record<string, unknown> };
+  onDrop: ToolResult | PermissionDecision;
+}): Promise<ToolResult | PermissionDecision> {
   return new Promise(resolve => {
-    const ws = clients.get(fileId);
-    if (!live(ws)) return resolve(onDrop);
+    const ws = clients.get(args.fileId);
+    if (!live(ws)) return resolve(args.onDrop);
     const id = randomUUID();
-    pending.set(id, { ws, resolve, onDrop });
-    ws.send(JSON.stringify({ ...m, id }));
+    pending.set(id, { ws, owner: args.owner, resolve, onDrop: args.onDrop });
+    ws.send(JSON.stringify({ ...args.message, id }));
   });
 }
 
-// ---- Figma tools (in-process MCP server; each call is executed by the plugin) --------
-const disconnected: ToolResult = { content: [{ type: "text", text: "The Figma plugin is not connected. Ask the user to reopen it." }], isError: true };
-const figmaTool = (fileId: string, name: string, description: string, shape: z.ZodRawShape) =>
-  tool(name, description, shape, args => ask(fileId, { kind: "tool", tool: name, args }, disconnected));
+function cancelRequests(args: { owner: string; reason: string }) {
+  for (const [id, request] of pending) {
+    if (request.owner !== args.owner) continue;
+    pending.delete(id);
+    request.resolve(request.onDrop);
+    request.ws.send(JSON.stringify({ kind: "cancel_request", id, reason: args.reason } satisfies DownMsg));
+  }
+}
 
-// One server instance per query: an MCP server instance binds to a single transport.
-const figmaServer = (fileId: string) => createSdkMcpServer({ name: "figma", version: VERSION, tools: [
-  figmaTool(fileId, "get_flow", "Prototype flow of the user's current Figma page: screens (id, name, size) and transitions (from, to, trigger, navigation, via which element). Falls back to listing top-level frames when the page has no prototype flow.", {}),
-  figmaTool(fileId, "get_screen", "PNG screenshot of a node plus its layer tree (ids, names, types, bounds relative to the node, text, existing annotations). Works for whole screens and for single components.",
-    { nodeId: z.string().describe("Node id such as 12:34"), scale: z.number().min(0.25).max(3).optional().describe("Export scale, default 1; use 2 for small components") }),
-  figmaTool(fileId, "focus", "Select a node and scroll/zoom the user's canvas to it. Call it before discussing a node so the user sees what you mean.", { nodeId: z.string() }),
-  figmaTool(fileId, "annotate", "Attach a Dev Mode annotation (markdown) to a node, appended to what is already there.",
-    // .optional(), not .default(): the SDK's input validation rejected calls that omitted a defaulted field
-    { nodeId: z.string(), markdown: z.string().describe("Annotation body, markdown"), replace: z.boolean().optional().describe("Replace the node's existing annotations instead of appending; only when the user asked for it") }),
-  figmaTool(fileId, "ask_user", "Ask the user a question about a specific spot in the design. Focuses their canvas on nodeId (if given), shows the question with optional choice buttons in the plugin, and waits for the answer. Returns the answer and the user's current selection.",
-    { nodeId: z.string().optional(), question: z.string(), options: z.array(z.string()).max(4).optional() }),
-]});
+const disconnected: ToolResult = {
+  content: [{ type: "text", text: "The Figma plugin is not connected. Ask the user to reopen it." }],
+  isError: true,
+};
+const denied: PermissionDecision = { behavior: "deny", message: "Figma plugin disconnected" };
+const boundary = (fileId: string): ProviderRequestBoundary => ({
+  tool: request => ask({ fileId, owner: conv?.fileId === fileId ? conv.owner : fileId, message: { kind: "tool", tool: request.tool, args: request.args }, onDrop: disconnected }) as Promise<ToolResult>,
+  permission: request => ask({ fileId, owner: conv?.fileId === fileId ? conv.owner : fileId, message: { kind: "permission", ...request }, onDrop: denied }) as Promise<PermissionDecision>,
+});
 
-const SYSTEM = `You are a senior product designer and front-end lead doing a design review inside Figma, through a plugin chat panel.
-The user watches the canvas while you talk: call focus on a node before discussing it, and cover one screen per message.
-Be concrete and brief in chat; put implementation detail into annotations. When something is ambiguous, ask with ask_user instead of assuming.`;
+const providerChanged = () => { for (const fileId of clients.keys()) send(fileId, { kind: "health", health: makeHealth() }); };
+const claude = new ClaudeProvider({ version: VERSION, log, onPrepared: providerChanged });
+const providers: Record<ProviderId, ReviewProvider | undefined> = { claude, codex: undefined };
 
-function options(fileId: string, dir: string, resume?: string): Options {
-  const appRepo = process.env.APP_REPO;
+function makeHealth(): Health {
   const settings = readSettings();
   return {
-    cwd: dir,
-    resume,
-    settingSources: ["project"], // CLAUDE.md, .claude/skills, .mcp.json from the workspace
-    additionalDirectories: appRepo ? [appRepo] : [],
-    systemPrompt: SYSTEM,
-    mcpServers: { figma: figmaServer(fileId), "figma-desktop": { type: "http", url: FIGMA_MCP_URL } },
-    strictMcpConfig: true, // do not pull in the user's personal MCP servers
-    tools: ["Read", "Glob", "Grep", "Write", "Edit", "Skill"],
-    allowedTools: readAllow(dir), // auto-approve list, editable per file in <workspace>/permissions.json
-    disallowedTools: ["AskUserQuestion"], // ask_user replaces it (it focuses the canvas)
-    permissionMode: "default",
-    canUseTool: async (toolName, input) => { // everything not in the allow list (e.g. writes outside notes/) → plugin card
-      const d = await ask<PermissionDecision>(fileId, { kind: "permission", tool: toolName, input }, { behavior: "deny", message: "Figma plugin disconnected" });
-      return d.behavior === "allow" ? { behavior: "allow", updatedInput: input } : d;
-    },
-    includePartialMessages: true,
-    model: settings.model || undefined,
-    effort: settings.effort || undefined,
-    stderr: d => log("[claude]", d.trim()),
+    bridge: VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    figmaMcp: healthFigmaMcp,
+    selectedProvider: settings.provider,
+    liveProvider: conv?.record.provider,
+    settings,
+    providers: [claudeSessionHealth ?? claude.health({ settings: settings.providers.claude })],
+    servers: claudeServers,
+    error: settings.provider === "codex" ? "Codex is not available in this build." : undefined,
   };
 }
 
-// ---- conversations --------------------------------------------------------------
-type Conv = { q: Query; push: (m: SDKUserMessage | null) => void; fileId: string; dir: string; rec: SessionRecord; baseCost: number };
-let conv: Conv | undefined; // ponytail: one conversation at a time across all files; starting one ends the previous
-let warm: { dir: string; wq: Promise<WarmQuery> } | undefined;
-const health: Health = { bridge: VERSION, figmaMcp: "down", settings: readSettings() };
+let healthFigmaMcp: Health["figmaMcp"] = "down";
+let claudeServers: Health["servers"];
+let claudeSessionHealth: ProviderHealth | undefined;
+type Conversation = { owner: string; fileId: string; dir: string; record: SessionRecord; session: ReviewSession };
+let conv: Conversation | undefined;
 
-function inputStream() {
-  const buf: (SDKUserMessage | null)[] = [];
-  let wake = () => {};
-  async function* gen() {
-    for (;;) {
-      while (buf.length) { const m = buf.shift()!; if (m === null) return; yield m; }
-      await new Promise<void>(r => (wake = r));
-    }
-  }
-  return { gen: gen(), push: (m: SDKUserMessage | null) => { buf.push(m); wake(); } };
+function newRecord(message: Extract<UpMsg, { kind: "start" }>, provider: ProviderId): SessionRecord {
+  return {
+    provider,
+    sessionId: "",
+    title: message.text.slice(0, 80),
+    anchor: message.anchor,
+    pageId: message.pageId,
+    pageName: message.pageName,
+    createdAt: now(),
+    updatedAt: now(),
+    turns: 0,
+    costUsd: 0,
+    costStatus: "reported",
+    usage: zeroUsage(),
+  };
 }
 
-function userMessage(text: string, selection: NodeRef[], context?: string): SDKUserMessage {
-  const sel = selection.length ? selection.map(n => `${n.name} (${n.type} ${n.id})`).join(", ") : "none";
-  const parts = [text, `[Current selection: ${sel}]`];
-  if (context) parts.unshift(`[${context}]`);
-  return { type: "user", message: { role: "user", content: parts.join("\n") }, parent_tool_use_id: null };
+async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
+  endConversation("Started another session");
+  const dir = workspaceFor(message.fileId, message.fileName);
+  const settings = readSettings();
+  const providerId = message.resume?.provider ?? settings.provider;
+  const provider = providers[providerId];
+  if (!provider) return send(message.fileId, { kind: "error", message: `${providerId === "codex" ? "Codex" : providerId} is not available in this build.` });
+  const previous = message.resume
+    ? readSessions(dir).find(session => session.provider === message.resume!.provider && session.sessionId === message.resume!.sessionId)
+    : undefined;
+  if (message.resume && !previous) return send(message.fileId, { kind: "error", message: "Unknown provider-qualified session" });
+  const record = previous ?? newRecord(message, providerId);
+  const session = await provider.start({
+    fileId: message.fileId,
+    dir,
+    resume: message.resume?.sessionId,
+    settings: settings.providers[providerId],
+    boundary: boundary(message.fileId),
+    baseRecord: record,
+  });
+  const current: Conversation = { owner: randomUUID(), fileId: message.fileId, dir, record, session };
+  conv = current;
+  const anchor = `Figma file "${message.fileName}", page "${message.pageName}" (${message.pageId}). Anchor: ${message.anchor.type}${message.anchor.nodeIds.length ? ` ${message.anchor.nodeIds.join(", ")}` : ""}`;
+  session.send({ text: message.text, selection: message.selection, context: anchor });
+  send(message.fileId, { kind: "busy", busy: true });
+  void pump(current);
+  provider.prepare({ fileId: message.fileId, dir, settings: settings.providers[providerId], boundary: boundary(message.fileId) });
 }
 
-/** Spawn the CLI for the next fresh session in this workspace so `start` does not pay the boot cost. */
-function prewarm(fileId: string, dir: string) {
-  if (warm?.dir === dir) return;
-  warm?.wq.then(w => w.close()).catch(() => {});
-  const wq = startup({ options: options(fileId, dir) });
-  warm = { dir, wq };
-  wq.then(() => { health.claude ??= "ready"; health.error = undefined; }, e => { health.error = `Claude failed to start: ${e.message ?? e}`; warm = undefined; }).then(() => send(fileId, { kind: "health", health }));
-}
-
-async function startConv(m: Extract<UpMsg, { kind: "start" }>) {
-  endConv();
-  const dir = workspaceFor(m.fileId, m.fileName);
-  const { gen, push } = inputStream();
-  let q: Query | undefined;
-  if (!m.resume && warm?.dir === dir) {
-    const w = warm; warm = undefined;
-    try { q = (await w.wq).query(gen); } catch (e) { log("pre-warmed query unusable, starting cold", e); }
-  }
-  q ??= query({ prompt: gen, options: options(m.fileId, dir, m.resume) });
-  const prev = m.resume ? readSessions(dir).find(s => s.sessionId === m.resume) : undefined;
-  const rec: SessionRecord = prev ?? { sessionId: "", title: m.text.slice(0, 80), anchor: m.anchor, pageId: m.pageId, pageName: m.pageName, createdAt: now(), updatedAt: now(), turns: 0, costUsd: 0, usage: zeroUsage() };
-  conv = { q, push, fileId: m.fileId, dir, rec, baseCost: rec.costUsd }; // ponytail: total_cost_usd assumed not restored by --resume; base + this process
-  const anchor = `Figma file "${m.fileName}", page "${m.pageName}" (${m.pageId}). Anchor: ${m.anchor.type}${m.anchor.nodeIds.length ? " " + m.anchor.nodeIds.join(", ") : ""}`;
-  push(userMessage(m.text, m.selection, anchor));
-  send(m.fileId, { kind: "busy", busy: true });
-  void pump(conv);
-  prewarm(m.fileId, dir); // next fresh session boots while this one runs
-}
-
-function endConv() {
+function endConversation(reason: string) {
   if (!conv) return;
-  conv.push(null);
-  conv.q.close();
+  const current = conv;
   conv = undefined;
+  cancelRequests({ owner: current.owner, reason });
+  current.session.close();
+  send(current.fileId, { kind: "busy", busy: false });
 }
 
-async function pump(c: Conv) {
-  const out = (m: DownMsg) => send(c.fileId, m);
+async function pump(current: Conversation) {
   try {
-    for await (const msg of c.q) {
-      if (conv !== c) break;
-      if (msg.type === "system" && msg.subtype === "init") {
-        c.rec.sessionId = msg.session_id;
-        Object.assign(health, { claude: msg.claude_code_version, model: msg.model, servers: msg.mcp_servers, error: undefined });
-        c.q.mcpServerStatus().then(s => { health.servers = s.map(x => ({ name: x.name, status: x.status, error: x.error })); out({ kind: "health", health }); }).catch(() => {});
-        out({ kind: "health", health });
-        saveSession(c.dir, c.rec);
-        out({ kind: "session", session: c.rec });
+    for await (const output of current.session.output) {
+      if (conv !== current) break;
+      if (output.kind === "initialized") {
+        current.record.sessionId = output.sessionId;
+        claudeSessionHealth = output.health;
+        claudeServers = output.servers;
+        saveSession(current.dir, current.record);
+        send(current.fileId, { kind: "health", health: makeHealth() });
+        send(current.fileId, { kind: "session", session: current.record });
+      } else if (output.kind === "event") {
+        send(current.fileId, output);
+      } else {
+        current.record.usage = output.usage;
+        current.record.costUsd = output.costUsd;
+        if (output.turnCompleted) current.record.turns++;
+        current.record.updatedAt = now();
+        saveSession(current.dir, current.record);
+        send(current.fileId, { kind: "session", session: current.record });
+        send(current.fileId, { kind: "sessions", sessions: readSessions(current.dir) });
+        send(current.fileId, { kind: "busy", busy: false });
       }
-      if (msg.type === "stream_event" && !msg.parent_tool_use_id) { // live token count: one API response = message_start (input) + message_delta (output)
-        const ev = msg.event as any;
-        if (ev.type === "message_start") c.rec.usage = addUsage(c.rec.usage, { ...ev.message.usage, output_tokens: 0 });
-        if (ev.type === "message_delta") { c.rec.usage = addUsage(c.rec.usage, { output_tokens: ev.usage?.output_tokens }); out({ kind: "session", session: c.rec }); }
-      }
-      if (msg.type === "result") {
-        c.rec.turns++;
-        c.rec.costUsd = c.baseCost + msg.total_cost_usd;
-        c.rec.updatedAt = now();
-        log("turn done", { streamed: c.rec.usage, result: msg.usage, cost: msg.total_cost_usd });
-        saveSession(c.dir, c.rec);
-        out({ kind: "session", session: c.rec });
-        out({ kind: "sessions", sessions: readSessions(c.dir) });
-        out({ kind: "busy", busy: false });
-      }
-      if (msg.type !== "user") out({ kind: "sdk", msg }); // tool results (with screenshots) stay in the bridge
     }
-  } catch (e) {
-    log("session error", e);
-    out({ kind: "error", message: `Session error: ${(e as Error).message ?? e}` });
+  } catch (error) {
+    log("session error", error);
+    send(current.fileId, { kind: "error", message: `Session error: ${error instanceof Error ? error.message : String(error)}` });
   } finally {
-    if (conv === c) { conv = undefined; out({ kind: "busy", busy: false }); }
+    if (conv === current) {
+      cancelRequests({ owner: current.owner, reason: "Session ended" });
+      conv = undefined;
+      send(current.fileId, { kind: "busy", busy: false });
+    }
   }
 }
 
-// ---- health ----------------------------------------------------------------------
 async function probeFigmaMcp(): Promise<Health["figmaMcp"]> {
-  try { // any HTTP answer means the desktop server is listening; connection refused means it is off
-    await fetch(FIGMA_MCP_URL, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+  try {
+    await fetch(FIGMA_MCP_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "sesori-review", version: VERSION } } }),
-      signal: AbortSignal.timeout(1500) });
+      signal: AbortSignal.timeout(1500),
+    });
     return "up";
   } catch { return "down"; }
 }
-async function sendHealth(fileId: string) { health.figmaMcp = await probeFigmaMcp(); send(fileId, { kind: "health", health }); }
+async function sendHealth(fileId: string) { healthFigmaMcp = await probeFigmaMcp(); send(fileId, { kind: "health", health: makeHealth() }); }
 
-// ---- inbound ---------------------------------------------------------------------
-async function onUp(ws: WebSocket & { fileId?: string }, m: UpMsg) {
-  switch (m.kind) {
+async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, message: UpMsg) {
+  if (message.kind !== "hello" && !ws.protocolOk) return;
+  switch (message.kind) {
     case "hello": {
-      const old = clients.get(m.fileId);
-      if (old && old !== ws) old.close(); // same file opened twice: the newest plugin instance wins
-      clients.set(m.fileId, ws);
-      ws.fileId = m.fileId;
-      const dir = workspaceFor(m.fileId, m.fileName);
-      send(m.fileId, { kind: "sessions", sessions: readSessions(dir) });
-      const mine = conv && conv.fileId === m.fileId;
-      if (mine) send(m.fileId, { kind: "session", session: conv!.rec }); // plugin reopened mid-session: re-attach
-      send(m.fileId, { kind: "busy", busy: !!mine });
-      prewarm(m.fileId, dir);
-      return sendHealth(m.fileId);
+      const old = clients.get(message.fileId);
+      if (old && old !== ws) old.close();
+      clients.set(message.fileId, ws);
+      ws.fileId = message.fileId;
+      ws.protocolOk = message.protocolVersion === PROTOCOL_VERSION;
+      if (!ws.protocolOk) return send(message.fileId, { kind: "error", message: `Plugin/bridge protocol mismatch (${message.protocolVersion}/${PROTOCOL_VERSION}). Rebuild or restart both from the same @sesori/figma-review version.` });
+      const dir = workspaceFor(message.fileId, message.fileName);
+      send(message.fileId, { kind: "sessions", sessions: readSessions(dir) });
+      const mine = conv?.fileId === message.fileId;
+      if (mine) send(message.fileId, { kind: "session", session: conv!.record });
+      send(message.fileId, { kind: "busy", busy: mine });
+      const settings = readSettings();
+      const selected = providers[settings.provider];
+      selected?.prepare({ fileId: message.fileId, dir, settings: settings.providers[settings.provider], boundary: boundary(message.fileId) });
+      return sendHealth(message.fileId);
     }
-    case "start": return startConv(m);
+    case "start": return startConversation(message);
     case "open": {
-      const dir = workspaceFor(m.fileId, m.fileName);
-      const session = readSessions(dir).find(s => s.sessionId === m.sessionId);
-      if (!session) return send(m.fileId, { kind: "error", message: "Unknown session" });
-      const attached = conv?.rec.sessionId === m.sessionId;
-      return send(m.fileId, { kind: "history", session: attached ? conv!.rec : session, messages: readTranscript(dir, m.sessionId), attached });
+      const dir = workspaceFor(message.fileId, message.fileName);
+      const session = readSessions(dir).find(item => item.provider === message.session.provider && item.sessionId === message.session.sessionId);
+      if (!session) return send(message.fileId, { kind: "error", message: "Unknown provider-qualified session" });
+      const attached = conv?.record.provider === message.session.provider && conv.record.sessionId === message.session.sessionId;
+      const provider = providers[session.provider];
+      if (!provider) return send(message.fileId, { kind: "error", message: `${session.provider} is unavailable; cannot read its native history.` });
+      return send(message.fileId, { kind: "history", session: attached ? conv!.record : session, messages: provider.readHistory({ dir, sessionId: session.sessionId }), attached });
     }
     case "user":
       if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or open one from History." });
-      conv.push(userMessage(m.text, m.selection)); // Claude Code merges it into the running turn between tool calls (steer)
+      conv.session.send({ text: message.text, selection: message.selection });
       return send(conv.fileId, { kind: "busy", busy: true });
-    case "reply": { const p = pending.get(m.id); pending.delete(m.id); p?.resolve(m.result); return; }
-    case "interrupt": if (conv && conv.fileId === ws.fileId) await conv.q.interrupt(); return;
-    case "settings": {
-      saveSettings(m.settings);
-      health.settings = m.settings;
-      if (conv) { // live session switches too; effort "" falls back to Claude Code's default
-        await conv.q.setModel(m.settings.model || undefined);
-        await conv.q.applyFlagSettings({ effortLevel: m.settings.effort || null });
+    case "reply": {
+      const request = pending.get(message.id);
+      pending.delete(message.id);
+      request?.resolve(message.result);
+      return;
+    }
+    case "interrupt":
+      if (conv && conv.fileId === ws.fileId) {
+        cancelRequests({ owner: conv.owner, reason: "Turn stopped" });
+        await conv.session.interrupt();
       }
-      if (warm) { const dir = warm.dir; warm.wq.then(w => w.close()).catch(() => {}); warm = undefined; prewarm(ws.fileId!, dir); } // re-warm with the new model
-      return send(ws.fileId!, { kind: "health", health });
+      return;
+    case "settings": {
+      saveSettings(message.settings);
+      if (conv) await conv.session.applySettings({ settings: message.settings.providers[conv.record.provider] });
+      claude.dispose();
+      const dir = ws.fileId ? workspaceFor(ws.fileId, "Figma file") : undefined;
+      const selected = providers[message.settings.provider];
+      if (dir && selected) selected.prepare({ fileId: ws.fileId!, dir, settings: message.settings.providers[message.settings.provider], boundary: boundary(ws.fileId!) });
+      return send(ws.fileId!, { kind: "health", health: makeHealth() });
     }
     case "health": return sendHealth(ws.fileId!);
   }
 }
 
-new WebSocketServer({ port: BRIDGE_PORT, host: "127.0.0.1" }).on("connection", (ws: WebSocket & { fileId?: string }) => {
+new WebSocketServer({ port, host: "127.0.0.1" }).on("connection", (ws: WebSocket & { fileId?: string; protocolOk?: boolean }) => {
   log("plugin connected");
-  ws.on("message", raw => { onUp(ws, JSON.parse(String(raw))).catch(e => { if (ws.fileId) send(ws.fileId, { kind: "error", message: String(e) }); }); });
+  ws.on("message", raw => { onUp(ws, JSON.parse(String(raw)) as UpMsg).catch(error => { if (ws.fileId) send(ws.fileId, { kind: "error", message: String(error) }); }); });
   ws.on("close", () => {
     if (ws.fileId && clients.get(ws.fileId) === ws) clients.delete(ws.fileId);
-    for (const [id, p] of pending) if (p.ws === ws) { pending.delete(id); p.resolve(p.onDrop); } // unblock tool calls waiting on a plugin that is gone
+    for (const [id, request] of pending) if (request.ws === ws) { pending.delete(id); request.resolve(request.onDrop); }
     log("plugin disconnected", ws.fileId ?? "");
   });
 });
-log(`bridge ${VERSION} listening on ws://127.0.0.1:${BRIDGE_PORT}` + (process.env.APP_REPO ? ` · app repo ${process.env.APP_REPO}` : ""));
+
+log(`bridge ${VERSION} listening on ws://127.0.0.1:${port}` + (process.env.APP_REPO ? ` · app repo ${process.env.APP_REPO}` : ""));
 const manifest = installPlugin();
 console.log(manifest
   ? `\nSesori Figma Review is running. Keep this terminal open.\n\nFirst time? Add the plugin to Figma desktop once:\n  Plugins → Development → Import plugin from manifest… → ${manifest}\nThen run it from Plugins → Development → Sesori Figma Review.\n`

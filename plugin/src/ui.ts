@@ -1,7 +1,8 @@
 // UI iframe: the only user-facing surface. WebSocket client to the bridge, chat renderer, and relay
 // between the bridge and the sandbox (tool calls go down to code.ts, replies come back up).
 import { marked } from "marked";
-import { BRIDGE_PORT, EFFORTS, MODELS, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type SessionRecord, type Settings, type UpMsg } from "../../shared/protocol.ts";
+import { BRIDGE_PORT, CLAUDE_EFFORTS, CLAUDE_MODELS, PROTOCOL_VERSION, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type ReviewEvent, type SessionRecord, type SessionRef, type Settings, type UpMsg } from "../../shared/protocol.ts";
+import { eventBelongsToSession, sessionCostLabel } from "./ui-events.ts";
 
 declare const __VERSION__: string; // injected by build.mjs from package.json
 const md = (s: string) => marked.parse(s.replace(/</g, "&lt;"), { async: false }) as string; // raw HTML from the model is shown as text
@@ -13,13 +14,12 @@ const modelSel = $<HTMLSelectElement>("model"), effortSel = $<HTMLSelectElement>
 let ctx = { fileId: "", fileName: "", pageId: "", pageName: "", selection: [] as NodeRef[] };
 let ws: WebSocket | undefined;
 let live: SessionRecord | undefined; // current conversation (placeholder until the bridge confirms it)
-let textEl: HTMLElement | undefined; // assistant text block currently being streamed
-let textRaw = ""; // its markdown source so far; re-rendered on every delta (ponytail: fine for chat-sized messages)
 let sessions: SessionRecord[] = [];
-let pendingAsk: { answer: (text: string) => void; cancel: () => void } | undefined; // open ask_user card; the composer is hidden while it is open
-let stopping = false; // Stop was clicked; the next result is the interrupt, not an error
+let pendingAsk: { id: string; answer: (text: string) => void; cancel: (reason?: string) => void } | undefined;
 let opened: SessionRecord | undefined; // session shown via History → Open but not yet resumed
 let health: Health | undefined;
+const items = new Map<string, { element: HTMLElement; markdown: string }>();
+const cards = new Map<string, (reason?: string) => void>();
 
 const el = (tag: string, cls = "", text = "") => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const icon = (id: string) => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.innerHTML = `<use href="#i-${id}"/>`; return s; };
@@ -28,7 +28,10 @@ const working = el("div", "typing"); working.append(el("i"), el("i"), el("i")); 
 const bubble = (cls: string, text = "") => { empty.remove(); const b = el("div", cls, text); chat.insertBefore(b, working.parentNode === chat ? working : null); chat.scrollTop = chat.scrollHeight; return b; };
 const assistant = (html: string) => { const b = bubble("msg assistant"); const body = el("div", "body"); body.innerHTML = html; b.append(body); return body; };
 const selText = () => ctx.selection.length ? ctx.selection.map(n => `${n.name} (${n.type} ${n.id})`).join(", ") : "none";
-const clearChat = () => { chat.innerHTML = ""; textEl = undefined; pendingAsk?.cancel(); pendingAsk = undefined; opened = undefined; };
+const clearChat = () => {
+  for (const cancel of cards.values()) cancel("Session replaced");
+  cards.clear(); items.clear(); chat.innerHTML = ""; pendingAsk = undefined; opened = undefined;
+};
 
 /** Tool call → one readable chip. Node ids stay as-is (monospace); names are only known to the sandbox. */
 function chip(name: string, input: Record<string, unknown>) {
@@ -56,8 +59,8 @@ window.onmessage = (e: MessageEvent) => {
 function connect() {
   ws = new WebSocket(`ws://localhost:${BRIDGE_PORT}`);
   ws.onopen = () => {
-    setStatus("connected to bridge", "warn"); send({ kind: "hello", fileId: ctx.fileId, fileName: ctx.fileName });
-    if (live?.sessionId) send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, sessionId: live.sessionId }); // bridge restarted mid-conversation: re-render and resume on the next message
+    setStatus("connected to bridge", "warn"); send({ kind: "hello", protocolVersion: PROTOCOL_VERSION, fileId: ctx.fileId, fileName: ctx.fileName });
+    if (live?.sessionId) send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: live.provider, sessionId: live.sessionId } }); // bridge restarted mid-conversation
   };
   ws.onclose = () => { setStatus("bridge offline — run `npx @sesori/figma-review` in a terminal and keep it open", "bad"); setTimeout(connect, 2000); };
   ws.onerror = () => {};
@@ -74,60 +77,67 @@ function onDown(m: DownMsg) {
     case "history": return showHistory(m);
     case "tool": return m.tool === "ask_user" ? askCard(m.id, m.args) : toMain(m);
     case "permission": return permissionCard(m.id, m.tool, m.input);
-    case "sdk": return onSdk(m.msg);
-    case "busy": stopBtn.hidden = !m.busy; $("btn-flow").hidden = m.busy; if (m.busy) { empty.remove(); chat.append(working); chat.scrollTop = chat.scrollHeight; } else { working.remove(); pendingAsk?.cancel(); } return;
+    case "cancel_request": cards.get(m.id)?.(m.reason); cards.delete(m.id); return;
+    case "event": return onEvent(m.event);
+    case "busy": stopBtn.hidden = !m.busy; $("btn-flow").hidden = m.busy; if (m.busy) { empty.remove(); chat.append(working); chat.scrollTop = chat.scrollHeight; } else { working.remove(); } return;
     case "error": bubble("error", m.message); return;
   }
 }
 
 function renderHealth(h: Health) {
   health = h;
+  const providerId = live?.provider ?? h.selectedProvider;
+  const provider = h.providers.find(item => item.provider === providerId);
   const mcp = h.figmaMcp === "up" ? "Figma MCP up" : "Figma MCP off";
   const failed = (h.servers ?? []).filter(s => s.status !== "connected").map(s => `${s.name}: ${s.status}${s.error ? ` (${s.error})` : ""}`);
-  setStatus(h.error ?? `Claude ${h.claude ?? "starting…"}${h.model ? ` · ${h.model.replace(/^claude-/, "")}` : ""} · ${mcp}`, h.error ? "bad" : h.figmaMcp === "up" && !failed.length ? "ok" : "warn");
+  const providerName = providerId === "claude" ? "Claude" : "Codex";
+  const error = h.error ?? provider?.error;
+  setStatus(error ?? `${providerName} ${provider?.version ?? provider?.status ?? "starting…"}${provider?.model ? ` · ${provider.model.replace(/^claude-/, "")}` : ""} · ${mcp}`, error ? "bad" : h.figmaMcp === "up" && !failed.length ? "ok" : "warn");
   statusEl.title = [h.figmaMcp === "up" ? "" : "Figma desktop MCP server is off: Dev Mode → inspect panel → Enable desktop MCP server. The review still works without it.", ...failed].filter(Boolean).join("\n");
-  if (h.settings) { modelSel.value = h.settings.model; effortSel.value = h.settings.effort; }
-  $("about").textContent = `Sesori Figma Review ${__VERSION__} · bridge ${h.bridge}${h.claude ? ` · Claude Code ${h.claude}` : ""}`;
+  const settings = h.settings.providers[providerId]; modelSel.value = settings.model; effortSel.value = settings.effort;
+  $("about").textContent = `Sesori Figma Review ${__VERSION__} · bridge ${h.bridge}${provider?.version ? ` · ${providerName} ${provider.version}` : ""}`;
 }
 function renderCost(s: SessionRecord) {
   const k = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
   const u = s.usage;
-  costEl.textContent = `$${s.costUsd.toFixed(3)} · ${k(u.input + u.cacheRead + u.cacheWrite)} in / ${k(u.output)} out · ${s.turns} turn${s.turns === 1 ? "" : "s"}`;
-  costEl.title = `input ${u.input}\ncache read ${u.cacheRead}\ncache write ${u.cacheWrite}\noutput ${u.output}\nsession ${s.sessionId}`;
+  costEl.textContent = `${sessionCostLabel({ session: s, precision: 3 })} · ${k(u.input + u.cacheRead + u.cacheWrite)} in / ${k(u.output)} out · ${s.turns} turn${s.turns === 1 ? "" : "s"}`;
+  costEl.title = `provider ${s.provider}\ncost ${s.costStatus}\ninput ${u.input}\ncache read ${u.cacheRead}\ncache write ${u.cacheWrite}\noutput ${u.output}\nsession ${s.sessionId}`;
 }
 
-// ---- Claude Agent SDK messages -------------------------------------------
-function onSdk(msg: any) {
-  if (msg.type === "stream_event" && !msg.parent_tool_use_id) {
-    const ev = msg.event;
-    if (ev.type === "content_block_start") { textEl = ev.content_block.type === "text" ? assistant("") : undefined; textRaw = ""; }
-    if (ev.type === "content_block_delta" && ev.delta.type === "text_delta" && textEl) { textRaw += ev.delta.text; textEl.innerHTML = md(textRaw); chat.scrollTop = chat.scrollHeight; }
+// ---- provider-neutral activity -------------------------------------------
+function onEvent(event: ReviewEvent) {
+  if (!eventBelongsToSession({ event, session: live })) return;
+  if (event.type === "text_start") {
+    const element = assistant(""); items.set(event.itemId, { element, markdown: "" });
+  } else if (event.type === "text_delta") {
+    const item = items.get(event.itemId);
+    if (item) { item.markdown += event.text; item.element.innerHTML = md(item.markdown); chat.scrollTop = chat.scrollHeight; }
+  } else if (event.type === "tool") {
+    if (!items.has(event.itemId)) { const element = chip(event.name, event.input); items.set(event.itemId, { element, markdown: "" }); }
+  } else if (event.type === "status") {
+    if (!items.has(event.itemId)) { const element = bubble("chip", event.text); items.set(event.itemId, { element, markdown: "" }); }
+  } else if (event.type === "error") {
+    if (!items.has(event.itemId)) { const element = bubble("error", event.message); items.set(event.itemId, { element, markdown: "" }); }
+  } else if (event.type === "turn_end") {
+    if (event.outcome === "interrupted") bubble("chip stopped", "Stopped");
+    if (event.outcome === "failed") bubble("error", event.message ?? "Turn failed");
   }
-  if (msg.type === "assistant") {
-    for (const b of msg.message.content) if (b.type === "tool_use") chip(b.name, b.input);
-    if (msg.error) bubble("error", `Claude error: ${msg.error}`);
-  }
-  if (msg.type === "result") {
-    textEl = undefined;
-    if (stopping) bubble("chip stopped", "Stopped"); // an interrupted turn reports error_during_execution; that is expected
-    else if (msg.is_error) bubble("error", msg.result ?? msg.subtype);
-    stopping = false;
-  }
-  if (msg.type === "system" && msg.subtype === "status" && msg.status === "compacting") bubble("chip", "Compacting context…");
 }
 
 // ---- cards ---------------------------------------------------------------
 /** Claude's question. The composer is hidden until it is answered, so there is exactly one place to reply. */
-function askCard(id: string, args: any) {
-  if (args.nodeId) toMain({ kind: "focus", nodeId: args.nodeId });
+function askCard(id: string, args: Record<string, unknown>) {
+  if (typeof args.nodeId === "string") toMain({ kind: "focus", nodeId: args.nodeId });
   pendingAsk?.cancel();
   const card = bubble("card");
-  card.append(el("div", "q", args.question));
+  card.append(el("div", "q", typeof args.question === "string" ? args.question : "Question"));
   const ctl = el("div", "ctl");
-  const close = (label: string) => { ctl.remove(); const a = el("div", "a"); a.append(icon("check"), label); card.append(a); pendingAsk = undefined; footer.hidden = false; };
+  const close = (label: string) => { ctl.remove(); const a = el("div", "a"); a.append(icon("check"), label); card.append(a); cards.delete(id); if (pendingAsk?.id === id) pendingAsk = undefined; footer.hidden = false; };
   const answer = (text: string) => { close(text); send({ kind: "reply", id, result: { content: [{ type: "text", text: `${text}\n\n[Current selection: ${selText()}]` }] } }); };
-  pendingAsk = { answer, cancel: () => close("(no answer)") };
-  for (const o of args.options ?? []) ctl.append(btn(o, () => answer(o)));
+  const cancel = (reason = "No longer actionable") => close(`(${reason})`);
+  pendingAsk = { id, answer, cancel }; cards.set(id, cancel);
+  const options = Array.isArray(args.options) ? args.options.filter((option): option is string => typeof option === "string") : [];
+  for (const option of options) ctl.append(btn(option, () => answer(option)));
   const ta = document.createElement("textarea"); ta.rows = 2; ta.placeholder = "Or type an answer… Enter to send";
   ta.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (ta.value.trim()) answer(ta.value.trim()); } };
   ctl.append(ta); card.append(ctl);
@@ -141,7 +151,11 @@ function permissionCard(id: string, tool: string, input: Record<string, unknown>
   const preview = typeof input.markdown === "string" ? input.markdown : JSON.stringify(input, null, 1);
   card.append(el("pre", "", preview.slice(0, 2000)));
   const ctl = el("div", "ctl");
-  const done = (result: PermissionDecision, label: string) => { ctl.remove(); card.append(el("div", "a", label)); send({ kind: "reply", id, result }); };
+  const done = (result: PermissionDecision | undefined, label: string) => {
+    ctl.remove(); card.append(el("div", "a", label)); cards.delete(id);
+    if (result) send({ kind: "reply", id, result });
+  };
+  cards.set(id, reason => done(undefined, `Cancelled: ${reason ?? "no longer actionable"}`));
   ctl.append(btn("Allow", () => done({ behavior: "allow" }, "Allowed"), "primary"), btn("Deny", () => done({ behavior: "deny", message: "The user denied this in the plugin." }, "Denied")));
   card.append(ctl);
 }
@@ -152,23 +166,34 @@ function renderSessions() {
   if (!sessions.length) sessionsEl.append(el("div", "hint", "No sessions yet for this file."));
   for (const s of [...sessions].reverse()) {
     const row = el("div", "row"), title = el("div", "title");
-    title.append(el("b", "", s.title), el("span", "", `${s.pageName} · ${s.updatedAt.slice(0, 16).replace("T", " ")} · $${s.costUsd.toFixed(2)} · ${s.turns} turn${s.turns === 1 ? "" : "s"}`));
-    row.append(title, btn("Open", () => { sessionsEl.hidden = true; send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, sessionId: s.sessionId }); }));
+    const provider = s.provider === "claude" ? "Claude" : "Codex";
+    const cost = sessionCostLabel({ session: s, precision: 2 });
+    title.append(el("b", "", s.title), el("span", "", `${provider} · ${s.pageName} · ${s.updatedAt.slice(0, 16).replace("T", " ")} · ${cost} · ${s.turns} turn${s.turns === 1 ? "" : "s"}`));
+    row.append(title, btn("Open", () => { sessionsEl.hidden = true; send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: s.provider, sessionId: s.sessionId } }); }));
     sessionsEl.append(row);
   }
 }
 
 // ---- settings --------------------------------------------------------------
-for (const [v, l] of MODELS) modelSel.append(new Option(l, v));
-for (const e of EFFORTS) effortSel.append(new Option(e || "Default", e));
-const pushSettings = () => send({ kind: "settings", settings: { model: modelSel.value, effort: effortSel.value as Settings["effort"] } });
+for (const [value, label] of CLAUDE_MODELS) modelSel.append(new Option(label, value));
+for (const effort of CLAUDE_EFFORTS) effortSel.append(new Option(effort || "Default", effort));
+const pushSettings = () => {
+  if (!health) return;
+  const provider = live?.provider ?? health.selectedProvider;
+  const settings: Settings = {
+    ...health.settings,
+    providers: { ...health.settings.providers, [provider]: { model: modelSel.value, effort: effortSel.value } },
+  };
+  health.settings = settings;
+  send({ kind: "settings", settings });
+};
 modelSel.onchange = effortSel.onchange = pushSettings;
 $("btn-settings").onclick = () => { settingsEl.hidden = !settingsEl.hidden; sessionsEl.hidden = true; };
 
 // ---- composer -------------------------------------------------------------
-function start(anchor: Anchor, text: string, resume?: string) {
-  if (!resume) { clearChat(); live = { sessionId: "" } as SessionRecord; } // placeholder until the bridge sends `session`
-  textEl = undefined; opened = undefined; settingsEl.hidden = sessionsEl.hidden = true;
+function start(anchor: Anchor, text: string, resume?: SessionRef) {
+  if (!resume) { clearChat(); live = undefined; }
+  opened = undefined; settingsEl.hidden = sessionsEl.hidden = true;
   bubble("msg user", text);
   send({ kind: "start", fileId: ctx.fileId, fileName: ctx.fileName, pageId: ctx.pageId, pageName: ctx.pageName, anchor, resume, text, selection: ctx.selection });
 }
@@ -189,7 +214,7 @@ function submit() {
   if (!text) return;
   input.value = ""; autosize();
   if (!live) return start({ type: "page", nodeIds: [] }, text);
-  if (opened) return start(opened.anchor, text, opened.sessionId); // first message after Open resumes the session
+  if (opened) return start(opened.anchor, text, { provider: opened.provider, sessionId: opened.sessionId }); // first message after Open resumes native session
   bubble("msg user", text);
   send({ kind: "user", text, selection: ctx.selection }); // delivered mid-turn as steering; Stop interrupts
 }
@@ -205,4 +230,4 @@ $("btn-selection").onclick = () => {
 };
 $("btn-new").onclick = () => { clearChat(); chat.append(empty); live = undefined; costEl.textContent = ""; settingsEl.hidden = sessionsEl.hidden = true; input.focus(); };
 $("btn-history").onclick = () => { sessionsEl.hidden = !sessionsEl.hidden; settingsEl.hidden = true; if (!sessionsEl.hidden) renderSessions(); };
-stopBtn.onclick = () => { stopping = true; send({ kind: "interrupt" }); };
+stopBtn.onclick = () => send({ kind: "interrupt" });

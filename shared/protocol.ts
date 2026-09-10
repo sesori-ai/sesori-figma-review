@@ -1,22 +1,29 @@
 // Wire protocol between the Figma plugin (WebSocket client) and the bridge (WebSocket server).
 // Both packages import this file directly; there is no build step for it.
 
+export const PROTOCOL_VERSION = 2;
+export const BRIDGE_PORT = 3055;
+export const FIGMA_MCP_URL = "http://127.0.0.1:3845/mcp";
+
+export type ProviderId = "claude" | "codex";
+export type SessionRef = { provider: ProviderId; sessionId: string };
 export type NodeRef = { id: string; name: string; type: string };
 
 /** Where a conversation starts. Stored with the session so it can be resumed later. */
 export type Anchor = { type: "flow" | "selection" | "page"; nodeIds: string[] };
 
-/** MCP tool-result content the plugin returns for a forwarded tool call. */
+/** Tool-result content the plugin returns for a forwarded tool call. */
 export type ToolContent =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: "image/png" };
 export type ToolResult = { content: ToolContent[]; isError?: boolean };
 
 export type PermissionDecision = { behavior: "allow" } | { behavior: "deny"; message: string };
-
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
+export type CostStatus = "reported" | "estimated" | "unavailable";
 
 export type SessionRecord = {
+  provider: ProviderId;
   sessionId: string;
   title: string;
   anchor: Anchor;
@@ -26,15 +33,63 @@ export type SessionRecord = {
   updatedAt: string;
   turns: number;
   costUsd: number;
+  costStatus: CostStatus;
   usage: Usage;
 };
+
+export type ProviderSettings = { model: string; effort: string };
+export type Settings = {
+  /** Provider used only for new sessions. Existing sessions remain bound to their provider. */
+  provider: ProviderId;
+  providers: Record<ProviderId, ProviderSettings>;
+};
+
+/** Claude remains the only selectable provider until the Codex adapter is qualified. */
+export const CLAUDE_MODELS: readonly (readonly [value: string, label: string])[] = [
+  ["", "Default"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"],
+];
+export const CLAUDE_EFFORTS = ["", "low", "medium", "high", "xhigh", "max"] as const;
+
+export type ModelDescriptor = { value: string; label: string; efforts: string[] };
+export type ProviderHealth = {
+  provider: ProviderId;
+  status: "starting" | "ready" | "unavailable";
+  version?: string;
+  model?: string;
+  models: ModelDescriptor[];
+  error?: string;
+};
+export type Health = {
+  bridge: string;
+  protocolVersion: number;
+  figmaMcp: "up" | "down";
+  selectedProvider: ProviderId;
+  liveProvider?: ProviderId;
+  settings: Settings;
+  providers: ProviderHealth[];
+  servers?: { name: string; status: string; error?: string }[];
+  error?: string;
+};
+
+/** Provider-neutral rendered activity. Provider SDK/RPC payloads never cross the wire. */
+export type ReviewEvent =
+  | { type: "text_start"; session: SessionRef; itemId: string }
+  | { type: "text_delta"; session: SessionRef; itemId: string; text: string }
+  | { type: "text_end"; session: SessionRef; itemId: string }
+  | { type: "tool"; session: SessionRef; itemId: string; name: string; input: Record<string, unknown> }
+  | { type: "status"; session: SessionRef; itemId: string; text: string }
+  | { type: "error"; session: SessionRef; itemId: string; message: string }
+  | { type: "turn_end"; session: SessionRef; itemId: string; outcome: "completed" | "interrupted" | "failed"; message?: string };
+
+/** One rendered item of a past native conversation. */
+export type HistoryItem =
+  | { role: "user" | "assistant" | "answer"; text: string }
+  | { role: "tool"; name: string; input: Record<string, unknown> };
 
 // ---- plugin -> bridge -------------------------------------------------------
 
 export type UpMsg =
-  /** Sent on every (re)connect. Bridge answers with `health` + `sessions` and pre-warms a session. */
-  | { kind: "hello"; fileId: string; fileName: string }
-  /** Start a conversation (new, or `resume` an existing session id) with its first user message. */
+  | { kind: "hello"; protocolVersion: number; fileId: string; fileName: string }
   | {
       kind: "start";
       fileId: string;
@@ -42,60 +97,27 @@ export type UpMsg =
       pageId: string;
       pageName: string;
       anchor: Anchor;
-      resume?: string;
+      resume?: SessionRef;
       text: string;
       selection: NodeRef[];
     }
-  /** Follow-up message. Delivered mid-turn as steering; the bridge never queues it. */
   | { kind: "user"; text: string; selection: NodeRef[] }
-  /** History → Open: bridge answers with `history` (past messages). The session is resumed on the next `start`. */
-  | { kind: "open"; fileId: string; fileName: string; sessionId: string }
-  /** Answer to a `tool` (ToolResult) or `permission` (PermissionDecision) request. */
+  | { kind: "open"; fileId: string; fileName: string; session: SessionRef }
   | { kind: "reply"; id: string; result: ToolResult | PermissionDecision }
-  /** Stop button: interrupt the running turn. */
   | { kind: "interrupt" }
-  /** Model / effort picked in the plugin. Saved by the bridge, applied to the live session and the next ones. */
   | { kind: "settings"; settings: Settings }
-  /** Re-run the health probe. */
   | { kind: "health" };
 
 // ---- bridge -> plugin -------------------------------------------------------
 
-/** Empty string = Claude Code's default. Aliases (opus, sonnet, haiku) resolve to the latest model of that family. */
-export type Settings = { model: string; effort: "" | "low" | "medium" | "high" | "xhigh" | "max" };
-export const MODELS: [value: string, label: string][] = [["", "Default"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]]; // ponytail: static; query.supportedModels() if the list matters
-export const EFFORTS: Settings["effort"][] = ["", "low", "medium", "high", "xhigh", "max"];
-
-export type Health = {
-  bridge: string;
-  figmaMcp: "up" | "down";
-  claude?: string;
-  model?: string;
-  settings?: Settings;
-  servers?: { name: string; status: string; error?: string }[];
-  error?: string;
-};
-
-/** One rendered item of a past conversation, read from the Claude Code transcript. */
-export type HistoryItem =
-  | { role: "user" | "assistant" | "answer"; text: string }
-  | { role: "tool"; name: string; input: Record<string, unknown> };
-
 export type DownMsg =
   | { kind: "health"; health: Health }
   | { kind: "sessions"; sessions: SessionRecord[] }
-  /** Past messages of an opened session; `attached` when that session is the one currently running. */
   | { kind: "history"; session: SessionRecord; messages: HistoryItem[]; attached: boolean }
-  /** Current session created or updated (cost, tokens, turns). */
   | { kind: "session"; session: SessionRecord }
-  /** Run a Figma tool and reply with a ToolResult. `ask_user` is handled by the plugin UI. */
   | { kind: "tool"; id: string; tool: string; args: Record<string, unknown> }
-  /** Ask the user to allow or deny a tool call; reply with a PermissionDecision. */
   | { kind: "permission"; id: string; tool: string; input: Record<string, unknown> }
-  /** Raw Claude Agent SDK message (stream_event, assistant, result, system). */
-  | { kind: "sdk"; msg: any }
+  | { kind: "cancel_request"; id: string; reason: string }
+  | { kind: "event"; event: ReviewEvent }
   | { kind: "busy"; busy: boolean }
   | { kind: "error"; message: string };
-
-export const BRIDGE_PORT = 3055;
-export const FIGMA_MCP_URL = "http://127.0.0.1:3845/mcp";

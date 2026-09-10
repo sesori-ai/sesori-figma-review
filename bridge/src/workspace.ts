@@ -6,7 +6,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FIGMA_MCP_URL, type HistoryItem, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
+import { FIGMA_MCP_URL, type ProviderId, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
 
 export const HOME = process.env.SESORI_REVIEW_HOME ?? join(homedir(), ".sesori-review");
 
@@ -47,55 +47,77 @@ export function installPlugin(): string | undefined {
 /** True when Claude Code has something to authenticate with (API key or a completed login). */
 export const hasClaudeAuth = () => !!process.env.ANTHROPIC_API_KEY || existsSync(join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), ".credentials.json"));
 
-/** Model/effort chosen in the plugin; one file for the whole machine (the bridge runs one conversation at a time anyway). */
+/** Provider-keyed preferences. Legacy `{ model, effort }` files are Claude preferences. */
 const settingsPath = () => join(HOME, "settings.json");
-export const readSettings = (): Settings => ({ model: "", effort: "", ...(existsSync(settingsPath()) ? JSON.parse(readFileSync(settingsPath(), "utf8")) : {}) });
-export function saveSettings(s: Settings) { mkdirSync(HOME, { recursive: true }); writeFileSync(settingsPath(), JSON.stringify(s, null, 2) + "\n"); }
+const blankSettings = (): Settings => ({
+  provider: "claude",
+  providers: { claude: { model: "", effort: "" }, codex: { model: "", effort: "" } },
+});
+const object = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+const text = (value: unknown): string => typeof value === "string" ? value : "";
 
-export const readSessions = (dir: string): SessionRecord[] => JSON.parse(readFileSync(join(dir, "sessions.json"), "utf8"));
+export function readSettings(): Settings {
+  if (!existsSync(settingsPath())) return blankSettings();
+  const raw = object(JSON.parse(readFileSync(settingsPath(), "utf8")));
+  if (!raw) return blankSettings();
+  const providers = object(raw.providers);
+  if (!providers) return { ...blankSettings(), providers: { ...blankSettings().providers, claude: { model: text(raw.model), effort: text(raw.effort) } } };
+  const claude = object(providers.claude);
+  const codex = object(providers.codex);
+  return {
+    provider: raw.provider === "codex" ? "codex" : "claude",
+    providers: {
+      claude: { model: text(claude?.model), effort: text(claude?.effort) },
+      codex: { model: text(codex?.model), effort: text(codex?.effort) },
+    },
+  };
+}
+export function saveSettings(settings: Settings) {
+  mkdirSync(HOME, { recursive: true });
+  writeFileSync(settingsPath(), JSON.stringify(settings, null, 2) + "\n");
+}
+
+function decodeSession(value: unknown): SessionRecord | undefined {
+  const raw = object(value);
+  const anchor = object(raw?.anchor);
+  const usage = object(raw?.usage);
+  if (!raw || !anchor || !usage || typeof raw.sessionId !== "string") return;
+  const provider: ProviderId = raw.provider === "codex" ? "codex" : "claude";
+  return {
+    provider,
+    sessionId: raw.sessionId,
+    title: text(raw.title),
+    anchor: {
+      type: anchor.type === "selection" || anchor.type === "page" ? anchor.type : "flow",
+      nodeIds: Array.isArray(anchor.nodeIds) ? anchor.nodeIds.filter((id): id is string => typeof id === "string") : [],
+    },
+    pageId: text(raw.pageId),
+    pageName: text(raw.pageName),
+    createdAt: text(raw.createdAt),
+    updatedAt: text(raw.updatedAt),
+    turns: typeof raw.turns === "number" ? raw.turns : 0,
+    costUsd: typeof raw.costUsd === "number" ? raw.costUsd : 0,
+    costStatus: raw.costStatus === "estimated" || raw.costStatus === "unavailable" ? raw.costStatus : "reported",
+    usage: {
+      input: typeof usage.input === "number" ? usage.input : 0,
+      output: typeof usage.output === "number" ? usage.output : 0,
+      cacheRead: typeof usage.cacheRead === "number" ? usage.cacheRead : 0,
+      cacheWrite: typeof usage.cacheWrite === "number" ? usage.cacheWrite : 0,
+    },
+  };
+}
+
+export const readSessions = (dir: string): SessionRecord[] => {
+  const raw: unknown = JSON.parse(readFileSync(join(dir, "sessions.json"), "utf8"));
+  return Array.isArray(raw) ? raw.map(decodeSession).filter((session): session is SessionRecord => !!session) : [];
+};
 export function saveSession(dir: string, rec: SessionRecord) {
-  const rest = readSessions(dir).filter(s => s.sessionId !== rec.sessionId);
+  const rest = readSessions(dir).filter(s => s.provider !== rec.provider || s.sessionId !== rec.sessionId);
   writeFileSync(join(dir, "sessions.json"), JSON.stringify([...rest, rec], null, 2) + "\n");
 }
 
-/** Past messages of a session, read from Claude Code's own transcript (~/.claude/projects/<cwd slug>/<id>.jsonl).
- *  ponytail: depends on the CLI's file layout; if it changes, log our own copy from pump() instead. */
-export function readTranscript(dir: string, sessionId: string): HistoryItem[] {
-  const root = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-  const path = join(root, "projects", dir.replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`);
-  if (!existsSync(path)) return [];
-  const out: HistoryItem[] = [];
-  const toolNames = new Map<string, string>();
-  const strip = (s: string) => s.split("\n").filter(l => !/^\[(Figma file |Current selection: )/.test(l)).join("\n").trim(); // our context lines
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    let l: any; try { l = JSON.parse(line); } catch { continue; }
-    const c = l?.message?.content;
-    if (l.type === "user" && !l.isMeta) {
-      if (typeof c === "string") out.push({ role: "user", text: strip(c) });
-      for (const b of Array.isArray(c) ? c : []) {
-        if (b.type === "text" && /^\[Request interrupted/.test(b.text)) out.push({ role: "tool", name: "stopped", input: {} });
-        else if (b.type === "tool_result" && toolNames.get(b.tool_use_id) === "mcp__figma__ask_user") {
-          const t = typeof b.content === "string" ? b.content : (b.content ?? []).map((x: any) => x.text ?? "").join("");
-          out.push({ role: "answer", text: strip(t) });
-        }
-      }
-    }
-    if (l.type === "assistant") for (const b of Array.isArray(c) ? c : []) {
-      if (b.type === "text" && b.text.trim()) out.push({ role: "assistant", text: b.text });
-      if (b.type === "tool_use") { toolNames.set(b.id, b.name); out.push({ role: "tool", name: b.name, input: b.input }); }
-    }
-  }
-  return out;
-}
-
 export const zeroUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-/** Add one turn's totals (the `usage` on the SDK result message; per-block assistant usage is not final). */
-export const addUsage = (t: Usage, u: any): Usage => ({
-  input: t.input + (u?.input_tokens ?? 0),
-  output: t.output + (u?.output_tokens ?? 0),
-  cacheRead: t.cacheRead + (u?.cache_read_input_tokens ?? 0),
-  cacheWrite: t.cacheWrite + (u?.cache_creation_input_tokens ?? 0),
-});
 
 const claudeMd = (fileName: string) => `# Figma design review — ${fileName}
 

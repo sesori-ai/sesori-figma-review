@@ -1,8 +1,8 @@
 # Codex support — full user-facing parity
 
-Status: Plan PR open; initial architecture review approved. The user has authorized execution of the entire series,
-automatic squash merges at ready-for-human-review, and continuation without waiting for manual merges. The
-subsequent packaging-baseline reconciliation is recorded below.
+Status: Step 1 squash-merged as `232048a`; initial architecture review approved. The user has authorized execution
+of the entire series, automatic squash merges at ready-for-human-review, and continuation without waiting for
+manual merges. Step 2 is implemented and verified locally on `codex-support-step-2`, pending independent review.
 
 ## Goal and locked user direction
 
@@ -17,8 +17,8 @@ allowed instead of reproducing Claude's dedicated file tools. This changes the i
 not the requirement to preserve user workflows. It does not authorize unrestricted execution or app-repo writes.
 
 Work belongs only to this repository's `bridge/`, `plugin/`, `shared/`, root package/build metadata, tests, and docs. Do not change the Sesori
-Apps Monorepo or its adapters. This session must stay in the supplied `olive-crane` worktree; the observed branch
-is `codex-support-plan`. Do not create another worktree. Keep the existing root `PLAN.md` as historical context.
+Apps Monorepo or its adapters. Execution stays in the supplied `olive-crane` worktree; Step 2 uses
+`codex-support-step-2`. Do not create another worktree. Keep the existing root `PLAN.md` as historical context.
 
 Planning procedure: reuse `sesori-plan-maker` from `sesori_apps_monorepo/.agents/skills/`; implementation handoff
 uses `sesori-plan-worker`. Borrow their planning, review, and regression-proof principles, not the unrelated
@@ -170,6 +170,11 @@ argument objects. Do not perpetuate `any` across newly changed external boundari
    bridge restart and resumes it on the next message, using its provider-qualified identity. End-session and
    bridge-shutdown dispose owned processes/listeners. No automatic model-turn replay,
    process restart loop, or second conversation scheduler.
+
+Live-test authorization: the user explicitly approved bounded use of existing Claude and Codex sign-ins for this
+plan's required smoke/regression tests, including acknowledged Claude API charges. Tests must not change logins or
+global configuration, copy credentials, or expose account data. Use synthetic fixtures, isolated Sesori homes/free
+ports, low-cost models and native spend/turn bounds where available; clean up only owned processes and fixtures.
 
 ### Filesystem, permissions, and workspace parity
 
@@ -378,7 +383,8 @@ reduction needs explicit user acceptance recorded here before retirement.
 
 Include directly caused cleanup in its owning step: remove the raw SDK wire payload and UI parser, move Claude
 history/usage ownership into its adapter, replace global Claude-only copy/model constants with provider descriptors,
-and remove duplicate tool schemas. Keep native transcript storage and legacy Claude decode compatibility; existing
+and remove duplicate tool schemas. Step 2 completed the raw payload/parser removal, moved Claude lifecycle/history/
+accounting behind the provider contract, and centralized the Figma catalog; legacy decode paths remain intentionally. Keep native transcript storage and legacy Claude decode compatibility; existing
 users need them. Keep historical root plan but correct/link stale current-behavior claims in the documentation step.
 No unrelated style rewrite, new framework, background service, mobile bridge changes, or socket-auth project.
 
