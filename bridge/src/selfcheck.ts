@@ -6,7 +6,10 @@ import { join } from "node:path";
 
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "figma-review-"));
 process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "claude-config-"));
-const { addUsage, readAllow, readSessions, readSettings, readTranscript, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
+const { addUsage, installPlugin, readAllow, readSessions, readSettings, readTranscript, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
+
+const manifest = installPlugin(); // needs a plugin build; tolerate its absence so `check` also runs before `build`
+if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"') && readFileSync(join(process.env.SESORI_REVIEW_HOME, "plugin/dist/ui.html"), "utf8").includes("Sesori Figma Review"), "plugin is copied next to the workspaces");
 
 assert.deepEqual(readSettings(), { model: "", effort: "" }, "no settings file → Claude Code defaults");
 saveSettings({ model: "opus", effort: "low" });

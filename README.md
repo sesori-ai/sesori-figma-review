@@ -1,125 +1,111 @@
-<p align="center"><img src="plugin/assets/icon-128.png" width="96" alt="Sesori Figma Review"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/plugin/assets/icon-128.png" width="96" alt="Sesori Figma Review"></p>
 <h1 align="center">Sesori Figma Review</h1>
-<p align="center">Claude reviews your prototype from inside Figma: the flow, then every screen, asking at the right spot and leaving Dev Mode annotations.</p>
+<p align="center"><b>Claude reviews your Figma prototype with you, inside Figma.</b><br>
+It walks the canvas screen by screen, asks before it assumes, and leaves Dev Mode annotations your developers can build from.</p>
 
-Everything happens in the plugin panel. Claude moves your canvas to whatever it is talking about, asks questions
-as cards, and writes Dev Mode annotations so the design ends up dev-ready. A small local **bridge** process runs the
-[Claude Agent SDK](https://docs.anthropic.com/en/docs/agent-sdk) next to Figma; you never talk to it directly.
+<p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/docs/screenshot.png" width="440" alt="The plugin panel: a question about the selected screen, Claude focuses it, looks at it and lists the top three gaps before dev"></p>
+
+## Why you'd want this
+
+- **A second pair of eyes before handoff.** Click *Review flow* and Claude reads the prototype, then walks every screen: dead ends, missing loading/empty/error states, inconsistent spacing, unclear interactions, accessibility gaps.
+- **It moves your canvas.** Claude focuses each frame before talking about it, so you follow along instead of reading a report about frames you have to hunt for.
+- **It asks, it doesn't guess.** Questions arrive as cards with options. "Next screen?", "Write this as an annotation?", "Which of these flows matters most?"
+- **Dev-ready output, not chat.** Findings you accept become Dev Mode annotations on the right nodes: what, behaviour, states, tokens, edge cases.
+- **Your Claude, your bill.** Runs on the Claude Agent SDK with your own Claude Code login or API key. Pick model and effort in the plugin. Nothing leaves your machine except the calls to Anthropic.
+
+## Quick start
+
+You need **Node 22+**, the **Figma desktop app**, and **Claude Code signed in** (run `claude` once) or an `ANTHROPIC_API_KEY` in your shell.
+
+**1. Start the bridge** and keep the terminal open:
+
+```bash
+npx @sesori/figma-review
+```
+
+It prints the path of a plugin manifest, something like `~/.sesori-review/plugin/manifest.json`.
+
+**2. Add the plugin to Figma** (once): **Plugins → Development → Import plugin from manifest…** and pick that file.
+
+**3. Review**: open a file, run **Plugins → Development → Sesori Figma Review**, click **Review flow**. The header dot turns green when the bridge and Claude are ready.
+
+Next time you only need step 1 and step 3.
+
+> **Notes.** Dev Mode annotations need a paid Figma plan; everything else works on free files. Agent SDK usage is billed like the API. For richer context (variables, component properties, code), turn on Figma's **desktop MCP server** (Dev Mode → inspect panel → *Enable desktop MCP server*); the review works without it.
+
+## What you can do
+
+| | |
+| --- | --- |
+| **Review flow** | Reviews the prototype flow of the current page, then screen by screen with "Next screen?" between screens. |
+| **Selection** | Select frames or components, then click. The review is anchored to them. |
+| **Just ask** | Type anything. Your current selection travels with every message, so "make this one bigger" works. |
+| **History → Open** | Shows a past conversation for this file; your next message continues it with full context. |
+| **Stop** | Replaces *Review flow* while Claude works. Interrupts the turn. Typing while Claude works steers it instead. |
+| **Settings** (sliders) | Model (Default / Opus / Sonnet / Haiku) and effort. Applies to the running session too. |
+
+Annotations are written without asking and appended to what is there. Anything not on the auto-approve list shows an **Allow / Deny** card. The header shows live cost, tokens and turns.
+
+## How it works
 
 ```
-Figma desktop ── plugin (this repo, plugin/) ──► ws://localhost:3055 ──► bridge (this repo, bridge/) ──► Claude Code ──► Anthropic API
+Figma desktop ── plugin UI ──► ws://localhost:3055 ──► bridge (npx @sesori/figma-review) ──► Claude Code ──► Anthropic API
 ```
 
-## Requirements
+The plugin is a thin client. The bridge is a small local process that runs the Claude Agent SDK, exposes Figma tools to Claude (`get_flow`, `get_screen`, `focus`, `annotate`, `ask_user`) and keeps a workspace per Figma file under `~/.sesori-review/files/<fileId>/`. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
-- **macOS or Linux with Node 22+.** Windows should work but is untested.
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in** (`claude` once in a
-  terminal, or `ANTHROPIC_API_KEY` in the environment). The bridge uses whatever Claude Code auth exists. Agent SDK
-  usage is billed like the API.
-- **Figma desktop app.** Dev Mode annotations need a **paid Figma plan**; everything else works on free files.
-- Optional: the **Figma desktop MCP server** (Dev Mode → inspect panel → *Enable desktop MCP server*). It gives Claude
-  variables, component properties and generated code. Without it the review still works with the plugin's own tools.
+<details>
+<summary><b>Configuration</b></summary>
 
-## Install
+Model and effort live in `~/.sesori-review/settings.json` (set from the plugin). Environment variables for the bridge:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `APP_REPO` | unset | Path to your app's source, mounted read-only so annotations use real component names. |
+| `SESORI_REVIEW_HOME` | `~/.sesori-review` | Where the plugin copy, settings and workspaces live. |
+
+Per-file workspace (`~/.sesori-review/files/<fileId>/`), the agent's working directory:
+
+| File | Purpose |
+| --- | --- |
+| `CLAUDE.md` | Review conventions. Edit freely; never overwritten. |
+| `permissions.json` | The auto-approve list (`allow`). |
+| `.mcp.json` | Points at the Figma desktop MCP server, so `claude` works from this folder too. |
+| `.claude/skills/review-flow/` | The guided review skill. Refreshed on every start. |
+| `notes/` | The only place the agent may write files without asking. |
+| `sessions.json` | Session index: title, anchor, cost, tokens, turns. |
+
+`cd` into a workspace and run `claude --resume <sessionId>` to continue a session from the CLI.
+</details>
+
+<details>
+<summary><b>Troubleshooting</b></summary>
+
+- **"bridge offline"** in the header: start `npx @sesori/figma-review`. The plugin reconnects every 2 seconds and picks the conversation back up.
+- **Claude failed to start**: run `claude` in a terminal to check auth. The bridge terminal shows the error.
+- **Figma MCP off**: enable the desktop MCP server in Dev Mode, or ignore it.
+- **Annotations fail**: free Figma plan, or a node type that cannot hold annotations (groups, some vectors).
+- **Nothing happens after "Review flow"**: check the bridge terminal. Closing the plugin mid-turn fails pending tool calls and Claude is told so.
+- **Upgrading**: `npx @sesori/figma-review@latest`. The bridge refreshes the plugin copy on every start; Figma reloads it the next time you run the plugin.
+</details>
+
+<details>
+<summary><b>Develop from source</b></summary>
 
 ```bash
 git clone https://github.com/sesori-ai/sesori-figma-review.git
 cd sesori-figma-review
 npm install
-npm run build            # → plugin/dist/code.js and plugin/dist/ui.html
+npm run build          # plugin/dist/* and bridge/dist/bridge.mjs
+npm run check          # type-check, sandbox check against a mock Figma API, bridge self-check
+npm run bridge         # dev bridge (tsx), then import plugin/manifest.json in Figma
+npm run smoke -w bridge   # fake plugin, one real turn through the bridge, no Figma needed
 ```
 
-Then, in Figma desktop, once: **Plugins → Development → Import plugin from manifest…** and pick
-`plugin/manifest.json` from this checkout. Optionally turn on **Plugins → Development → Hot reload plugin**.
+Layout: `plugin/` (Figma sandbox + UI iframe, bundled by `plugin/build.mjs`), `bridge/` (WebSocket server + Agent SDK session manager), `shared/protocol.ts` (the wire protocol). Decisions in [PLAN.md](PLAN.md).
 
-## Run
-
-1. Start the bridge and keep the terminal open while you review:
-   ```bash
-   npm run bridge
-   ```
-2. In Figma, open a file and run **Plugins → Development → Sesori Figma Review**.
-3. The dot in the panel header turns green when the bridge, Claude and the Figma MCP server are all reachable.
-   Hover it for details.
-
-Optional: `APP_REPO=/path/to/your/app npm run bridge` mounts your app's source read-only so annotations can refer to
-real component names.
-
-## Using it
-
-| Control | What it does |
-| --- | --- |
-| **Review flow** | Reviews the prototype flow of the current page (starting points → reactions), then walks screen by screen. Claude focuses each screen before talking about it and asks "Next screen?" between screens. |
-| **Selection** | Select frames or components first, then click. The review is anchored to them. |
-| **New** | Empty conversation. Just type a question; your current selection travels with every message, so "make this one bigger" works. |
-| **History** | Earlier sessions for this file with cost. **Open** shows the whole past conversation; your next message continues that session with its full context. |
-| **Stop** | Appears in place of *Review flow* while Claude works. Interrupts the turn. |
-| **Settings** (sliders icon) | Pick the Claude **model** (Default / Opus / Sonnet / Haiku) and **effort**. Applies to the running session and to new ones. |
-
-- **Questions from Claude** arrive as a card with option buttons and a text box. While a card is open the composer is
-  hidden: the card is the only place to answer. The canvas jumps to the spot the question is about.
-- **Typing while Claude works steers it**: the message is merged into the running turn.
-- **Annotations are written without asking.** Claude appends to existing annotations and only replaces them when you
-  say so. Anything not on the auto-approve list (for example a file write outside the notes folder) shows an
-  **Allow / Deny** card.
-- The header shows live **cost, input/output tokens and turn count** for the session.
-
-## Configuration
-
-Model and effort are chosen in the plugin and stored on the bridge machine in `~/.sesori-review/settings.json`.
-Bridge environment variables:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `APP_REPO` | unset | Path to your app's source. Mounted read-only for the agent. |
-| `SESORI_REVIEW_HOME` | `~/.sesori-review` | Where settings and per-file workspaces live. |
-
-Each Figma file gets a workspace under `~/.sesori-review/files/<fileId>/`, which is the agent's working directory:
-
-| File | Purpose |
-| --- | --- |
-| `CLAUDE.md` | Review conventions. Has a removable "tool steering" section about the Figma MCP server. Edit freely. |
-| `permissions.json` | The **auto-approve list**. Add or remove tools under `allow`. |
-| `.mcp.json` | Points at the Figma desktop MCP server, so `claude` works from this folder too. |
-| `.claude/skills/review-flow/` | The guided review skill. Rewritten by the bridge on every start. |
-| `notes/` | The only place the agent may write files without asking. |
-| `sessions.json` | Session index: title, anchor, cost, tokens, turns. |
-
-Everything except the skill is created once and never overwritten. You can `cd` into a workspace and run
-`claude --resume <sessionId>` to continue a session from the CLI.
-
-## Develop and test
-
-```bash
-npm run check                 # type-check both packages, run the sandbox (mock Figma API) and bridge self-checks
-npm run build                 # rebuild the plugin after editing plugin/src
-npm run bridge                # then, in another terminal:
-npm run smoke -w bridge       # fake plugin: one real turn through the bridge, a few cents, no Figma needed
-```
-
-Layout: `plugin/` (Figma sandbox code + UI iframe, bundled by `plugin/build.mjs`), `bridge/` (WebSocket server +
-Agent SDK session manager), `shared/protocol.ts` (the wire protocol both sides import). See
-[ARCHITECTURE.md](ARCHITECTURE.md) for message flows and [PLAN.md](PLAN.md) for decisions.
-
-## Troubleshooting
-
-- **"bridge offline"** in the header: start `npm run bridge`. The plugin reconnects every 2 seconds.
-- **Figma MCP off**: enable the desktop MCP server in Dev Mode (see Requirements), or ignore it.
-- **Claude failed to start**: run `claude` in a terminal to check auth; the bridge terminal shows the error.
-- **Annotations fail**: the file is on a free plan, or the node type cannot hold annotations (groups, some vectors).
-- **Nothing happens after "Review flow"**: check the bridge terminal. Tool calls wait for the plugin; closing the
-  plugin mid-turn fails them and Claude is told so.
-- **History is empty after moving the checkout**: workspaces are keyed by a per-file id stored in the Figma file, not
-  by path, so they survive moves. Sessions themselves live in Claude Code's own transcript store.
-
-## Publishing to Figma Community
-
-The plugin is a thin client for a bridge the user runs themselves, so the listing must say so. Assets are in
-`plugin/assets/`: `icon.svg` / `icon-128.png` (plugin icon), `mark.svg` (the bare mark used inside the UI) and
-`cover-1920x960.png` (cover art). Regenerate the PNGs after editing the SVGs
-(`qlmanage -t -s 128 -o plugin/assets plugin/assets/icon.svg` on macOS). `plugin/manifest.json` allows only
-`ws://localhost:3055`; Figma assigns the plugin `id` on first publish. Bump `version` in the three `package.json`
-files and add a [CHANGELOG.md](CHANGELOG.md) entry per release; the version shows in the settings panel.
+**Releasing**: bump `version` in the three `package.json` files, add a [CHANGELOG.md](CHANGELOG.md) entry, then `npm publish --access public` from the repo root (`prepack` builds everything). For the Figma Community listing use `plugin/assets/` (icon, cover); Figma assigns the plugin `id` on first publish.
+</details>
 
 ## License
 

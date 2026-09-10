@@ -2,9 +2,10 @@
 // The workspace is the agent's cwd: CLAUDE.md, .mcp.json and the review-flow skill are loaded from here,
 // and notes/ is the only place it may write files. CLAUDE.md, settings and .mcp.json are written once and
 // never overwritten, so teammates can edit them per file; the skill is ours and is refreshed on every start.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { FIGMA_MCP_URL, type HistoryItem, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
 
 export const HOME = process.env.SESORI_REVIEW_HOME ?? join(homedir(), ".sesori-review");
@@ -31,6 +32,20 @@ export function workspaceFor(fileId: string, fileName: string): string {
 }
 const writeIfMissing = (path: string, content: string) => { if (!existsSync(path)) writeFileSync(path, content); };
 export const readAllow = (dir: string): string[] => JSON.parse(readFileSync(join(dir, "permissions.json"), "utf8")).allow;
+
+/** Copy the built plugin next to the workspaces so Figma's "Import plugin from manifest" points at a path that
+ *  survives npx cache changes and package upgrades. Returns the manifest path, or undefined if there is no build. */
+export function installPlugin(): string | undefined {
+  const src = fileURLToPath(new URL("../../plugin/", import.meta.url)); // same relative path from bridge/src (tsx) and bridge/dist (npm)
+  if (!existsSync(join(src, "dist", "ui.html"))) return;
+  const dst = join(HOME, "plugin");
+  mkdirSync(join(dst, "dist"), { recursive: true });
+  for (const f of ["manifest.json", "dist/code.js", "dist/ui.html"]) copyFileSync(join(src, f), join(dst, f));
+  return join(dst, "manifest.json");
+}
+
+/** True when Claude Code has something to authenticate with (API key or a completed login). */
+export const hasClaudeAuth = () => !!process.env.ANTHROPIC_API_KEY || existsSync(join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), ".credentials.json"));
 
 /** Model/effort chosen in the plugin; one file for the whole machine (the bridge runs one conversation at a time anyway). */
 const settingsPath = () => join(HOME, "settings.json");

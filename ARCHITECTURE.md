@@ -28,10 +28,14 @@ plugin/assets/              icon.svg, mark.svg (inlined into ui.html by build.mj
 plugin/src/code.ts          sandbox: file id, context events, tool executor (+ sandbox.check.ts, runs it on a mock figma API)
 plugin/src/flow.ts          pure prototype-flow walker
 plugin/src/ui.html, ui.ts   UI iframe; build.mjs inlines the bundled ui.ts into dist/ui.html
-bridge/src/bridge.ts        WebSocket server, SDK session manager, health, cost accounting
-bridge/src/workspace.ts     ~/.sesori-review/ provisioning: files/<fileId>/ workspaces, settings.json, sessions index, transcript reader, usage math (+ selfcheck.ts)
+bridge/src/bridge.ts        WebSocket server, SDK session manager, health, cost accounting; bundled by esbuild to bridge/dist/bridge.mjs (the npm `bin`)
+bridge/src/workspace.ts     ~/.sesori-review/ provisioning: plugin/ copy for Figma to import, files/<fileId>/ workspaces, settings.json, sessions index, transcript reader, usage math (+ selfcheck.ts)
 bridge/smoke.mjs            fake plugin for an end-to-end run without Figma
 ```
+
+Distribution: one npm package, `@sesori/figma-review`, root `package.json` owns the runtime dependencies and ships `bridge/dist`,
+`plugin/dist` and `plugin/manifest.json`. `npx @sesori/figma-review` runs the bridge, which copies the plugin to
+`~/.sesori-review/plugin/` (a stable path, unlike the npx cache) and prints the manifest path to import into Figma.
 
 ## Per-file workspace (agent cwd)
 

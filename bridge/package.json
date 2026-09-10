@@ -1,6 +1,6 @@
 {
   "name": "sesori-review-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Sesori Figma Review \u2014 local bridge running the Claude Agent SDK",
   "license": "Apache-2.0",
   "private": true,
@@ -8,12 +8,8 @@
   "scripts": {
     "start": "tsx src/bridge.ts",
     "check": "tsc --noEmit && tsx src/selfcheck.ts",
-    "smoke": "node smoke.mjs"
-  },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.260",
-    "ws": "^8.21.3",
-    "zod": "^4.5.4"
+    "smoke": "node smoke.mjs",
+    "build": "esbuild src/bridge.ts --bundle --platform=node --format=esm --packages=external --banner:js='#!/usr/bin/env node' --outfile=dist/bridge.mjs --log-level=warning && chmod +x dist/bridge.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -1,20 +1,53 @@
 {
-  "name": "sesori-review",
-  "version": "0.2.0",
-  "description": "Claude reviews your Figma prototype from inside Figma: flow, screens, questions, Dev Mode annotations.",
+  "name": "@sesori/figma-review",
+  "version": "0.3.0",
+  "description": "Claude reviews your Figma prototype from inside Figma: the flow, then every screen, asking at the right spot and writing Dev Mode annotations. `npx @sesori/figma-review` starts the local bridge.",
   "license": "Apache-2.0",
   "author": "Sesori",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sesori-ai/sesori-figma-review.git"
+  },
+  "homepage": "https://github.com/sesori-ai/sesori-figma-review#readme",
+  "bugs": "https://github.com/sesori-ai/sesori-figma-review/issues",
+  "keywords": [
+    "figma",
+    "figma-plugin",
+    "claude",
+    "design-review",
+    "annotations",
+    "claude-agent-sdk"
+  ],
+  "type": "module",
   "engines": {
     "node": ">=22"
   },
-  "private": true,
+  "bin": {
+    "sesori-figma-review": "bridge/dist/bridge.mjs"
+  },
+  "files": [
+    "bridge/dist",
+    "plugin/dist",
+    "plugin/manifest.json",
+    "plugin/assets/icon-128.png",
+    "CHANGELOG.md"
+  ],
   "workspaces": [
     "plugin",
     "bridge"
   ],
   "scripts": {
-    "build": "npm run build -w plugin",
+    "build": "npm run build -w plugin && npm run build -w bridge",
     "bridge": "npm run start -w bridge",
-    "check": "npm run check --workspaces"
+    "check": "npm run check --workspaces",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.260",
+    "ws": "^8.21.3",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

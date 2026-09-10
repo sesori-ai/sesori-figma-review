@@ -55,8 +55,11 @@ window.onmessage = (e: MessageEvent) => {
 // ---- bridge ---------------------------------------------------------------
 function connect() {
   ws = new WebSocket(`ws://localhost:${BRIDGE_PORT}`);
-  ws.onopen = () => { setStatus("connected to bridge", "warn"); send({ kind: "hello", fileId: ctx.fileId, fileName: ctx.fileName }); };
-  ws.onclose = () => { setStatus("bridge offline — run `npm run bridge` and keep it running", "bad"); setTimeout(connect, 2000); };
+  ws.onopen = () => {
+    setStatus("connected to bridge", "warn"); send({ kind: "hello", fileId: ctx.fileId, fileName: ctx.fileName });
+    if (live?.sessionId) send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, sessionId: live.sessionId }); // bridge restarted mid-conversation: re-render and resume on the next message
+  };
+  ws.onclose = () => { setStatus("bridge offline — run `npx @sesori/figma-review` in a terminal and keep it open", "bad"); setTimeout(connect, 2000); };
   ws.onerror = () => {};
   ws.onmessage = e => onDown(JSON.parse(e.data));
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-09-10
+
+- Published as **`@sesori/figma-review`**: `npx @sesori/figma-review` starts the bridge, copies the plugin to `~/.sesori-review/plugin/` and prints the manifest path to import into Figma.
+- Bridge is bundled to `bridge/dist/bridge.mjs`; dependencies hoisted to the root package.
+- Bridge start hints when no Claude credentials are found.
+- Plugin re-attaches to its conversation after a bridge restart.
+- README rewritten around the quick start.
+
 ## 0.2.0 — 2026-09-10
 
 - Renamed to **Sesori Figma Review**; new icon, mark and cover art (`plugin/assets/`). Workspaces now live in `~/.sesori-review/`.
