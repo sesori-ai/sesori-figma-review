@@ -1,8 +1,9 @@
 # Codex support — full user-facing parity
 
-Status: Plan PR open; initial architecture review approved. The user has authorized execution of the entire series,
-automatic squash merges at ready-for-human-review, and continuation without waiting for manual merges. The
-subsequent packaging-baseline reconciliation is recorded below.
+Status: Step 1 squash-merged as `232048a`. Oversized Step 2 checkpoint `f7265eb` is preserved on
+`origin/codex-support-step-2`; superseded PR #2 is closed, not merged. The fixed replacement series stages additive
+foundations before coordinated live activation. User authorization for automatic ready-PR squash merges and
+continuation remains in force.
 
 ## Goal and locked user direction
 
@@ -17,8 +18,8 @@ allowed instead of reproducing Claude's dedicated file tools. This changes the i
 not the requirement to preserve user workflows. It does not authorize unrestricted execution or app-repo writes.
 
 Work belongs only to this repository's `bridge/`, `plugin/`, `shared/`, root package/build metadata, tests, and docs. Do not change the Sesori
-Apps Monorepo or its adapters. This session must stay in the supplied `olive-crane` worktree; the observed branch
-is `codex-support-plan`. Do not create another worktree. Keep the existing root `PLAN.md` as historical context.
+Apps Monorepo or its adapters. Work stays in the supplied `olive-crane` worktree; Step 2 replacement branch is
+`codex-support-foundations`. Do not create another worktree. Keep the existing root `PLAN.md` as historical context.
 
 Planning procedure: reuse `sesori-plan-maker` from `sesori_apps_monorepo/.agents/skills/`; implementation handoff
 uses `sesori-plan-worker`. Borrow their planning, review, and regression-proof principles, not the unrelated
@@ -30,6 +31,9 @@ step until the plan is completed. Monitor every PR; keep checks, feedback and me
 reviewed head when merging. Do not bypass protection or merge after a readiness regression. Keep at most one PR open
 and one local successor in progress. Full-parity, security and retirement gates remain mandatory; a genuine missing
 capability, unavailable test access or required user decision is a blocker, not permission to weaken those gates.
+Existing Claude/Codex sign-ins are authorized for bounded isolated tests without credential/config copying. Routine
+Claude tests use Haiku/low; Codex uses the cheapest suitable catalog-reported image/tool-capable model at low effort.
+Ask before premium/high-effort exceptions; keep explicit turn/output/$0.10 limits where supported.
 
 ## Current implementation and evidence
 
@@ -75,7 +79,7 @@ Important observed contracts:
   be combined. Existing personal MCP/plugin/features may be enabled by default.
 
 These are schema/documentation findings, **not runtime proof**. `0.154.0` is a qualification candidate, not yet a
-supported release claim. Step 3/4 must qualify it and record the exact tested version and supported auth routes.
+supported release claim. Steps 4/5 must qualify it and record the exact tested version and supported auth routes.
 
 References:
 - <https://developers.openai.com/codex/app-server>
@@ -251,25 +255,38 @@ reason to compress code or skip parity. If a slice grows beyond its coherent bou
 before opening it. No bulk vendoring of the 847-file generated protocol: use a focused validated projection and
 reproducible inspection against the qualified schema. No hand edits to generated files.
 
-### 1. 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/7]
+### 1. 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8]
 
 - **What / why:** Raise this plan and tracker before implementation; settle provider ownership and parity gates.
 - **Complexity:** Trivial documentation; approximately 350–600 changed lines.
 - **Risk and test focus:** No runtime risk; check source/API references, user decisions and architectural review.
 - **Expected result:** No user-visible, database, or runtime behavior change. Only durable planning files.
 
-### 2. 🚧 [codex-support] Isolate Claude behind normalized review contracts [step 2/7]
+### 2. ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8]
 
-- **What / why:** Add provider contracts and common Figma catalog; move Claude-owned lifecycle/history/accounting;
-  replace raw SDK UI traffic; introduce provider-qualified session/settings migration and protocol version check.
-  Keep Claude the only selectable provider until Codex is wired. This establishes the shared parity seam once.
-- **Complexity:** Complex cross-layer refactor and persisted compatibility; approximately 1,100–1,500 changed lines.
-- **Risk and test focus:** Streaming identity, costs, old sessions/settings, cards, startup, steering/Stop, protocol
-  mismatch, plugin reconnect. Extend selfchecks plus normalized-event/UI fixtures and run a real Claude smoke.
-- **Expected result:** Existing Claude workflows unchanged. Old files load as Claude; new writes include provider
-  identity/preferences/provenance. Internal SDK knowledge no longer lives in the plugin. No database added.
+- **What / why:** Add provider identities, qualified refs, normalized events/health/models/cost types, provider
+  interfaces, neutral validated Figma catalog, and complete unwired Claude adapter with native history, lifecycle,
+  usage/cost and stream mapping. Keep released UI/wire/settings/session behavior and legacy bridge/workspace/selfcheck
+  byte-identical to master; defer exact catalog/history adoption to the atomic Step 3 activation.
+- **Complexity:** Additive foundation; target approximately 750–1,000 changed lines.
+- **Risk and test focus:** Adapter contract typing, schema neutrality, transcript projection, mixed block identity,
+  per-response live usage, per-turn result usage, immutable resumed cost, and warm/dispose truthfulness.
+- **Expected result:** Independently passing dormant provider foundation. No Codex exposure, migration or protocol
+  bump. Legacy tool metadata/history output remain intact; unsafe non-native transcript IDs reject before file access.
 
-### 3. 🚧 [codex-support] Add qualified Codex transport and execution policy [step 3/7]
+### 3. 🚧 [codex-support] Activate normalized review workflows [step 3/8]
+
+- **What / why:** Atomically wire the adapter into live bridge sessions; migrate provider-qualified records/settings;
+  activate protocol v3, connection snapshot, single view intent, History/cards/controls and self-owned smoke safety.
+  Adopt the exact neutral catalog/history projection, remove the legacy SDK path, and retain its UUID integration proof.
+  Preserve every valid finding from closed PR #2 without copying obsolete coordination.
+- **Complexity:** Coordinated live cutover; target approximately 1,300–1,550 changed lines.
+- **Risk and test focus:** Legacy settings/history/cost, start/reconnect/close ownership, protocol mismatch both ways,
+  stale History, cards/composer, settings await, stream identity, Stop/steering and isolated bounded Claude smoke.
+- **Expected result:** Existing Claude workflows remain complete through normalized contracts. Codex stays unavailable;
+  no automatic fallback. Protocol/UI/bridge cut over together, never as a broken intermediate.
+
+### 4. 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8]
 
 - **What / why:** Add lazy stdio client, validated consumed protocol shapes, startup/auth/version checks, named
   permission-profile/config construction, and Codex workspace/skill provisioning. Keep it unselected by default.
@@ -281,7 +298,7 @@ reproducible inspection against the qualified schema. No hand edits to generated
 - **Expected result:** No new plugin choice yet. Testable Codex boundary, no global config/auth mutations; only
   provider workspace scaffolding when explicitly requested. Qualify version or stop with evidence.
 
-### 4. 🚧 [codex-support] Implement Codex review sessions and native replay [step 4/7]
+### 5. 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8]
 
 - **What / why:** Add Codex adapter and bridge selection for test clients: dynamic Figma tools/images, native
   file/command approvals, questions, turn controls, live settings, native history/resume, token/cost mapping.
@@ -293,7 +310,7 @@ reproducible inspection against the qualified schema. No hand edits to generated
 - **Expected result:** Codex works through the same wire contract and existing fake-plugin entrypoint. Records
   retain Codex thread identity and metrics. No public reduced-functionality release or cross-provider resume.
 
-### 5. ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 5/7]
+### 6. ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8]
 
 - **What / why:** Provider/model/effort UI, live-session identity, provider-neutral health/copy, command/diff/scope
   previews, estimate labels, mixed-provider History and new-session versus resumed-session settings behavior.
@@ -304,7 +321,7 @@ reproducible inspection against the qualified schema. No hand edits to generated
 - **Expected result:** Users can choose either provider with complete workflows. Preferences stay separate;
   existing sessions remain on their provider. UI distinguishes real provider errors and estimated dollar figures.
 
-### 6. 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 6/7]
+### 7. 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8]
 
 - **What / why:** Update `README.md`, `ARCHITECTURE.md`, `CHANGELOG.md`, package descriptions/keywords, relevant
   historical-plan corrections, and add
@@ -316,7 +333,7 @@ reproducible inspection against the qualified schema. No hand edits to generated
 - **Expected result:** No new runtime/database behavior. Users and future workers have accurate setup, security,
   recovery, costs and regression instructions; no obsolete Claude-only global claims remain.
 
-### 7. ⚙️ [codex-support] Verify full parity and retire the plan [step 7/7]
+### 8. ⚙️ [codex-support] Verify full parity and retire the plan [step 8/8]
 
 - **What / why:** Run the cumulative L4 matrix below against the final integrated head, record privacy-safe results
   in `docs/regression/results/codex-support.md`, update tracker, move this folder to `.plan/completed/codex-support/`
@@ -330,7 +347,7 @@ reproducible inspection against the qualified schema. No hand edits to generated
 
 ## Verification and retirement contract
 
-No regression catalog exists in this repo today. Step 6 creates the two focused documents named above, using the
+No regression catalog exists in this repo today. Step 7 creates the two focused documents named above, using the
 monorepo's cumulative-level/proof-boundary approach without importing irrelevant relay/mobile requirements.
 Highest required level: **L4 Extended**, because this change promises disconnect/restart, native approval lifecycle,
 settings during activity, persisted backward compatibility, and file-isolation behavior as well as normal reviews.

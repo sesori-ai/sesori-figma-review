@@ -9,13 +9,14 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 | Step | Exact title | State |
 | --- | --- | --- |
-| 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/7] | PR #1 open and monitored; initial architecture review approved |
-| 2 | 🚧 [codex-support] Isolate Claude behind normalized review contracts [step 2/7] | Not started |
-| 3 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 3/7] | Not started |
-| 4 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 4/7] | Not started |
-| 5 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 5/7] | Not started |
-| 6 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 6/7] | Not started |
-| 7 | ⚙️ [codex-support] Verify full parity and retire the plan [step 7/7] | Not started |
+| 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
+| 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | PR #3 feedback fixed/verified locally; pending parent push and current-head review |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Not started; coordinated activation from preserved checkpoint obligations |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
+| 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
+| 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
+| 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
+| 8 | ⚙️ [codex-support] Verify full parity and retire the plan [step 8/8] | Not started |
 
 ## Planning evidence
 
@@ -24,8 +25,19 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - Located/read `sesori-plan-maker` and `sesori-plan-worker` in the sibling monorepo.
 - Official App Server, SDK, configuration and permissions documentation inspected.
 - Installed `codex-cli 0.154.0` experimental generated schema inspected, not hand-edited or committed.
-- No live Codex/Claude turn, native security test, paid smoke, Figma test, or account/config modification performed.
-- Dependencies absent in this worktree. `npm ci`, check and build not run for this documentation-only task.
+- No live Codex/Claude turn, native security test, paid smoke, Figma test, or account/config modification performed
+  during Step 1 planning.
+
+## Step 2 replacement foundation
+
+- Full implementation stays at `origin/codex-support-step-2` (`f7265eb`); superseded PR #2 was not merged.
+- Dormant foundation adds normalized contracts, neutral tools and Claude tests; released bridge/workspace/selfcheck stay
+  byte-identical to master, with catalog/history reuse adapter-only.
+- Step 3 retains all ownership, protocol, view, close, settings, accounting, smoke and qualification obligations below,
+  plus exact legacy catalog/history adoption, legacy SDK removal and the UUID integration assertion.
+- Historical smokes used Claude Haiku/low, isolated homes/free ports and four-turn/$0.10 limits.
+- **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
+  foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
 
 ## Qualification gates before user-facing Codex exposure
 
@@ -47,7 +59,17 @@ unrelated monorepo Section B workspace diagrams/layers skipped. Runtime qualific
 
 Later `a359823` packaging-baseline reconciliation was parent-reviewed only; it preserves the current install flow
 and adds artifact verification without changing provider architecture. Do not describe that revision as separately
-approved by the subagent.
+approved by the subagent. Closed PR #2 review findings remain obligations for Step 3 activation; neither its revised
+code nor this replacement foundation has a new architecture-approval claim.
+
+PR #3's authoritative resolved-finding record is its
+[inline review discussion](https://github.com/sesori-ai/sesori-figma-review/pull/3); focused tests and Git history
+preserve implementation proof without duplicating every reply here. Two deliberate non-actionable dispositions remain:
+
+- `3981805787`: inspected native app-scoped JSONL evidence had no `result` rows; persisted assistant text is already
+  projected. No unsupported synthetic history shape was invented.
+- `3982069514`: exact allow-list order intentionally remains conservative native-option identity; safe replacement
+  cleanup is proven and no latency evidence warrants semantic normalization.
 
 ## Retirement
 
