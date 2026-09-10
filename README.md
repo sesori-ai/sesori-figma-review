@@ -3,7 +3,7 @@
 <p align="center"><b>Claude reviews your Figma prototype with you, inside Figma.</b><br>
 It walks the canvas screen by screen, asks before it assumes, and leaves Dev Mode annotations your developers can build from.</p>
 
-<p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/docs/screenshot.png" width="440" alt="The plugin panel: a question about the selected screen, Claude focuses it, looks at it and lists the top three gaps before dev"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/docs/screenshot.png" alt="The plugin panel: empty state, a question about the selected screen with Claude focusing and reading it, and a selection review with findings"></p>
 
 ## Why you'd want this
 

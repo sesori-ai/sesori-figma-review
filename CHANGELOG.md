@@ -5,7 +5,7 @@
 - Published as **`@sesori/figma-review`**: `npx @sesori/figma-review` starts the bridge, copies the plugin to `~/.sesori-review/plugin/` and prints the manifest path to import into Figma.
 - Bridge is bundled to `bridge/dist/bridge.mjs`; dependencies hoisted to the root package.
 - Bridge start hints when no Claude credentials are found.
-- Plugin re-attaches to its conversation after a bridge restart.
+- Plugin re-attaches to its conversation after a bridge restart. Reopening the plugin while Claude is idle shows the empty state instead of a stuck Stop button; the last conversation is in History.
 - README rewritten around the quick start.
 
 ## 0.2.0 — 2026-09-10

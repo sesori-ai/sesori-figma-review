@@ -78,7 +78,7 @@ function options(fileId: string, dir: string, resume?: string): Options {
 }
 
 // ---- conversations --------------------------------------------------------------
-type Conv = { q: Query; push: (m: SDKUserMessage | null) => void; fileId: string; dir: string; rec: SessionRecord; baseCost: number };
+type Conv = { q: Query; push: (m: SDKUserMessage | null) => void; fileId: string; dir: string; rec: SessionRecord; baseCost: number; busy: boolean };
 let conv: Conv | undefined; // ponytail: one conversation at a time across all files; starting one ends the previous
 let warm: { dir: string; wq: Promise<WarmQuery> } | undefined;
 const health: Health = { bridge: VERSION, figmaMcp: "down", settings: readSettings() };
@@ -123,7 +123,7 @@ async function startConv(m: Extract<UpMsg, { kind: "start" }>) {
   q ??= query({ prompt: gen, options: options(m.fileId, dir, m.resume) });
   const prev = m.resume ? readSessions(dir).find(s => s.sessionId === m.resume) : undefined;
   const rec: SessionRecord = prev ?? { sessionId: "", title: m.text.slice(0, 80), anchor: m.anchor, pageId: m.pageId, pageName: m.pageName, createdAt: now(), updatedAt: now(), turns: 0, costUsd: 0, usage: zeroUsage() };
-  conv = { q, push, fileId: m.fileId, dir, rec, baseCost: rec.costUsd }; // ponytail: total_cost_usd assumed not restored by --resume; base + this process
+  conv = { q, push, fileId: m.fileId, dir, rec, baseCost: rec.costUsd, busy: true }; // ponytail: total_cost_usd assumed not restored by --resume; base + this process
   const anchor = `Figma file "${m.fileName}", page "${m.pageName}" (${m.pageId}). Anchor: ${m.anchor.type}${m.anchor.nodeIds.length ? " " + m.anchor.nodeIds.join(", ") : ""}`;
   push(userMessage(m.text, m.selection, anchor));
   send(m.fileId, { kind: "busy", busy: true });
@@ -164,7 +164,7 @@ async function pump(c: Conv) {
         saveSession(c.dir, c.rec);
         out({ kind: "session", session: c.rec });
         out({ kind: "sessions", sessions: readSessions(c.dir) });
-        out({ kind: "busy", busy: false });
+        c.busy = false; out({ kind: "busy", busy: false });
       }
       if (msg.type !== "user") out({ kind: "sdk", msg }); // tool results (with screenshots) stay in the bridge
     }
@@ -197,9 +197,9 @@ async function onUp(ws: WebSocket & { fileId?: string }, m: UpMsg) {
       ws.fileId = m.fileId;
       const dir = workspaceFor(m.fileId, m.fileName);
       send(m.fileId, { kind: "sessions", sessions: readSessions(dir) });
-      const mine = conv && conv.fileId === m.fileId;
-      if (mine) send(m.fileId, { kind: "session", session: conv!.rec }); // plugin reopened mid-session: re-attach
-      send(m.fileId, { kind: "busy", busy: !!mine });
+      const midTurn = !!conv && conv.fileId === m.fileId && conv.busy;
+      if (midTurn) send(m.fileId, { kind: "session", session: conv!.rec }); // plugin reopened while Claude works: re-attach; an idle conversation stays in History
+      send(m.fileId, { kind: "busy", busy: midTurn });
       prewarm(m.fileId, dir);
       return sendHealth(m.fileId);
     }
@@ -214,7 +214,7 @@ async function onUp(ws: WebSocket & { fileId?: string }, m: UpMsg) {
     case "user":
       if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or open one from History." });
       conv.push(userMessage(m.text, m.selection)); // Claude Code merges it into the running turn between tool calls (steer)
-      return send(conv.fileId, { kind: "busy", busy: true });
+      conv.busy = true; return send(conv.fileId, { kind: "busy", busy: true });
     case "reply": { const p = pending.get(m.id); pending.delete(m.id); p?.resolve(m.result); return; }
     case "interrupt": if (conv && conv.fileId === ws.fileId) await conv.q.interrupt(); return;
     case "settings": {
