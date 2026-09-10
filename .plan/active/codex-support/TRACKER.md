@@ -45,8 +45,9 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   four-turn/$0.10 limits and no credential/config copying. They prove preserved intent, not this dormant foundation.
   Later live tests retain those rules. Codex tests use cheapest suitable catalog-reported image/tool-capable model and
   low effort; ask before premium/high-effort exceptions.
-- Foundation current diff is 1,532 changed lines (1,450 additions, 82 deletions), within the 1,500-line cap. `npm ci`, legacy workspace checks, focused mocked Claude adapter
-  checks, both builds and `git diff --check` pass. Tests cover exact tool description strings, selected parameter
+- **Verified checkpoint (`cfe0ec8`):** 1,532 changed lines (1,450 additions, 82 deletions). Parent accepted this
+  32-line soft-cap tail for final cost-provenance/health fixes and regression proof. `npm ci`, legacy workspace
+  checks, focused mocked Claude adapter checks, both builds and `git diff --check` pass. Tests cover exact tool description strings, selected parameter
   metadata, representative schema cases and source-audited legacy catalog reuse;
   warm settings/boundary identity, replacement/consume/cold fallback/dispose/stale fencing; serialized settings,
   rollback and fail-closed behavior; init MCP fallback; safe UUID transcript projection; normalized stream identity;
