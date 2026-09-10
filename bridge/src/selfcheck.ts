@@ -7,9 +7,11 @@ import { join } from "node:path";
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "figma-review-"));
 process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "claude-config-"));
 const { installPlugin, readAllow, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
-const { addClaudeUsage, ClaudeDisplayMapper, ClaudeUsageTracker, readClaudeTranscript } = await import("./providers/claude.ts");
-const { applyRequestCancellation, canConsumeOwnedReply, requestOwnerIsActive } = await import("./request-policy.ts");
+const { addClaudeUsage, ClaudeCostTracker, ClaudeDisplayMapper, ClaudeUsageTracker, readClaudeTranscript } = await import("./providers/claude.ts");
+const { FIGMA_TOOLS } = await import("./figma-tools.ts");
 
+assert.deepEqual(FIGMA_TOOLS.map(tool => tool.name), ["get_flow", "get_screen", "focus", "annotate", "ask_user"]);
+assert.ok(FIGMA_TOOLS.every(tool => tool.description && tool.schema), "providers share neutral Figma descriptions and validated schemas");
 const manifest = installPlugin(); // needs a plugin build; tolerate its absence so `check` also runs before `build`
 if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"') && readFileSync(join(process.env.SESORI_REVIEW_HOME, "plugin/dist/ui.html"), "utf8").includes("Sesori Review"), "plugin is copied next to the workspaces");
 
@@ -71,8 +73,8 @@ assert.deepEqual(readClaudeTranscript({ dir, sessionId: "missing" }), []);
 const legacy = { ...rec, provider: undefined, costStatus: undefined, sessionId: "legacy" };
 writeFileSync(join(dir, "sessions.json"), JSON.stringify([legacy]));
 assert.deepEqual(readSessions(dir).map(session => [session.provider, session.sessionId, session.costStatus]), [["claude", "legacy", "reported"]]);
-writeFileSync(join(dir, "sessions.json"), JSON.stringify([{ ...legacy, provider: "future" }]));
-assert.throws(() => readSessions(dir), /Unsupported provider "future"/, "unknown session provider is never sent to Claude");
+writeFileSync(join(dir, "sessions.json"), JSON.stringify([{ provider: "future" }]));
+assert.throws(() => readSessions(dir), /Unsupported provider "future"/, "provider validates before malformed records can be filtered and later erased");
 
 // Live stream usage changes before result; final per-turn totals replace provisional values without double counting.
 let usage = addClaudeUsage(zeroUsage(), { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 });
@@ -92,6 +94,12 @@ assert.deepEqual(multiResponse.messageStart({ input_tokens: 12, output_tokens: 1
 assert.deepEqual(multiResponse.messageDelta({ output_tokens: 6, cache_read_input_tokens: 3 }), { input: 27, output: 17, cacheRead: 3, cacheWrite: 0 });
 assert.deepEqual(multiResponse.messageDelta({ output_tokens: 8 }), { input: 27, output: 19, cacheRead: 3, cacheWrite: 0 }, "successive responses accumulate once and absent usage fields persist");
 assert.deepEqual(multiResponse.complete({ input_tokens: 22, output_tokens: 12, cache_read_input_tokens: 3 }), { input: 27, output: 19, cacheRead: 3, cacheWrite: 0 });
+const resumedResults = new ClaudeUsageTracker({ committed: { input: 100, output: 50, cacheRead: 25, cacheWrite: 5 } });
+assert.deepEqual(resumedResults.complete({ input_tokens: 10, output_tokens: 2 }), { input: 110, output: 52, cacheRead: 25, cacheWrite: 5 });
+assert.deepEqual(resumedResults.complete({ input_tokens: 20, output_tokens: 3 }), { input: 130, output: 55, cacheRead: 25, cacheWrite: 5 }, "installed SDK result.usage is per-turn, so same-query results add once");
+const resumedCost = new ClaudeCostTracker({ baseUsd: 1.5, baseStatus: "reported" });
+assert.deepEqual(resumedCost.complete(0.1), { usd: 1.6, status: "reported" });
+assert.deepEqual(resumedCost.complete(0.25), { usd: 1.75, status: "reported" }, "native query-cumulative cost always uses immutable resume baseline");
 
 // Message id + block index, not changing stream-envelope UUID, correlates text across native responses.
 const session = { provider: "claude" as const, sessionId: "s1" };
@@ -111,17 +119,17 @@ map({ type: "stream_event", uuid: "envelope-5", event: { type: "message_stop" } 
 map({ type: "stream_event", uuid: "envelope-6", event: { type: "message_start", message: { id: "msg-b" } } });
 assert.deepEqual(map({ type: "stream_event", uuid: "envelope-7", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } })[0],
   { type: "text_start", session, itemId: "s1:msg-b:0" });
+map({ type: "stream_event", uuid: "envelope-8", event: { type: "message_stop" } });
+map({ type: "stream_event", uuid: "envelope-9", event: { type: "message_start", message: { id: "msg-mixed" } } });
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-10", event: { type: "content_block_start", index: 0, content_block: { type: "thinking" } } }), []);
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-11", event: { type: "content_block_stop", index: 0 } }), [], "thinking has no unmatched text_end");
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-12", event: { type: "content_block_start", index: 1, content_block: { type: "tool_use" } } }), []);
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-13", event: { type: "content_block_stop", index: 1 } }), [], "tool use has no unmatched text_end");
+assert.deepEqual(map({ type: "stream_event", uuid: "envelope-14", event: { type: "content_block_start", index: 2, content_block: { type: "text" } } }), [
+  { type: "text_start", session, itemId: "s1:msg-mixed:2" },
+]);
 assert.deepEqual(map({ type: "assistant", message: { content: [{ type: "tool_use", id: "tool1", name: "mcp__figma__focus", input: { nodeId: "1:2" } }] } }), [
   { type: "tool", session, itemId: "tool1", name: "mcp__figma__focus", input: { nodeId: "1:2" } },
 ]);
 
-// Stop cancels one turn's cards but preserves owner for same-session follow-up tools; teardown fences late calls.
-const activeOwners = new Set(["session-owner"]);
-applyRequestCancellation({ activeOwners, owner: "session-owner", scope: "turn" });
-assert.equal(requestOwnerIsActive({ activeOwners, owner: "session-owner" }), true, "focus/ask_user remain available after Stop");
-const currentSocket = {}, replacedSocket = {};
-assert.equal(canConsumeOwnedReply({ activeOwners, owner: "session-owner", requestSocket: currentSocket, replySocket: replacedSocket }), false);
-assert.equal(canConsumeOwnedReply({ activeOwners, owner: "session-owner", requestSocket: currentSocket, replySocket: currentSocket }), true);
-applyRequestCancellation({ activeOwners, owner: "session-owner", scope: "session" });
-assert.equal(requestOwnerIsActive({ activeOwners, owner: "session-owner" }), false, "closed session rejects late tools");
 console.log("selfcheck ok");

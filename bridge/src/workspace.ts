@@ -88,10 +88,11 @@ export function saveSettings(settings: Settings) {
 
 function decodeSession(value: unknown): SessionRecord | undefined {
   const raw = object(value);
-  const anchor = object(raw?.anchor);
-  const usage = object(raw?.usage);
-  if (!raw || !anchor || !usage || typeof raw.sessionId !== "string") return;
-  const provider = providerId(raw.provider, "sessions.json");
+  if (!raw) return;
+  const provider = providerId(raw.provider, "sessions.json"); // validate identity before filtering malformed structure
+  const anchor = object(raw.anchor);
+  const usage = object(raw.usage);
+  if (!anchor || !usage || typeof raw.sessionId !== "string") return;
   return {
     provider,
     sessionId: raw.sessionId,

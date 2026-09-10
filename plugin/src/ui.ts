@@ -2,7 +2,8 @@
 // between the bridge and the sandbox (tool calls go down to code.ts, replies come back up).
 import { marked } from "marked";
 import { BRIDGE_PORT, PROTOCOL_VERSION, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type ReviewEvent, type SessionRecord, type SessionRef, type Settings, type UpMsg } from "../../shared/protocol.ts";
-import { composerRoute, drainStartupInputs, eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
+import { eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
+import { ConversationView } from "./view-control.ts";
 
 declare const __VERSION__: string; // injected by build.mjs from package.json
 const md = (s: string) => marked.parse(s.replace(/</g, "&lt;"), { async: false }) as string; // raw HTML from the model is shown as text
@@ -13,15 +14,13 @@ const modelSel = $<HTMLSelectElement>("model"), effortSel = $<HTMLSelectElement>
 
 let ctx = { fileId: "", fileName: "", pageId: "", pageName: "", selection: [] as NodeRef[] };
 let ws: WebSocket | undefined;
-let live: SessionRecord | undefined; // current conversation (placeholder until the bridge confirms it)
 let sessions: SessionRecord[] = [];
 let pendingAsk: { id: string; answer: (text: string) => void; cancel: (reason?: string) => void } | undefined;
 let opened: SessionRecord | undefined; // session shown via History → Open but not yet resumed
 let health: Health | undefined;
-let starting = false;
-const startupInputs: { text: string; selection: NodeRef[] }[] = [];
+let intentCounter = 0;
+const view = new ConversationView();
 const items = new Map<string, { element: HTMLElement; markdown: string }>();
-const cards = new Map<string, (reason?: string) => void>();
 
 const el = (tag: string, cls = "", text = "") => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const icon = (id: string) => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.innerHTML = `<use href="#i-${id}"/>`; return s; };
@@ -39,9 +38,14 @@ const working = el("div", "typing"); working.append(el("i"), el("i"), el("i")); 
 const bubble = (cls: string, text = "") => { empty.remove(); const b = el("div", cls, text); chat.insertBefore(b, working.parentNode === chat ? working : null); chat.scrollTop = chat.scrollHeight; return b; };
 const assistant = (html: string) => { const b = bubble("msg assistant"); const body = el("div", "body"); body.innerHTML = html; b.append(body); return body; };
 const selText = () => ctx.selection.length ? ctx.selection.map(n => `${n.name} (${n.type} ${n.id})`).join(", ") : "none";
-const clearChat = () => {
-  for (const cancel of cards.values()) cancel("Session replaced");
-  cards.clear(); items.clear(); chat.innerHTML = ""; pendingAsk = undefined; opened = undefined;
+const clearChat = () => { items.clear(); chat.innerHTML = ""; pendingAsk = undefined; opened = undefined; };
+const notifyCancelled = (count: number) => {
+  if (count) toMain({ kind: "notify", text: `${count} queued message${count === 1 ? " was" : "s were"} cancelled.` });
+};
+const leaveView = (reason: string) => {
+  notifyCancelled(view.leave({ reason }).length);
+  send({ kind: "close", reason });
+  pendingAsk = undefined; footer.hidden = false; items.clear();
 };
 
 /** Tool call → one readable chip. Node ids stay as-is (monospace); names are only known to the sandbox. */
@@ -71,7 +75,8 @@ function connect() {
   ws = new WebSocket(`ws://localhost:${BRIDGE_PORT}`);
   ws.onopen = () => {
     offline.remove(); setStatus("connected to bridge", "warn"); send({ kind: "hello", protocolVersion: PROTOCOL_VERSION, fileId: ctx.fileId, fileName: ctx.fileName });
-    if (live?.sessionId) send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: live.provider, sessionId: live.sessionId } }); // bridge restarted mid-conversation
+    const current = view.session;
+    if (current?.sessionId) send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: current.provider, sessionId: current.sessionId } }); // bridge restarted mid-conversation
   };
   ws.onclose = () => { chat.prepend(offline); setStatus("bridge offline", "bad"); setTimeout(connect, 2000); };
   ws.onerror = () => {};
@@ -84,27 +89,27 @@ function onDown(m: DownMsg) {
   switch (m.kind) {
     case "health": return renderHealth(m.health);
     case "sessions": sessions = m.sessions; if (!sessionsEl.hidden) renderSessions(); return;
-    case "session": {
-      live = m.session; renderCost(m.session);
-      if (starting) {
-        starting = false;
-        for (const queued of drainStartupInputs({ inputs: startupInputs })) send({ kind: "user", ...queued });
-      }
+    case "started": {
+      const queued = view.confirm({ intentId: m.intentId, session: m.session });
+      if (!queued) return;
+      renderCost(m.session);
+      for (const input of queued) send({ kind: "user", ...input });
       return;
     }
+    case "session": if (view.update(m.session)) renderCost(m.session); return;
     case "history": return showHistory(m);
     case "tool": return m.tool === "ask_user" ? askCard(m.id, m.args) : toMain(m);
     case "permission": return permissionCard(m.id, m.tool, m.input);
-    case "cancel_request": cards.get(m.id)?.(m.reason); cards.delete(m.id); return;
+    case "cancel_request": view.cancelCard({ id: m.id, reason: m.reason }); return;
     case "event": return onEvent(m.event);
     case "busy": stopBtn.hidden = !m.busy; $("btn-flow").hidden = m.busy; if (m.busy) { empty.remove(); chat.append(working); chat.scrollTop = chat.scrollHeight; } else { working.remove(); } return;
-    case "error": starting = false; startupInputs.length = 0; bubble("error", m.message); return;
+    case "error": if (view.starting) notifyCancelled(view.leave({ reason: "Start failed" }).length); bubble("error", m.message); return;
   }
 }
 
 function renderHealth(h: Health) {
   health = h;
-  const providerId = live?.provider ?? h.selectedProvider;
+  const providerId = view.session?.provider ?? h.selectedProvider;
   const provider = h.providers.find(item => item.provider === providerId);
   const mcp = h.figmaMcp === "up" ? "Figma MCP up" : "Figma MCP off";
   const failed = (h.servers ?? []).filter(s => s.status !== "connected").map(s => `${s.name}: ${s.status}${s.error ? ` (${s.error})` : ""}`);
@@ -132,7 +137,7 @@ function renderCost(s: SessionRecord) {
 
 // ---- provider-neutral activity -------------------------------------------
 function onEvent(event: ReviewEvent) {
-  if (!eventBelongsToSession({ event, session: live })) return;
+  if (!eventBelongsToSession({ event, session: view.session })) return;
   if (event.type === "text_start") {
     const element = assistant(""); items.set(event.itemId, { element, markdown: "" });
   } else if (event.type === "text_delta") {
@@ -158,10 +163,10 @@ function askCard(id: string, args: Record<string, unknown>) {
   const card = bubble("card");
   card.append(el("div", "q", typeof args.question === "string" ? args.question : "Question"));
   const ctl = el("div", "ctl");
-  const close = (label: string) => { ctl.remove(); const a = el("div", "a"); a.append(icon("check"), label); card.append(a); cards.delete(id); if (pendingAsk?.id === id) pendingAsk = undefined; footer.hidden = false; };
+  const close = (label: string) => { ctl.remove(); const a = el("div", "a"); a.append(icon("check"), label); card.append(a); view.finishCard(id); if (pendingAsk?.id === id) pendingAsk = undefined; footer.hidden = false; };
   const answer = (text: string) => { close(text); send({ kind: "reply", id, result: { content: [{ type: "text", text: `${text}\n\n[Current selection: ${selText()}]` }] } }); };
   const cancel = (reason = "No longer actionable") => close(`(${reason})`);
-  pendingAsk = { id, answer, cancel }; cards.set(id, cancel);
+  pendingAsk = { id, answer, cancel }; view.addCard({ id, cancel });
   const options = Array.isArray(args.options) ? args.options.filter((option): option is string => typeof option === "string") : [];
   for (const option of options) ctl.append(btn(option, () => answer(option)));
   const ta = document.createElement("textarea"); ta.rows = 2; ta.placeholder = "Or type an answer… Enter to send";
@@ -178,10 +183,10 @@ function permissionCard(id: string, tool: string, input: Record<string, unknown>
   card.append(el("pre", "", preview.slice(0, 2000)));
   const ctl = el("div", "ctl");
   const done = (result: PermissionDecision | undefined, label: string) => {
-    ctl.remove(); card.append(el("div", "a", label)); cards.delete(id);
+    ctl.remove(); card.append(el("div", "a", label)); view.finishCard(id);
     if (result) send({ kind: "reply", id, result });
   };
-  cards.set(id, reason => done(undefined, `Cancelled: ${reason ?? "no longer actionable"}`));
+  view.addCard({ id, cancel: reason => done(undefined, `Cancelled: ${reason}`) });
   ctl.append(btn("Allow", () => done({ behavior: "allow" }, "Allowed"), "primary"), btn("Deny", () => done({ behavior: "deny", message: "The user denied this in the plugin." }, "Denied")));
   card.append(ctl);
 }
@@ -203,7 +208,7 @@ function renderSessions() {
 // ---- settings --------------------------------------------------------------
 const pushSettings = () => {
   if (!health) return;
-  const provider = live?.provider ?? health.selectedProvider;
+  const provider = view.session?.provider ?? health.selectedProvider;
   const settings: Settings = {
     ...health.settings,
     providers: { ...health.settings.providers, [provider]: { model: modelSel.value, effort: effortSel.value } },
@@ -216,17 +221,19 @@ $("btn-settings").onclick = () => { settingsEl.hidden = !settingsEl.hidden; sess
 
 // ---- composer -------------------------------------------------------------
 function start(anchor: Anchor, text: string, resume?: SessionRef) {
-  if (starting) return;
-  starting = true; startupInputs.length = 0;
-  if (!resume) { clearChat(); live = undefined; }
+  if (view.starting) return;
+  const intentId = `${Date.now().toString(36)}-${++intentCounter}`;
+  view.begin({ intentId, retainSession: !!resume });
+  if (!resume) clearChat();
   opened = undefined; settingsEl.hidden = sessionsEl.hidden = true;
   bubble("msg user", text);
-  send({ kind: "start", fileId: ctx.fileId, fileName: ctx.fileName, pageId: ctx.pageId, pageName: ctx.pageName, anchor, resume, text, selection: ctx.selection });
+  send({ kind: "start", intentId, fileId: ctx.fileId, fileName: ctx.fileName, pageId: ctx.pageId, pageName: ctx.pageName, anchor, resume, text, selection: ctx.selection });
 }
 /** History → Open: show the past conversation; the session itself is resumed by the next message. */
 function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
+  if (!view.showHistory(m.session)) return;
   clearChat();
-  live = m.session; renderCost(m.session);
+  renderCost(m.session);
   opened = m.attached ? undefined : m.session;
   for (const h of m.messages) {
     if (h.role === "tool") h.name === "stopped" ? bubble("chip stopped", "Stopped") : chip(h.name, h.input);
@@ -239,11 +246,10 @@ function submit() {
   const text = input.value.trim();
   if (!text) return;
   input.value = ""; autosize();
-  const route = composerRoute({ starting, hasLiveSession: !!live, hasOpenedSession: !!opened });
-  if (route === "start") return start({ type: "page", nodeIds: [] }, text);
-  if (route === "resume") return start(opened!.anchor, text, { provider: opened!.provider, sessionId: opened!.sessionId });
+  if (view.starting) { bubble("msg user", text); view.queue({ text, selection: [...ctx.selection] }); return; }
+  if (!view.session) return start({ type: "page", nodeIds: [] }, text);
+  if (opened) return start(opened.anchor, text, { provider: opened.provider, sessionId: opened.sessionId });
   bubble("msg user", text);
-  if (route === "queue") { startupInputs.push({ text, selection: [...ctx.selection] }); return; }
   send({ kind: "user", text, selection: ctx.selection }); // delivered mid-turn as steering; Stop interrupts
 }
 const autosize = () => { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 120)}px`; };
@@ -256,6 +262,10 @@ $("btn-selection").onclick = () => {
   if (!ctx.selection.length) return toMain({ kind: "notify", text: "Select something first" });
   start({ type: "selection", nodeIds: ctx.selection.map(n => n.id) }, `Review the selected node(s): ${selText()}. Focus each one, assess clarity and dev-readiness, and propose annotations.`);
 };
-$("btn-new").onclick = () => { clearChat(); chat.append(empty); live = undefined; starting = false; startupInputs.length = 0; costEl.textContent = ""; settingsEl.hidden = sessionsEl.hidden = true; input.focus(); };
-$("btn-history").onclick = () => { sessionsEl.hidden = !sessionsEl.hidden; settingsEl.hidden = true; if (!sessionsEl.hidden) renderSessions(); };
+$("btn-new").onclick = () => { leaveView("Started a new view"); clearChat(); chat.append(empty); costEl.textContent = ""; settingsEl.hidden = sessionsEl.hidden = true; input.focus(); };
+$("btn-history").onclick = () => {
+  const opening = sessionsEl.hidden;
+  sessionsEl.hidden = !opening; settingsEl.hidden = true;
+  if (opening) { leaveView("Opened History"); renderSessions(); }
+};
 stopBtn.onclick = () => send({ kind: "interrupt" });

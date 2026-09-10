@@ -17,7 +17,6 @@ import {
 } from "../../shared/protocol.ts";
 import { ClaudeProvider } from "./providers/claude.ts";
 import type { ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
-import { applyRequestCancellation, canConsumeOwnedReply, requestOwnerIsActive } from "./request-policy.ts";
 import { hasClaudeAuth, installPlugin, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
 
 const emitWarning = process.emitWarning.bind(process); // SDK warns that allowedTools bypasses canUseTool; that is the editable auto-approve list by design
@@ -44,7 +43,7 @@ function ask(args: {
   onDrop: ToolResult | PermissionDecision;
 }): Promise<ToolResult | PermissionDecision> {
   return new Promise(resolve => {
-    if (!requestOwnerIsActive({ activeOwners: activeRequestOwners, owner: args.owner })) return resolve(args.onDrop);
+    if (!activeRequestOwners.has(args.owner)) return resolve(args.onDrop);
     const ws = clients.get(args.fileId);
     if (!live(ws)) return resolve(args.onDrop);
     const id = randomUUID();
@@ -54,7 +53,6 @@ function ask(args: {
 }
 
 function cancelOutstandingRequests(args: { owner: string; reason: string }) {
-  applyRequestCancellation({ activeOwners: activeRequestOwners, owner: args.owner, scope: "turn" });
   for (const [id, request] of pending) {
     if (request.owner !== args.owner) continue;
     pending.delete(id);
@@ -64,7 +62,7 @@ function cancelOutstandingRequests(args: { owner: string; reason: string }) {
 }
 
 function deactivateRequestOwner(args: { owner: string; reason: string }) {
-  applyRequestCancellation({ activeOwners: activeRequestOwners, owner: args.owner, scope: "session" });
+  activeRequestOwners.delete(args.owner);
   cancelOutstandingRequests(args);
 }
 
@@ -91,20 +89,40 @@ function makeHealth(): Health {
     selectedProvider: settings.provider,
     liveProvider: conv?.record.provider,
     settings,
-    providers: [claudeSessionHealth ?? claude.health({ settings: settings.providers.claude })],
-    servers: claudeServers,
-    error: settings.provider === "codex" ? "Codex is not available in this build." : undefined,
+    providers: [
+      conv?.record.provider === "claude" && conv.health ? conv.health : claude.health({ settings: settings.providers.claude }),
+      { provider: "codex", status: "unavailable", models: [], error: "Codex is not available in this build." },
+    ],
+    servers: conv?.servers,
   };
 }
 
 let healthFigmaMcp: Health["figmaMcp"] = "down";
-let claudeServers: Health["servers"];
-let claudeSessionHealth: ProviderHealth | undefined;
-type Conversation = { owner: string; fileId: string; dir: string; record: SessionRecord; session: ReviewSession };
+type Conversation = {
+  owner: string;
+  intentId: string;
+  fileId: string;
+  dir: string;
+  record: SessionRecord;
+  session: ReviewSession;
+  busy: boolean;
+  health?: ProviderHealth;
+  servers?: Health["servers"];
+};
 let conv: Conversation | undefined;
 let startGeneration = 0;
 const preparedOwners = new Map<string, string>();
 const preparedKey = (args: { provider: ProviderId; fileId: string }) => `${args.provider}:${args.fileId}`;
+const sameProviderSettings = (left: ReturnType<typeof readSettings>["providers"][ProviderId], right: ReturnType<typeof readSettings>["providers"][ProviderId]) =>
+  left.model === right.model && left.effort === right.effort;
+
+function clearPreparedProvider(args: { provider: ProviderId; reason: string }) {
+  for (const [key, owner] of preparedOwners) {
+    if (!key.startsWith(`${args.provider}:`)) continue;
+    preparedOwners.delete(key);
+    deactivateRequestOwner({ owner, reason: args.reason });
+  }
+}
 
 function prepareProvider(args: { provider: ReviewProvider; fileId: string; dir: string; settings: ReturnType<typeof readSettings>["providers"][ProviderId] }) {
   const key = preparedKey({ provider: args.provider.id, fileId: args.fileId });
@@ -174,7 +192,7 @@ async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
     session.close();
     return;
   }
-  const current: Conversation = { owner, fileId: message.fileId, dir, record, session };
+  const current: Conversation = { owner, intentId: message.intentId, fileId: message.fileId, dir, record, session, busy: true };
   conv = current;
   const anchor = `Figma file "${message.fileName}", page "${message.pageName}" (${message.pageId}). Anchor: ${message.anchor.type}${message.anchor.nodeIds.length ? ` ${message.anchor.nodeIds.join(", ")}` : ""}`;
   session.send({ text: message.text, selection: message.selection, context: anchor });
@@ -198,11 +216,11 @@ async function pump(current: Conversation) {
       if (conv !== current) break;
       if (output.kind === "initialized") {
         current.record.sessionId = output.sessionId;
-        claudeSessionHealth = output.health;
-        claudeServers = output.servers;
+        current.health = output.health;
+        current.servers = output.servers;
         saveSession(current.dir, current.record);
         send(current.fileId, { kind: "health", health: makeHealth() });
-        send(current.fileId, { kind: "session", session: current.record });
+        send(current.fileId, { kind: "started", intentId: current.intentId, session: current.record });
       } else if (output.kind === "event") {
         send(current.fileId, output);
       } else {
@@ -213,9 +231,10 @@ async function pump(current: Conversation) {
           current.record.turns++;
           current.record.updatedAt = now();
           saveSession(current.dir, current.record);
+          current.busy = false;
           send(current.fileId, { kind: "session", session: current.record });
           send(current.fileId, { kind: "sessions", sessions: readSessions(current.dir) });
-          send(current.fileId, { kind: "busy", busy: false });
+          send(current.fileId, { kind: "busy", busy: current.busy });
         } else {
           send(current.fileId, { kind: "session", session: current.record });
         }
@@ -250,17 +269,21 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
   if (message.kind !== "hello" && !ws.protocolOk) return;
   switch (message.kind) {
     case "hello": {
+      ws.protocolOk = message.protocolVersion === PROTOCOL_VERSION;
+      if (!ws.protocolOk) {
+        if (live(ws)) ws.send(JSON.stringify({ kind: "error", message: `Plugin/bridge protocol mismatch (${message.protocolVersion}/${PROTOCOL_VERSION}). Rebuild or restart both from the same @sesori/figma-review version.` } satisfies DownMsg));
+        ws.close();
+        return;
+      }
       const old = clients.get(message.fileId);
       if (old && old !== ws) old.close();
       clients.set(message.fileId, ws);
       ws.fileId = message.fileId;
-      ws.protocolOk = message.protocolVersion === PROTOCOL_VERSION;
-      if (!ws.protocolOk) return send(message.fileId, { kind: "error", message: `Plugin/bridge protocol mismatch (${message.protocolVersion}/${PROTOCOL_VERSION}). Rebuild or restart both from the same @sesori/figma-review version.` });
       const dir = workspaceFor(message.fileId, message.fileName);
       send(message.fileId, { kind: "sessions", sessions: readSessions(dir) });
       const mine = conv?.fileId === message.fileId;
       if (mine) send(message.fileId, { kind: "session", session: conv!.record });
-      send(message.fileId, { kind: "busy", busy: mine });
+      send(message.fileId, { kind: "busy", busy: mine ? conv!.busy : false });
       const settings = readSettings();
       const selected = providers[settings.provider];
       if (selected) prepareProvider({ provider: selected, fileId: message.fileId, dir, settings: settings.providers[settings.provider] });
@@ -278,11 +301,12 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
     }
     case "user":
       if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or open one from History." });
+      conv.busy = true;
       conv.session.send({ text: message.text, selection: message.selection });
-      return send(conv.fileId, { kind: "busy", busy: true });
+      return send(conv.fileId, { kind: "busy", busy: conv.busy });
     case "reply": {
       const request = pending.get(message.id);
-      if (!request || !canConsumeOwnedReply({ activeOwners: activeRequestOwners, owner: request.owner, requestSocket: request.ws, replySocket: ws })) return;
+      if (!request || request.ws !== ws || !activeRequestOwners.has(request.owner)) return;
       pending.delete(message.id);
       request.resolve(message.result);
       return;
@@ -293,18 +317,30 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
         await conv.session.interrupt();
       }
       return;
+    case "close":
+      startGeneration++;
+      endConversation(message.reason);
+      return;
     case "settings": {
+      const previous = readSettings();
+      const changed = (["claude", "codex"] as const).filter(provider =>
+        !sameProviderSettings(previous.providers[provider], message.settings.providers[provider]));
       saveSettings(message.settings);
-      if (conv) await conv.session.applySettings({ settings: message.settings.providers[conv.record.provider] });
-      claude.dispose();
+      if (conv && changed.includes(conv.record.provider)) {
+        await conv.session.applySettings({ settings: message.settings.providers[conv.record.provider] });
+        if (conv.health) conv.health = { ...conv.health, model: message.settings.providers[conv.record.provider].model || conv.health.model };
+      }
       const dir = ws.fileId ? workspaceFor(ws.fileId, "Figma file") : undefined;
-      const selected = providers[message.settings.provider];
-      if (dir && selected) {
-        const key = preparedKey({ provider: selected.id, fileId: ws.fileId! });
-        const preparedOwner = preparedOwners.get(key);
-        if (preparedOwner) deactivateRequestOwner({ owner: preparedOwner, reason: "Settings changed" });
-        preparedOwners.delete(key);
-        prepareProvider({ provider: selected, fileId: ws.fileId!, dir, settings: message.settings.providers[message.settings.provider] });
+      for (const providerId of changed) {
+        clearPreparedProvider({ provider: providerId, reason: "Settings changed" });
+        providers[providerId]?.dispose();
+        if (dir && providerId === message.settings.provider && providers[providerId]) {
+          prepareProvider({ provider: providers[providerId]!, fileId: ws.fileId!, dir, settings: message.settings.providers[providerId] });
+        }
+      }
+      if (dir && previous.provider !== message.settings.provider && !changed.includes(message.settings.provider)) {
+        const selected = providers[message.settings.provider];
+        if (selected) prepareProvider({ provider: selected, fileId: ws.fileId!, dir, settings: message.settings.providers[message.settings.provider] });
       }
       return send(ws.fileId!, { kind: "health", health: makeHealth() });
     }

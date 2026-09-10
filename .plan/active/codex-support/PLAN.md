@@ -2,7 +2,8 @@
 
 Status: Step 1 squash-merged as `232048a`; initial architecture review approved. The user has authorized execution
 of the entire series, automatic squash merges at ready-for-human-review, and continuation without waiting for
-manual merges. Step 2 is implemented and verified locally on `codex-support-step-2`, pending independent review.
+manual merges. Step 2 is implemented on `codex-support-step-2`; initial review and current PR feedback fixes are
+applied and verified locally, pending parent final review/merge.
 
 ## Goal and locked user direction
 
@@ -406,11 +407,13 @@ No unrelated style rewrite, new framework, background service, mobile bridge cha
   model descriptors provider-owned, carry cost provenance through the provider seam, render unavailable cost
   explicitly, capture/deactivate request ownership, reserve asynchronous starts, and reject unknown provider tags.
   Focused checks cover generic selector data, unavailable cost, and migration rejection; parent owns publication.
-- Parent's subsequent Step 2 audit found Stop owner deactivation, terminal-only usage, unstable stream item identity,
-  startup follow-up replacement, and foreign-socket reply acceptance. Local fixes split turn cancellation from owner
-  teardown, restore provisional usage without terminal side effects, key blocks by native message id + index, queue
-  startup steering until session identity, and validate reply socket/owner. Deterministic fixtures plus a bounded
-  Haiku Stop/ask/follow-up smoke cover these ordinary flows.
+- Parent's subsequent Step 2 audit found five issues: Stop owner deactivation, terminal-only usage, unstable stream
+  item identity, startup follow-up replacement, and foreign-socket reply acceptance. Local fixes split turn
+  cancellation from owner teardown, restore provisional usage without terminal side effects, key blocks by native
+  message id + index, queue startup steering until session identity, and validate reply socket/owner. PR feedback
+  then consolidated conversation activity/health, view/card ownership, immutable accounting baselines, warm callback
+  fencing, handshake ordering, parser ordering, shared catalog exposure, mixed-block lifecycle, and stronger smoke
+  proofs. Deterministic fixtures plus bounded Haiku multi-turn smoke cover these ordinary flows.
 - Runtime qualification not run: dynamic image calls, human-wait duration, replay of answers, effective native
   permission profile/config isolation, live settings at a new model invocation, and per-route dollar estimates.
 - If qualification exposes a genuine missing feature, keep the plan blocked and present the concrete gap to the

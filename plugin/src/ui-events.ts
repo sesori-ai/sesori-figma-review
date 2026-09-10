@@ -13,15 +13,6 @@ export function sessionCostLabel(args: { session: SessionRecord; precision: numb
 }
 
 /** Provider-owned model descriptors become generic selector choices; unknown saved values remain visible. */
-export type ComposerRoute = "queue" | "start" | "resume" | "send";
-export function composerRoute(args: { starting: boolean; hasLiveSession: boolean; hasOpenedSession: boolean }): ComposerRoute {
-  if (args.starting) return "queue";
-  if (!args.hasLiveSession) return "start";
-  if (args.hasOpenedSession) return "resume";
-  return "send";
-}
-export function drainStartupInputs<T>(args: { inputs: T[] }): T[] { return args.inputs.splice(0); }
-
 export function providerSettingOptions(args: { health?: ProviderHealth; settings: ProviderSettings }) {
   const models = (args.health?.models ?? []).map(model => ({ value: model.value, label: model.label }));
   if (!models.some(model => model.value === args.settings.model)) {

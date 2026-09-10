@@ -91,6 +91,7 @@ export type UpMsg =
       pageId: string;
       pageName: string;
       anchor: Anchor;
+      intentId: string;
       resume?: SessionRef;
       text: string;
       selection: NodeRef[];
@@ -99,6 +100,7 @@ export type UpMsg =
   | { kind: "open"; fileId: string; fileName: string; session: SessionRef }
   | { kind: "reply"; id: string; result: ToolResult | PermissionDecision }
   | { kind: "interrupt" }
+  | { kind: "close"; reason: string }
   | { kind: "settings"; settings: Settings }
   | { kind: "health" };
 
@@ -108,6 +110,7 @@ export type DownMsg =
   | { kind: "health"; health: Health }
   | { kind: "sessions"; sessions: SessionRecord[] }
   | { kind: "history"; session: SessionRecord; messages: HistoryItem[]; attached: boolean }
+  | { kind: "started"; intentId: string; session: SessionRecord }
   | { kind: "session"; session: SessionRecord }
   | { kind: "tool"; id: string; tool: string; args: Record<string, unknown> }
   | { kind: "permission"; id: string; tool: string; input: Record<string, unknown> }

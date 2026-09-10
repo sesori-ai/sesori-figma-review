@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { ReviewEvent, SessionRecord } from "../../shared/protocol.ts";
-import { composerRoute, drainStartupInputs, eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
+import { eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
 
 const session: SessionRecord = {
   provider: "claude",
@@ -24,13 +24,6 @@ assert.equal(eventBelongsToSession({ event: { ...event, session: { provider: "cl
 assert.equal(sessionCostLabel({ session, precision: 3 }), "$0.123");
 assert.equal(sessionCostLabel({ session: { ...session, costStatus: "estimated" }, precision: 2 }), "~$0.12");
 assert.equal(sessionCostLabel({ session: { ...session, costUsd: 0, costStatus: "unavailable" }, precision: 3 }), "Cost unavailable");
-assert.equal(composerRoute({ starting: true, hasLiveSession: false, hasOpenedSession: false }), "queue", "startup follow-up waits to steer first session");
-assert.equal(composerRoute({ starting: false, hasLiveSession: false, hasOpenedSession: false }), "start");
-assert.equal(composerRoute({ starting: false, hasLiveSession: true, hasOpenedSession: true }), "resume");
-assert.equal(composerRoute({ starting: false, hasLiveSession: true, hasOpenedSession: false }), "send");
-const startupInputs = [{ text: "follow up", selection: [{ id: "1:2" }] }];
-assert.deepEqual(drainStartupInputs({ inputs: startupInputs }), [{ text: "follow up", selection: [{ id: "1:2" }] }]);
-assert.deepEqual(startupInputs, [], "startup input is delivered once after native session identity arrives");
 assert.deepEqual(providerSettingOptions({
   health: {
     provider: "codex", status: "ready", models: [

@@ -10,7 +10,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | Step | Exact title | State |
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/7] | Squash-merged as `232048a` (PR #1); initial architecture review approved |
-| 2 | 🚧 [codex-support] Isolate Claude behind normalized review contracts [step 2/7] | Implemented and verified locally; first architecture review findings fixed; pending parent publication |
+| 2 | 🚧 [codex-support] Isolate Claude behind normalized review contracts [step 2/7] | PR feedback fixes implemented/verified locally; pending parent final review/merge |
 | 3 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 3/7] | Not started |
 | 4 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 4/7] | Not started |
 | 5 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 5/7] | Not started |
@@ -51,18 +51,25 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   No real Figma rendering claim is made.
 - Post-first-review Claude smoke passed on isolated port 43061 with Haiku/low and the same $0.10/three-turn bounds:
   normalized focus round trip, one reported-cost turn, 22,590 tokens and positive $0.0117 cost. Owned fixture removed.
-- Parent audit then found four ordinary-flow regressions. Fixes preserve request-owner activity across Stop, restore
+- Parent audit then found five ordinary-flow regressions. Fixes preserve request-owner activity across Stop, restore
   provisional live usage without terminal effects/double counting, correlate text through native message id + block
   index across changing envelope UUIDs, queue startup follow-ups until session identity, and reject foreign-socket
   replies. Automated fixtures cover each seam. Enhanced Haiku/low smoke on isolated port 43064 proved cancelled
   `ask_user` → interrupted turn → same-session `focus` follow-up, live tokens while busy, stable confirmed cost,
   started-block text accumulation, and two final turns: 34,487 tokens, positive $0.0241 cost. Owned fixture removed.
-- Final parent audit corrected cumulative Messages API usage within each response, including nonzero initial output,
-  repeated usage deltas and multiple responses in one turn. Deterministic regression assertions, full check and build
-  pass; no additional paid smoke was needed for this pure accounting correction.
-- Review repairs and required ordinary-flow fixtures bring Step 2 to approximately 1,620 changed lines, above the
-  1,500 soft cap (against `origin/master`). Splitting would publish the provider seam with known Stop, usage, stream
-  identity, or startup regressions, so the coherent repair stays with its proof rather than shipping a broken intermediary.
+- Parent's cumulative Messages API usage correction from `1ed1e9d` remains: nonzero initial output, repeated deltas,
+  and multiple responses reconcile per response. Installed SDK 0.3.260 types state `result.usage` is per-turn while
+  `total_cost_usd` is query-cumulative. Final native three-result fixture observed independent per-turn totals whose
+  sum exactly matched persisted usage; immutable resume-baseline fixtures cover both usage and cumulative cost.
+- Final bounded Haiku/low smoke on isolated port 43067 proved healthy-client survival after an old-protocol reconnect,
+  `ask_user` cancellation/Stop, same-provider/session focus follow-up, coherent started-block text, live usage with
+  stable confirmed cost, selected-Codex/live-Claude provider-scoped health, actual idle reconnect, and a second
+  completed text turn. Three native result snapshots summed exactly to persisted 33,128 tokens; cost was $0.007259.
+  Four-turn/$0.10 bounds applied; owned fixture/process/log removed.
+- PR feedback repairs and ordinary-flow fixtures bring Step 2 to 1,894 changed lines, 394 above the 1,500 soft cap.
+  Splitting would publish the provider seam
+  with known activity, view/card, accounting, warm-start, handshake, parser, catalog, display, or smoke regressions,
+  so the coherent repair stays with its proof rather than shipping a broken intermediary.
 
 ## Qualification gates before user-facing Codex exposure
 
@@ -73,8 +80,9 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - [ ] Native history replays answers/tool activity after restart and resumes the same provider context.
 - [ ] Mid-turn model/effort update, steering and Stop preserve the existing UX.
 - [ ] Native dollar estimates work on required auth/model routes, or the user explicitly decides a trustworthy fallback.
-- [x] Step 2 automated migration fixtures and bounded live Claude smoke preserve legacy settings/history/cost paths;
-  cumulative final matrix still requires old real-workspace and Figma coverage.
+- [x] Step 2 automated legacy migration fixtures and bounded synthetic Claude smoke pass.
+- [ ] Final matrix still requires a real pre-Step-2 workspace plus real Figma verification of legacy
+  settings/instructions/history/cost behavior; Step 2 fixture proof does not close that qualification.
 - [ ] Packed npm bin, stable plugin installation/upgrade refresh and provider-correct startup work for both.
 
 ## Review
@@ -88,7 +96,26 @@ and adds artifact verification without changing provider architecture. Do not de
 approved by the subagent.
 
 Step 2 first architecture implementation review: **REJECTED** with six valid in-scope findings. Fixes are applied and
-validated locally as recorded above; parent owns final review/publication.
+validated locally. PR #2 automated feedback produced the consolidated dispositions below; parent owns final review/merge.
+
+| Review comment ID(s) | Disposition |
+| --- | --- |
+| 3980456850, 3980527912 | Fixed: conversation-owned activity drives start/send/terminal/reconnect busy state. |
+| 3980456864, 3980527945 | Fixed: missing Codex is provider-scoped; live Claude health is not globally failed. |
+| 3980528015 | Fixed: settings diff by provider; no-op/unrelated changes do not dispose/re-prewarm Claude. |
+| 3980456871, 3980527936, 3980527887 | Fixed together: ephemeral start intent owns confirmation/queue; stale start/session and History cannot drain wrong input. |
+| 3980527918 | Fixed: one New/History view-leave path cancels cards and closes native conversation/start intent. |
+| 3980527926 | Fixed: immutable usage/cost baselines; SDK/native per-turn usage and cumulative cost proven. |
+| 3980527845 | Fixed: warm entry identity fences replaced callbacks; dispose resets runtime truthfully. |
+| 3980527897 | Fixed: protocol validates/rejects directly before healthy client replacement. |
+| 3980527811 | Fixed: provider tag validates before malformed-record filtering. |
+| 3980527957 | Fixed: exported neutral Figma descriptions and Zod schemas feed Claude and next Codex adapter. |
+| 3980527987 | Fixed: per-response text-block indices suppress unmatched non-text `text_end`. |
+| 3980527855 | Fixed: smoke snapshots provider/session and resets/asserts follow-up text by turn. |
+| 3980527867 | Fixed: unexpected smoke tools receive error results and fail immediately. |
+| 3980527972 | Fixed: Step 2 fixture proof and still-open real-workspace/Figma gate are separate. |
+| 3980527998 | Fixed: status names parent final review/merge, not pending independent review. |
+| 3980528006 | Fixed: parent audit count reconciled to five issues.
 
 ## Retirement
 

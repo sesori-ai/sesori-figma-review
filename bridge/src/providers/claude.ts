@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   FIGMA_MCP_URL,
+  type CostStatus,
   type HistoryItem,
   type NodeRef,
   type ProviderHealth,
@@ -47,6 +48,7 @@ const sumUsage = (left: Usage, right: Usage): Usage => ({
 });
 
 /** Live stream values are provisional per turn; final result usage commits once without double counting. */
+/** Installed SDK 0.3.260 declares result.usage per-turn for streaming-input sessions. */
 export class ClaudeUsageTracker {
   private turn = zeroUsage();
   private response = zeroUsage();
@@ -74,6 +76,20 @@ export class ClaudeUsageTracker {
     return this.snapshot();
   }
   snapshot(): Usage { return sumUsage(this.committed, sumUsage(this.turn, this.response)); }
+}
+
+export class ClaudeCostTracker {
+  private readonly baseUsd: number;
+  private current: { usd: number; status: CostStatus };
+  constructor(args: { baseUsd: number; baseStatus: CostStatus }) {
+    this.baseUsd = args.baseUsd;
+    this.current = { usd: args.baseUsd, status: args.baseStatus };
+  }
+  complete(nativeCumulativeUsd: unknown) {
+    this.current = { usd: this.baseUsd + number(nativeCumulativeUsd), status: "reported" };
+    return this.snapshot();
+  }
+  snapshot() { return { ...this.current }; }
 }
 
 function userMessage(args: { text: string; selection: NodeRef[]; context?: string }): SDKUserMessage {
@@ -143,6 +159,7 @@ function ref(args: { sessionId: string }): SessionRef { return { provider: "clau
 
 export class ClaudeDisplayMapper {
   private messageId?: string;
+  private readonly textBlocks = new Set<number>();
 
   map(args: { message: unknown; sessionId: string; interrupted: boolean }): ReviewEvent[] {
     const message = object(args.message);
@@ -155,17 +172,22 @@ export class ClaudeDisplayMapper {
       if (eventType === "message_start") {
         const id = object(event?.message)?.id;
         this.messageId = typeof id === "string" ? id : undefined;
+        this.textBlocks.clear();
         return [];
       }
-      if (eventType === "message_stop") { this.messageId = undefined; return []; }
+      if (eventType === "message_stop") { this.messageId = undefined; this.textBlocks.clear(); return []; }
       if (!this.messageId) return [];
-      const itemId = `${args.sessionId}:${this.messageId}:${number(event?.index)}`;
-      if (eventType === "content_block_start" && object(event?.content_block)?.type === "text") return [{ type: "text_start", session, itemId }];
+      const index = number(event?.index);
+      const itemId = `${args.sessionId}:${this.messageId}:${index}`;
+      if (eventType === "content_block_start" && object(event?.content_block)?.type === "text") {
+        this.textBlocks.add(index);
+        return [{ type: "text_start", session, itemId }];
+      }
       const delta = object(event?.delta);
-      if (eventType === "content_block_delta" && delta?.type === "text_delta" && typeof delta.text === "string") {
+      if (eventType === "content_block_delta" && this.textBlocks.has(index) && delta?.type === "text_delta" && typeof delta.text === "string") {
         return [{ type: "text_delta", session, itemId, text: delta.text }];
       }
-      if (eventType === "content_block_stop") return [{ type: "text_end", session, itemId }];
+      if (eventType === "content_block_stop" && this.textBlocks.delete(index)) return [{ type: "text_end", session, itemId }];
     }
     if (type === "assistant") {
       const content = object(message.message)?.content;
@@ -201,15 +223,15 @@ class ClaudeSession implements ReviewSession {
   readonly output: AsyncIterable<ProviderOutput>;
   private interrupted = false;
 
-  constructor(args: { query: Query; push: (message: SDKUserMessage | null) => void; baseRecord: SessionRecord }) {
+  constructor(args: { query: Query; push: (message: SDKUserMessage | null) => void; baseRecord: SessionRecord; log: (...values: unknown[]) => void }) {
     this.query = args.query;
     this.push = args.push;
     const self = this;
     this.output = (async function* () {
       let sessionId = "";
-      const usage = new ClaudeUsageTracker({ committed: args.baseRecord.usage });
+      const usage = new ClaudeUsageTracker({ committed: { ...args.baseRecord.usage } });
+      const cost = new ClaudeCostTracker({ baseUsd: args.baseRecord.costUsd, baseStatus: args.baseRecord.costStatus });
       const display = new ClaudeDisplayMapper();
-      let confirmedCost = { usd: args.baseRecord.costUsd, status: args.baseRecord.costStatus };
       for await (const sdkMessage of self.query) {
         const message = object(sdkMessage);
         if (message?.type === "system" && message.subtype === "init" && typeof message.session_id === "string") {
@@ -234,15 +256,15 @@ class ClaudeSession implements ReviewSession {
           const streamUsage = event?.type === "message_start" ? object(event.message)?.usage : event?.type === "message_delta" ? event.usage : undefined;
           if (streamUsage) {
             const snapshot = event?.type === "message_start" ? usage.messageStart(streamUsage) : usage.messageDelta(streamUsage);
-            yield { kind: "usage", usage: snapshot, cost: confirmedCost, turnCompleted: false };
+            yield { kind: "usage", usage: snapshot, cost: cost.snapshot(), turnCompleted: false };
           }
         }
         if (message?.type === "result") {
-          confirmedCost = { usd: args.baseRecord.costUsd + number(message.total_cost_usd), status: "reported" };
+          args.log("[claude-accounting]", JSON.stringify({ resultUsage: message.usage, totalCostUsd: message.total_cost_usd }));
           yield {
             kind: "usage",
             usage: usage.complete(message.usage),
-            cost: confirmedCost,
+            cost: cost.complete(message.total_cost_usd),
             turnCompleted: true,
           };
           self.interrupted = false;
@@ -284,13 +306,18 @@ export class ClaudeProvider implements ReviewProvider {
 
   prepare(args: { fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary }) {
     if (this.warm?.dir === args.dir) return;
-    this.warm?.query.then(query => query.close()).catch(() => {});
-    const warmQuery = startup({ options: options({ ...args, version: this.args.version, log: this.args.log }) });
-    this.warm = { dir: args.dir, query: warmQuery };
-    warmQuery.then(() => {
+    const previous = this.warm;
+    this.warm = undefined;
+    previous?.query.then(query => query.close()).catch(() => {});
+    this.runtime = undefined;
+    const entry = { dir: args.dir, query: startup({ options: options({ ...args, version: this.args.version, log: this.args.log }) }) };
+    this.warm = entry;
+    entry.query.then(() => {
+      if (this.warm !== entry) return;
       this.runtime = { prepared: true };
       this.args.onPrepared();
     }, error => {
+      if (this.warm !== entry) return;
       this.runtime = { error: `Claude failed to start: ${error instanceof Error ? error.message : String(error)}` };
       this.warm = undefined;
       this.args.onPrepared();
@@ -310,14 +337,27 @@ export class ClaudeProvider implements ReviewProvider {
     if (!args.resume && this.warm?.dir === args.dir) {
       const warm = this.warm;
       this.warm = undefined;
-      try { sdkQuery = (await warm.query).query(input.stream); } catch (error) { this.args.log("pre-warmed query unusable, starting cold", error); }
+      try {
+        sdkQuery = (await warm.query).query(input.stream);
+        this.runtime = { prepared: true };
+        this.args.onPrepared();
+      } catch (error) {
+        this.runtime = undefined;
+        this.args.log("pre-warmed query unusable, starting cold", error);
+      }
     }
     sdkQuery ??= query({ prompt: input.stream, options: options({ ...args, version: this.args.version, log: this.args.log }) });
-    return new ClaudeSession({ query: sdkQuery, push: input.push, baseRecord: args.baseRecord });
+    return new ClaudeSession({ query: sdkQuery, push: input.push, baseRecord: args.baseRecord, log: this.args.log });
   }
 
   readHistory(args: { dir: string; sessionId: string }): HistoryItem[] { return readClaudeTranscript(args); }
-  dispose() { this.warm?.query.then(query => query.close()).catch(() => {}); this.warm = undefined; }
+  dispose() {
+    const warm = this.warm;
+    this.warm = undefined;
+    this.runtime = undefined;
+    warm?.query.then(query => query.close()).catch(() => {});
+    this.args.onPrepared();
+  }
 }
 
 /** Claude Code native transcript projection. Hidden reasoning and screenshot bytes are excluded. */
