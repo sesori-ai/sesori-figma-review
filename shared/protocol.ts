@@ -16,6 +16,21 @@ export type PermissionDecision = { behavior: "allow" } | { behavior: "deny"; mes
 
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 
+// Additive provider contracts. Live wire/session types remain legacy until normalized workflow activation.
+export type ProviderId = "claude" | "codex";
+export type SessionRef = { provider: ProviderId; sessionId: string };
+export type CostStatus = "reported" | "estimated" | "unavailable";
+export type ProviderSettings = { model: string; effort: string };
+export type ModelDescriptor = { value: string; label: string; efforts: string[] };
+export type ProviderHealth = {
+  provider: ProviderId;
+  status: "starting" | "ready" | "unavailable";
+  version?: string;
+  model?: string;
+  models: ModelDescriptor[];
+  error?: string;
+};
+
 export type SessionRecord = {
   sessionId: string;
   title: string;
@@ -28,6 +43,21 @@ export type SessionRecord = {
   costUsd: number;
   usage: Usage;
 };
+
+export type ProviderSessionRecord = SessionRecord & {
+  provider: ProviderId;
+  costStatus: CostStatus;
+};
+
+/** Provider-neutral rendered activity. Provider SDK/RPC payloads never cross this adapter contract. */
+export type ReviewEvent =
+  | { type: "text_start"; session: SessionRef; itemId: string }
+  | { type: "text_delta"; session: SessionRef; itemId: string; text: string }
+  | { type: "text_end"; session: SessionRef; itemId: string }
+  | { type: "tool"; session: SessionRef; itemId: string; name: string; input: Record<string, unknown> }
+  | { type: "status"; session: SessionRef; itemId: string; text: string }
+  | { type: "error"; session: SessionRef; itemId: string; message: string }
+  | { type: "turn_end"; session: SessionRef; itemId: string; outcome: "completed" | "interrupted" | "failed"; message?: string };
 
 // ---- plugin -> bridge -------------------------------------------------------
 

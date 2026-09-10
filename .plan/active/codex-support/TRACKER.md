@@ -9,13 +9,14 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 | Step | Exact title | State |
 | --- | --- | --- |
-| 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/7] | PR #1 open and monitored; initial architecture review approved |
-| 2 | 🚧 [codex-support] Isolate Claude behind normalized review contracts [step 2/7] | Not started |
-| 3 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 3/7] | Not started |
-| 4 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 4/7] | Not started |
-| 5 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 5/7] | Not started |
-| 6 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 6/7] | Not started |
-| 7 | ⚙️ [codex-support] Verify full parity and retire the plan [step 7/7] | Not started |
+| 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
+| 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Implemented and verified locally on `codex-support-foundations`; pending parent publication |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Not started; coordinated activation from preserved checkpoint obligations |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
+| 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
+| 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
+| 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
+| 8 | ⚙️ [codex-support] Verify full parity and retire the plan [step 8/8] | Not started |
 
 ## Planning evidence
 
@@ -24,8 +25,29 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - Located/read `sesori-plan-maker` and `sesori-plan-worker` in the sibling monorepo.
 - Official App Server, SDK, configuration and permissions documentation inspected.
 - Installed `codex-cli 0.154.0` experimental generated schema inspected, not hand-edited or committed.
-- No live Codex/Claude turn, native security test, paid smoke, Figma test, or account/config modification performed.
-- Dependencies absent in this worktree. `npm ci`, check and build not run for this documentation-only task.
+- No live Codex/Claude turn, native security test, paid smoke, Figma test, or account/config modification performed
+  during Step 1 planning.
+
+## Step 2 replacement foundation
+
+- Full reviewed implementation remains immutable at `origin/codex-support-step-2` commit `f7265eb`. Oversized PR #2
+  (https://github.com/sesori-ai/sesori-figma-review/pull/2) was closed as superseded, not merged or abandoned.
+- Foundation boundary: additive provider-neutral IDs/refs/events/health/model/cost contracts, provider interfaces,
+  neutral Zod Figma catalog, complete dormant Claude adapter, and focused adapter/history/stream/accounting tests.
+  Released `UpMsg`/`DownMsg`/`Health`/`Settings`/`SessionRecord`, bridge flow, plugin UI and protocol remain active and
+  unchanged. This slice does not expose Codex, migrate persistence, or claim new UI/protocol behavior.
+- Step 3 activation must retain valid checkpoint fixes: provider-scoped health/settings; immutable request/session
+  ownership; protocol v3 mixed-version guidance; single connection/view intent for start/reconnect/History/cards;
+  file-scoped close; settings-await fencing; normalized block identity/usage/cost; and self-owned bounded smoke.
+- Historical checkpoint smokes used authorized existing Claude sign-in, Haiku/low, isolated homes/free ports,
+  four-turn/$0.10 limits and no credential/config copying. They prove preserved intent, not this dormant foundation.
+  Later live tests retain those rules. Codex tests use cheapest suitable catalog-reported image/tool-capable model and
+  low effort; ask before premium/high-effort exceptions.
+- Foundation diff is 720 changed lines (688 additions, 32 deletions), within the cap and leaner than the rough
+  750–1,000 estimate without omitted proof. `npm ci`, workspace checks, focused Claude adapter check, both builds and `git diff --check` pass. Tests cover
+  neutral tool schemas/models, interface conformance, dispose health, native transcript filtering, provider-qualified
+  stream/tool mapping, text-only block lifecycle, cumulative response deltas, per-turn results and immutable resumed
+  cost. No live bridge/plugin file or legacy wire type changed; no paid/native turn was run for dormant wiring.
 
 ## Qualification gates before user-facing Codex exposure
 
@@ -47,7 +69,8 @@ unrelated monorepo Section B workspace diagrams/layers skipped. Runtime qualific
 
 Later `a359823` packaging-baseline reconciliation was parent-reviewed only; it preserves the current install flow
 and adds artifact verification without changing provider architecture. Do not describe that revision as separately
-approved by the subagent.
+approved by the subagent. Closed PR #2 review findings remain obligations for Step 3 activation; neither its revised
+code nor this replacement foundation has a new architecture-approval claim.
 
 ## Retirement
 
