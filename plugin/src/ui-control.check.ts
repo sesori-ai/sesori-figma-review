@@ -204,6 +204,19 @@ history.get("btn-new").onclick?.();
 history.deliver({ kind: "history", intentId: firstOpen.intentId, session, attached: true, messages: [{ role: "assistant", text: "stale" }] });
 assert.doesNotMatch(text(history.get("chat")), /stale/);
 
+// Colliding item IDs from another native session/provider cannot retire or replace target History state.
+for (const foreign of [
+  { ...session, sessionId: "33333333-3333-4333-8333-333333333333" },
+  { ...session, provider: "codex" as const },
+]) {
+  const owned = new Harness(); owned.connect({ ...connection, activeText: [{ session, itemId: "collision", text: "A" }] });
+  const intentId = (owned.sent("open").slice(-1)[0] as { intentId: string }).intentId;
+  owned.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "collision", text: "B" } });
+  owned.socket.close(); owned.reconnect({ ...connection, session: foreign, activeText: [{ session: foreign, itemId: "collision", text: "X" }] });
+  owned.deliver({ kind: "history", intentId, session, attached: true, messages: [] });
+  assert.match(text(owned.get("chat")), /AB/); assert.doesNotMatch(text(owned.get("chat")), /X/);
+}
+
 // Cancellation before History completion prevents card resurrection and duplicate replies.
 const cancel = new Harness(); cancel.connect(connection);
 const cancelOpen = cancel.sent("open").slice(-1)[0]! as { intentId: string };

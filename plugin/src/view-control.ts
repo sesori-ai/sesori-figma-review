@@ -4,7 +4,7 @@ export type QueuedInput = { text: string; selection: NodeRef[] };
 type StartIntent = { kind: "start"; id: string; inputs: QueuedInput[]; adopted: boolean };
 type HistoryIntent = { kind: "history"; id: string; session: SessionRef; events: ReviewEvent[]; activeText: TextSnapshot[]; latest?: SessionRecord };
 type ViewIntent = StartIntent | HistoryIntent;
-const sameSession = (left: SessionRecord, right: SessionRecord) =>
+const sameSession = (left: SessionRef, right: SessionRef) =>
   left.provider === right.provider && left.sessionId === right.sessionId;
 
 /** Sole owner of current conversation view, ephemeral connection intent, and actionable cards. */
@@ -70,13 +70,15 @@ export class ConversationView {
       result.cancelledStart = true;
       this.intent = undefined;
     } else if (this.intent?.kind === "history") {
-      if (args.activeText) {
-        const covered = new Set(args.activeText.map(item => item.itemId));
-        this.intent.events = this.intent.events.filter(event => !covered.has(event.itemId));
-        this.intent.activeText = args.activeText;
+      const snapshotSession = args.session;
+      if (args.activeText && snapshotSession && sameSession(snapshotSession, this.intent.session)) {
+        const activeText = args.activeText.filter(item => sameSession(item.session, snapshotSession));
+        const covered = new Set(activeText.map(item => item.itemId));
+        this.intent.events = this.intent.events.filter(event => !sameSession(event.session, snapshotSession) || !covered.has(event.itemId));
+        this.intent.activeText = activeText;
       }
-      if (args.session?.provider === this.intent.session.provider && args.session.sessionId === this.intent.session.sessionId) {
-        this.current = args.session; this.intent.latest = args.session;
+      if (snapshotSession && sameSession(snapshotSession, this.intent.session)) {
+        this.current = snapshotSession; this.intent.latest = snapshotSession;
       }
       result.historyRetry = { intentId: this.intent.id, session: this.intent.session };
       return result;
