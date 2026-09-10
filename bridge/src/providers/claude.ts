@@ -185,6 +185,23 @@ const createClaudeFigmaServer = (args: { version: string; boundary: ProviderRequ
     input => args.boundary.tool({ tool: item.name, args: input }))),
 });
 
+function optionalEnvLimit(args: {
+  name: "SESORI_REVIEW_MAX_TURNS" | "SESORI_REVIEW_MAX_BUDGET_USD";
+  integer: boolean;
+}) {
+  const raw = process.env[args.name];
+  if (raw === undefined) return undefined;
+  const normalized = raw.trim();
+  const numeric = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(normalized);
+  const value = numeric ? Number(normalized) : Number.NaN;
+  const valid = Number.isFinite(value) && value > 0 && (!args.integer || Number.isSafeInteger(value));
+  if (!valid) {
+    const expected = args.integer ? "a positive safe integer" : "a finite positive number";
+    throw new Error(`${args.name} must be ${expected}; received ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
 function options(args: {
   version: string;
   dir: string;
@@ -195,8 +212,8 @@ function options(args: {
   log: (...values: unknown[]) => void;
 }): Options {
   const appRepo = process.env.APP_REPO;
-  const maxTurns = Number(process.env.SESORI_REVIEW_MAX_TURNS ?? 0) || undefined;
-  const maxBudgetUsd = Number(process.env.SESORI_REVIEW_MAX_BUDGET_USD ?? 0) || undefined;
+  const maxTurns = optionalEnvLimit({ name: "SESORI_REVIEW_MAX_TURNS", integer: true });
+  const maxBudgetUsd = optionalEnvLimit({ name: "SESORI_REVIEW_MAX_BUDGET_USD", integer: false });
   return {
     cwd: args.dir,
     resume: args.resume,

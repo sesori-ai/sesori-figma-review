@@ -148,6 +148,59 @@ const warmArgs = (boundary: ReturnType<typeof allowBoundary>, settings = { model
   fileId: "adapter-file", dir: workspace, settings, boundary,
 });
 
+const priorLimits = {
+  turns: process.env.SESORI_REVIEW_MAX_TURNS,
+  budget: process.env.SESORI_REVIEW_MAX_BUDGET_USD,
+};
+try {
+  delete process.env.SESORI_REVIEW_MAX_TURNS;
+  delete process.env.SESORI_REVIEW_MAX_BUDGET_USD;
+  const absent = lifecycle();
+  absent.provider.prepare(warmArgs(allowBoundary("absent")));
+  assert.equal(absent.warmCalls[0].options.maxTurns, undefined);
+  assert.equal(absent.warmCalls[0].options.maxBudgetUsd, undefined);
+  absent.warmCalls[0].pending.resolve(new FakeWarm());
+  await Promise.resolve();
+  absent.provider.dispose();
+
+  const invalidLimits = [
+    ...["", "NaN", "Infinity", "0", "-1", "1.5", "0x10", String(Number.MAX_SAFE_INTEGER + 1), "garbage"]
+      .map(value => ({ name: "SESORI_REVIEW_MAX_TURNS" as const, value })),
+    ...["", "NaN", "Infinity", "0", "-1", "garbage"]
+      .map(value => ({ name: "SESORI_REVIEW_MAX_BUDGET_USD" as const, value })),
+  ];
+  for (const invalid of invalidLimits) {
+    delete process.env.SESORI_REVIEW_MAX_TURNS;
+    delete process.env.SESORI_REVIEW_MAX_BUDGET_USD;
+    process.env[invalid.name] = invalid.value;
+    const warmAttempt = lifecycle();
+    assert.throws(() => warmAttempt.provider.prepare(warmArgs(allowBoundary("invalid"))), new RegExp(invalid.name));
+    assert.equal(warmAttempt.warmCalls.length, 0);
+    const coldAttempt = lifecycle();
+    await assert.rejects(coldAttempt.provider.start({ ...warmArgs(allowBoundary("invalid")), baseRecord }), new RegExp(invalid.name));
+    assert.equal(coldAttempt.coldQueries.length, 0);
+  }
+  process.env.SESORI_REVIEW_MAX_TURNS = "3";
+  process.env.SESORI_REVIEW_MAX_BUDGET_USD = "0.05";
+  const validWarm = lifecycle();
+  validWarm.provider.prepare(warmArgs(allowBoundary("valid")));
+  assert.equal(validWarm.warmCalls[0].options.maxTurns, 3);
+  assert.equal(validWarm.warmCalls[0].options.maxBudgetUsd, 0.05);
+  validWarm.warmCalls[0].pending.resolve(new FakeWarm());
+  await Promise.resolve();
+  validWarm.provider.dispose();
+  const validCold = lifecycle();
+  const validSession = await validCold.provider.start({ ...warmArgs(allowBoundary("valid")), baseRecord });
+  assert.equal(validCold.coldOptions[0].maxTurns, 3);
+  assert.equal(validCold.coldOptions[0].maxBudgetUsd, 0.05);
+  validSession.close();
+} finally {
+  if (priorLimits.turns === undefined) delete process.env.SESORI_REVIEW_MAX_TURNS;
+  else process.env.SESORI_REVIEW_MAX_TURNS = priorLimits.turns;
+  if (priorLimits.budget === undefined) delete process.env.SESORI_REVIEW_MAX_BUDGET_USD;
+  else process.env.SESORI_REVIEW_MAX_BUDGET_USD = priorLimits.budget;
+}
+
 // Same immutable options rebind boundary; changed model replaces pending warm and stale resolution cannot win.
 const cached = lifecycle();
 const firstBoundary = allowBoundary("first"), reboundBoundary = allowBoundary("rebound");

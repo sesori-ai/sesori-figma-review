@@ -51,8 +51,9 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   metadata, representative schema cases and source-audited legacy catalog reuse;
   warm settings/boundary identity, replacement/consume/cold fallback/dispose/stale fencing; serialized settings,
   rollback and fail-closed behavior; init MCP fallback; safe UUID transcript projection; normalized stream identity;
-  cumulative response/per-turn usage; and invalid/recovered immutable cost. No legacy wire/UI/session schema changed;
-  no paid/native turn was run for deterministic dormant-adapter fixes.
+  cumulative response/per-turn usage; invalid/recovered immutable cost; and fail-closed optional turn/budget limits
+  before native dispatch. No legacy wire/UI/session schema changed; no paid/native turn was run for deterministic
+  dormant-adapter fixes.
 
 ## Qualification gates before user-facing Codex exposure
 
@@ -77,26 +78,14 @@ and adds artifact verification without changing provider architecture. Do not de
 approved by the subagent. Closed PR #2 review findings remain obligations for Step 3 activation; neither its revised
 code nor this replacement foundation has a new architecture-approval claim.
 
-PR #3 current-head findings and local dispositions:
+PR #3's authoritative resolved-finding record is its
+[inline review discussion](https://github.com/sesori-ai/sesori-figma-review/pull/3); focused tests and Git history
+preserve implementation proof without duplicating every reply here. Two deliberate non-actionable dispositions remain:
 
-| Review comment IDs | Disposition |
-| --- | --- |
-| 3981475303, 3981525719, 3982209348 | Fixed at warm-entry identity: immutable file/dir/settings match, safely rebound boundary delegate, stale consumed/replaced/disposed results fenced; sync close failures handled and consume-throw resource closed before cold fallback; completed prepare error clears only at owned no-warm retry, with readiness left to initialized output; mocked lifecycle paths covered. |
-| 3981475321, 3981525731 | Fixed: session-owned effective settings, serialized updates, rollback after partial failure, fail-closed session on rollback failure; closed send rejects and closed interrupt settles without native control; Stop stays independent. |
-| 3981475312, 3981525775 | Fixed: normalized init MCP snapshot survives refresh rejection and failure is logged. |
-| 3981525724, 3981525785 | Fixed: UUID-only native IDs before path construction; one SDK-free transcript leaf serves legacy wrapper and adapter, preserving filtering/interruption/trailing lines. |
-| 3981525740, 3982209342 | Fixed: invalid native cost preserves known amount unavailable; valid cumulative value is exact base+native while explicit fresh/resume provenance retains reported/estimated/unavailable historical confidence. |
-| 3981525759 | Fixed: released descriptions and hints restored exactly; representative schemas tested and legacy catalog reuse source-audited through unchanged old tool/reply flow. |
-| 3981834685 | Fixed: copied allow-list joins warm immutable key and same operation snapshot feeds options; real fixture edits replace prepare cache and force current cold start. |
-| 3981834697 | Fixed: one active-turn identity makes idle/failed/late Stop safe and clears old ownership before result yields; native starts and suspended iterator covered. |
-| 3981834703 | Fixed: MCP refresh has cleaned 1s deadline; timeout keeps init fallback, does not block following output, and safely observes late rejection. |
-| 3981805798 | Fixed: ordinary native user array text projects with context stripping; mixed image/non-question tool result stays hidden. |
-| 3981805806 | Fixed: proof wording limited to exact descriptions, selected metadata, representative schemas and source audit. |
-| 3981805787 | Declined with parent native evidence: inspected 13 app-scoped JSONL transcripts contain no native `result` rows; persisted assistant text is already projected. No synthetic format invented pending an actual supported native shape. |
-| 3982009538, 3982069529 | Fixed: repeated Stop is idempotent while active turn already carries interruption intent; first failure still clears for retry. |
-| 3982069514 | Declined: exact allow-list order is conservative native-input invalidation; safe close behavior is proven and no latency evidence warrants semantic normalization. |
-| 3981525734 | Fixed: narrow injectable Claude-native factory; mocked prepare/start/session iteration, lifecycle, MCP and settings paths; owned temp roots auto-clean. |
-| 3981525766, 3981525781 | Fixed: usage/cost documented as replacement cumulative session snapshots; transport/native-session qualification refs corrected to Steps 4/5. |
+- `3981805787`: inspected native app-scoped JSONL evidence had no `result` rows; persisted assistant text is already
+  projected. No unsupported synthetic history shape was invented.
+- `3982069514`: exact allow-list order intentionally remains conservative native-option identity; safe replacement
+  cleanup is proven and no latency evidence warrants semantic normalization.
 
 ## Retirement
 
