@@ -9,7 +9,7 @@ process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "claude-config-"));
 const { installPlugin, readAllow, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
 const { addClaudeUsage, ClaudeCostTracker, ClaudeDisplayMapper, ClaudeUsageTracker, readClaudeTranscript } = await import("./providers/claude.ts");
 const { FIGMA_TOOLS } = await import("./figma-tools.ts");
-const { isOwnedByFile, isRegisteredFileSocket } = await import("./conversation-owner.ts");
+const { applyForCurrentConversation, isOwnedByFile, isRegisteredFileSocket } = await import("./conversation-owner.ts");
 
 assert.deepEqual(FIGMA_TOOLS.map(tool => tool.name), ["get_flow", "get_screen", "focus", "annotate", "ask_user"]);
 assert.ok(FIGMA_TOOLS.every(tool => tool.description && tool.schema), "providers share neutral Figma descriptions and validated schemas");
@@ -21,6 +21,37 @@ assert.equal(isOwnedByFile({ resource: startingInA, fileId: "file-a" }), true, "
 const registeredSocket = {}, replacedSocket = {};
 assert.equal(isRegisteredFileSocket({ registeredSocket, requestSocket: replacedSocket }), false, "replaced socket cannot control current file");
 assert.equal(isRegisteredFileSocket({ registeredSocket, requestSocket: registeredSocket }), true);
+const settingsTarget = {}, settingsReplacement = {};
+let currentSettingsTarget: object | undefined = settingsTarget, releaseSettings!: () => void, settingsCommitted = false;
+const delayedSettings = applyForCurrentConversation({
+  captured: settingsTarget,
+  current: () => currentSettingsTarget,
+  apply: () => new Promise<void>(resolve => { releaseSettings = resolve; }),
+  commit: () => { settingsCommitted = true; },
+  onStaleError: () => assert.fail("successful stale settings apply is not an error"),
+});
+currentSettingsTarget = settingsReplacement;
+releaseSettings();
+await delayedSettings;
+assert.equal(settingsCommitted, false, "settings completion cannot mutate replacement conversation");
+settingsCommitted = false;
+currentSettingsTarget = settingsTarget;
+await applyForCurrentConversation({
+  captured: settingsTarget,
+  current: () => currentSettingsTarget,
+  apply: async () => {},
+  commit: () => { settingsCommitted = true; },
+  onStaleError: () => assert.fail("current settings apply must not be stale"),
+});
+assert.equal(settingsCommitted, true, "current settings apply commits to captured conversation");
+currentSettingsTarget = undefined;
+await assert.doesNotReject(applyForCurrentConversation({
+  captured: settingsTarget,
+  current: () => currentSettingsTarget,
+  apply: async () => { throw new Error("closed while applying"); },
+  commit: () => assert.fail("closed target cannot commit"),
+  onStaleError: () => {},
+}), "settings rejection after close is fenced");
 const manifest = installPlugin(); // needs a plugin build; tolerate its absence so `check` also runs before `build`
 if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"') && readFileSync(join(process.env.SESORI_REVIEW_HOME, "plugin/dist/ui.html"), "utf8").includes("Sesori Review"), "plugin is copied next to the workspaces");
 

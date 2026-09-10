@@ -1,7 +1,7 @@
 // Wire protocol between the Figma plugin (WebSocket client) and the bridge (WebSocket server).
 // Both packages import this file directly; there is no build step for it.
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const BRIDGE_PORT = 3055;
 export const FIGMA_MCP_URL = "http://127.0.0.1:3845/mcp";
 
@@ -97,7 +97,7 @@ export type UpMsg =
       selection: NodeRef[];
     }
   | { kind: "user"; text: string; selection: NodeRef[] }
-  | { kind: "open"; fileId: string; fileName: string; session: SessionRef }
+  | { kind: "open"; intentId: string; fileId: string; fileName: string; session: SessionRef }
   | { kind: "reply"; id: string; result: ToolResult | PermissionDecision }
   | { kind: "interrupt" }
   | { kind: "close"; reason: string }
@@ -107,9 +107,10 @@ export type UpMsg =
 // ---- bridge -> plugin -------------------------------------------------------
 
 export type DownMsg =
+  | { kind: "connection"; protocolVersion: number; intentId?: string; session?: SessionRecord; busy: boolean }
   | { kind: "health"; health: Health }
   | { kind: "sessions"; sessions: SessionRecord[] }
-  | { kind: "history"; session: SessionRecord; messages: HistoryItem[]; attached: boolean }
+  | { kind: "history"; intentId: string; session: SessionRecord; messages: HistoryItem[]; attached: boolean }
   | { kind: "started"; intentId: string; session: SessionRecord }
   | { kind: "session"; session: SessionRecord }
   | { kind: "tool"; id: string; tool: string; args: Record<string, unknown> }

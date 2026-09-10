@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/bridge.ts",
-    "check": "tsc --noEmit && tsx src/selfcheck.ts",
+    "check": "tsc --noEmit && tsx src/selfcheck.ts && node smoke-policy.check.mjs",
     "smoke": "node smoke.mjs",
     "build": "esbuild src/bridge.ts --bundle --platform=node --format=esm --packages=external --banner:js='#!/usr/bin/env node' --outfile=dist/bridge.mjs --log-level=warning && chmod +x dist/bridge.mjs"
   },

@@ -58,7 +58,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   `ask_user` → interrupted turn → same-session `focus` follow-up, live tokens while busy, stable confirmed cost,
   started-block text accumulation, and two final turns: 34,487 tokens, positive $0.0241 cost. Owned fixture removed.
 - Parent's cumulative Messages API usage correction from `1ed1e9d` remains: nonzero initial output, repeated deltas,
-  and multiple responses reconcile per response. Installed SDK 0.3.260 types state `result.usage` is per-turn while
+  and multiple responses reconcile per response. Lock-resolved SDK 0.3.263 types state `result.usage` is per-turn while
   `total_cost_usd` is query-cumulative. Final native three-result fixture observed independent per-turn totals whose
   sum exactly matched persisted usage; immutable resume-baseline fixtures cover both usage and cumulative cost.
 - Final bounded Haiku/low smoke on isolated port 43067 proved healthy-client survival after an old-protocol reconnect,
@@ -70,9 +70,20 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   cancellation from browsing the History list to choosing an actual row, preserving browse/dismiss/continue, and
   replaced global numeric start generation with one `{ fileId, intentId }` reservation. New/History close now affects
   only the registered socket's own active/pending file; file B cannot stop file A, while own-file close still cancels.
-  Focused view/ownership checks pass; no extra paid smoke was needed because native boundaries were unchanged.
-- PR feedback repairs and ordinary-flow fixtures bring Step 2 to 1,938 changed lines, 438 above the accepted
-  1,500 soft cap. Splitting would publish the provider seam
+  Focused view/ownership checks passed; no extra paid smoke was needed for that boundary-only correction.
+- Latest review consolidated connection/view reconciliation under the same ephemeral intent owner. Protocol v3 adds
+  one validated connection snapshot: old plugin v1/v2 gets safe bridge rejection, legacy/malformed old-bridge messages
+  produce actionable plugin guidance before UI effects, reconnect cancels cards/orphaned queued starts without paid
+  replay, and fresh plugin instances attach the authoritative active/idle session. History requests carry that same
+  transient intent identity, so late responses cannot steal a newer view. Settings completion is captured-owner fenced.
+- `npm run smoke -w bridge` now always launches its own bundled bridge with an in-worktree isolated home, free port,
+  Haiku/low, four-turn/$0.10 limits and cleanup; it has no external-target mode. Policy tests reject normal/external
+  homes and binaries. Final default owned smoke passed with v1/v2 rejection, prior lifecycle assertions, 33,448
+  persisted tokens and $0.022557 reported cost; owned fixture/process cleanup was verified. First post-v3 run timed out only because final idle proof still awaited removed
+  `busy` replay; fixture cleanup succeeded, assertion now reads authoritative connection snapshot, and rerun passed.
+- PR feedback repairs and ordinary-flow fixtures bring Step 2 to 2,323 changed lines, 823 above the accepted
+  1,500-line soft cap. Latest growth is protocol/reconnect safety plus mandatory self-contained smoke isolation;
+  moving either implementation or its focused proof would publish an unsafe intermediate. Splitting would publish the provider seam
   with known activity, view/card, accounting, warm-start, handshake, parser, catalog, display, or smoke regressions,
   so the coherent repair stays with its proof rather than shipping a broken intermediary.
 
@@ -109,10 +120,17 @@ validated locally. PR #2 automated feedback produced the consolidated dispositio
 | 3980456864, 3980527945 | Fixed: missing Codex is provider-scoped; live Claude health is not globally failed. |
 | 3980528015 | Fixed: settings diff by provider; no-op/unrelated changes do not dispose/re-prewarm Claude. |
 | 3980456871, 3980527936, 3980527887 | Fixed together: ephemeral start intent owns confirmation/queue; stale start/session and History cannot drain wrong input. |
-| 3980527918 | Fixed: one New/History view-leave path cancels cards and closes native conversation/start intent. |
+| 3980527918 | Fixed: actual New/History-row replacement cancels cards/native ownership; browsing/dismissing list preserves session. |
 | 3980527926 | Fixed: immutable usage/cost baselines; SDK/native per-turn usage and cumulative cost proven. |
 | 3980527845 | Fixed: warm entry identity fences replaced callbacks; dispose resets runtime truthfully. |
 | 3980527897 | Fixed: protocol validates/rejects directly before healthy client replacement. |
+| 3980959989, 3980960008, 3980974613 | Fixed: protocol v3 connection ack plus guarded inbound decoding gives safe bidirectional mismatch guidance. |
+| 3980960002, 3980960012, 3980974625, 3980960024 | Fixed together: snapshot reconciles cards, orphaned startup, queue cancellation, busy state, and fresh-plugin attach under one intent/view owner. |
+| 3980974673 | Fixed: History open/response reuse ephemeral intent identity; superseded response is discarded. |
+| 3980974649 | Fixed: apply-settings completion/error commits only to captured current conversation. |
+| 3980974662 | Fixed: smoke owns isolated bridge/home/port and bounded settings; policy rejects normal/external targets. |
+| 3980974679 | Fixed: removed stale patch pin; evidence names lock-resolved SDK 0.3.263. |
+| 3980974690 | Fixed: tautological History-toggle assertion removed; browse/dismiss wiring is code-audited, not claimed as DOM/Figma execution. |
 | 3980527811 | Fixed: provider tag validates before malformed-record filtering. |
 | 3980527957 | Fixed: exported neutral Figma descriptions and Zod schemas feed Claude and next Codex adapter. |
 | 3980527987 | Fixed: per-response text-block indices suppress unmatched non-text `text_end`. |

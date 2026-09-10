@@ -48,7 +48,7 @@ const sumUsage = (left: Usage, right: Usage): Usage => ({
 });
 
 /** Live stream values are provisional per turn; final result usage commits once without double counting. */
-/** Installed SDK 0.3.260 declares result.usage per-turn for streaming-input sessions. */
+/** SDK contract: result.usage is per-turn for streaming-input sessions. */
 export class ClaudeUsageTracker {
   private turn = zeroUsage();
   private response = zeroUsage();

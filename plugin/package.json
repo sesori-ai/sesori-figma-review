@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "check": "tsc --noEmit && tsx src/sandbox.check.ts && tsx src/ui-events.check.ts && tsx src/view-control.check.ts"
+    "check": "tsc --noEmit && tsx src/sandbox.check.ts && tsx src/ui-events.check.ts && tsx src/view-control.check.ts && tsx src/wire.check.ts"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.138.0",

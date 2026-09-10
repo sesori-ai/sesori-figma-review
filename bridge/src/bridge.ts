@@ -15,7 +15,7 @@ import {
   type ToolResult,
   type UpMsg,
 } from "../../shared/protocol.ts";
-import { isOwnedByFile, isRegisteredFileSocket, type FileOwned } from "./conversation-owner.ts";
+import { applyForCurrentConversation, isOwnedByFile, isRegisteredFileSocket, type FileOwned } from "./conversation-owner.ts";
 import { ClaudeProvider } from "./providers/claude.ts";
 import type { ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
 import { hasClaudeAuth, installPlugin, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
@@ -290,10 +290,15 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
       clients.set(message.fileId, ws);
       ws.fileId = message.fileId;
       const dir = workspaceFor(message.fileId, message.fileName);
-      send(message.fileId, { kind: "sessions", sessions: readSessions(dir) });
       const mine = conv?.fileId === message.fileId;
-      if (mine) send(message.fileId, { kind: "session", session: conv!.record });
-      send(message.fileId, { kind: "busy", busy: mine ? conv!.busy : false });
+      send(message.fileId, {
+        kind: "connection",
+        protocolVersion: PROTOCOL_VERSION,
+        intentId: mine ? conv!.intentId : undefined,
+        session: mine ? conv!.record : undefined,
+        busy: mine ? conv!.busy : false,
+      });
+      send(message.fileId, { kind: "sessions", sessions: readSessions(dir) });
       const settings = readSettings();
       const selected = providers[settings.provider];
       if (selected) prepareProvider({ provider: selected, fileId: message.fileId, dir, settings: settings.providers[settings.provider] });
@@ -307,7 +312,7 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
       const attached = conv?.record.provider === message.session.provider && conv.record.sessionId === message.session.sessionId;
       const provider = providers[session.provider];
       if (!provider) return send(message.fileId, { kind: "error", message: `${session.provider} is unavailable; cannot read its native history.` });
-      return send(message.fileId, { kind: "history", session: attached ? conv!.record : session, messages: provider.readHistory({ dir, sessionId: session.sessionId }), attached });
+      return send(message.fileId, { kind: "history", intentId: message.intentId, session: attached ? conv!.record : session, messages: provider.readHistory({ dir, sessionId: session.sessionId }), attached });
     }
     case "user":
       if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or open one from History." });
@@ -338,9 +343,17 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
       const changed = (["claude", "codex"] as const).filter(provider =>
         !sameProviderSettings(previous.providers[provider], message.settings.providers[provider]));
       saveSettings(message.settings);
-      if (conv && changed.includes(conv.record.provider)) {
-        await conv.session.applySettings({ settings: message.settings.providers[conv.record.provider] });
-        if (conv.health) conv.health = { ...conv.health, model: message.settings.providers[conv.record.provider].model || conv.health.model };
+      const target = conv;
+      if (target && changed.includes(target.record.provider)) {
+        await applyForCurrentConversation({
+          captured: target,
+          current: () => conv,
+          apply: () => target.session.applySettings({ settings: message.settings.providers[target.record.provider] }),
+          commit: () => {
+            if (target.health) target.health = { ...target.health, model: message.settings.providers[target.record.provider].model || target.health.model };
+          },
+          onStaleError: error => log("ignored settings result for replaced session", String(error)),
+        });
       }
       const dir = ws.fileId ? workspaceFor(ws.fileId, "Figma file") : undefined;
       for (const providerId of changed) {
@@ -360,9 +373,22 @@ async function onUp(ws: WebSocket & { fileId?: string; protocolOk?: boolean }, m
   }
 }
 
+function decodeUp(raw: unknown): UpMsg | undefined {
+  let value: unknown;
+  try { value = JSON.parse(String(raw)); } catch { return; }
+  if (!value || typeof value !== "object" || !("kind" in value) || typeof value.kind !== "string") return;
+  if (value.kind === "hello" && (!("protocolVersion" in value) || typeof value.protocolVersion !== "number"
+    || !("fileId" in value) || typeof value.fileId !== "string" || !("fileName" in value) || typeof value.fileName !== "string")) return;
+  return value as UpMsg;
+}
+
 new WebSocketServer({ port, host: "127.0.0.1" }).on("connection", (ws: WebSocket & { fileId?: string; protocolOk?: boolean }) => {
   log("plugin connected");
-  ws.on("message", raw => { onUp(ws, JSON.parse(String(raw)) as UpMsg).catch(error => { if (ws.fileId) send(ws.fileId, { kind: "error", message: String(error) }); }); });
+  ws.on("message", raw => {
+    const message = decodeUp(raw);
+    if (!message) { ws.send(JSON.stringify({ kind: "error", message: "Malformed plugin message" } satisfies DownMsg)); return ws.close(); }
+    onUp(ws, message).catch(error => { if (ws.fileId) send(ws.fileId, { kind: "error", message: String(error) }); });
+  });
   ws.on("close", () => {
     if (ws.fileId && clients.get(ws.fileId) === ws) clients.delete(ws.fileId);
     for (const [id, request] of pending) if (request.ws === ws) { pending.delete(id); request.resolve(request.onDrop); }

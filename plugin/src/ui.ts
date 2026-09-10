@@ -4,6 +4,7 @@ import { marked } from "marked";
 import { BRIDGE_PORT, PROTOCOL_VERSION, type Anchor, type DownMsg, type Health, type NodeRef, type PermissionDecision, type ReviewEvent, type SessionRecord, type SessionRef, type Settings, type UpMsg } from "../../shared/protocol.ts";
 import { eventBelongsToSession, providerSettingOptions, sessionCostLabel } from "./ui-events.ts";
 import { ConversationView } from "./view-control.ts";
+import { decodeBridgeMessage } from "./wire.ts";
 
 declare const __VERSION__: string; // injected by build.mjs from package.json
 const md = (s: string) => marked.parse(s.replace(/</g, "&lt;"), { async: false }) as string; // raw HTML from the model is shown as text
@@ -18,6 +19,7 @@ let sessions: SessionRecord[] = [];
 let pendingAsk: { id: string; answer: (text: string) => void; cancel: (reason?: string) => void } | undefined;
 let opened: SessionRecord | undefined; // session shown via History → Open but not yet resumed
 let health: Health | undefined;
+let protocolReady = false;
 let intentCounter = 0;
 const view = new ConversationView();
 const items = new Map<string, { element: HTMLElement; markdown: string }>();
@@ -74,19 +76,58 @@ window.onmessage = (e: MessageEvent) => {
 function connect() {
   ws = new WebSocket(`ws://localhost:${BRIDGE_PORT}`);
   ws.onopen = () => {
-    offline.remove(); setStatus("connected to bridge", "warn"); send({ kind: "hello", protocolVersion: PROTOCOL_VERSION, fileId: ctx.fileId, fileName: ctx.fileName });
-    const current = view.session;
-    if (current?.sessionId) send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: current.provider, sessionId: current.sessionId } }); // bridge restarted mid-conversation
+    protocolReady = false;
+    offline.remove(); setStatus("checking bridge protocol…", "warn");
+    send({ kind: "hello", protocolVersion: PROTOCOL_VERSION, fileId: ctx.fileId, fileName: ctx.fileName });
   };
-  ws.onclose = () => { chat.prepend(offline); setStatus("bridge offline", "bad"); setTimeout(connect, 2000); };
+  ws.onclose = () => {
+    protocolReady = false;
+    view.disconnect({ reason: "Bridge disconnected" });
+    pendingAsk = undefined; footer.hidden = false; renderBusy(false);
+    chat.prepend(offline); setStatus("bridge offline", "bad"); setTimeout(connect, 2000);
+  };
   ws.onerror = () => {};
-  ws.onmessage = e => onDown(JSON.parse(e.data));
+  ws.onmessage = e => {
+    let raw: unknown;
+    try { raw = JSON.parse(e.data); } catch { return protocolMismatch(); }
+    const message = decodeBridgeMessage(raw);
+    if (!message || (!protocolReady && message.kind !== "connection")) return protocolMismatch();
+    onDown(message);
+  };
 }
 const send = (m: UpMsg) => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
 function setStatus(text: string, level: "ok" | "warn" | "bad") { statusEl.textContent = text; dot.className = `dot ${level}`; }
+function protocolMismatch() {
+  drift.textContent = `Plugin protocol ${PROTOCOL_VERSION} cannot use this bridge. Update with ${INSTALL}@latest, restart the bridge, then refresh the plugin in Figma.`;
+  if (!drift.isConnected) chat.prepend(drift);
+  setStatus("plugin/bridge protocol mismatch", "bad");
+  ws?.close();
+}
+function renderBusy(busy: boolean) {
+  stopBtn.hidden = !busy; $("btn-flow").hidden = busy;
+  if (busy) { empty.remove(); chat.append(working); chat.scrollTop = chat.scrollHeight; } else working.remove();
+}
 
 function onDown(m: DownMsg) {
   switch (m.kind) {
+    case "connection": {
+      protocolReady = true;
+      drift.remove();
+      const previous = view.session;
+      const reconciled = view.reconcile({ intentId: m.intentId, session: m.session });
+      notifyCancelled(reconciled.cancelled.length);
+      if (m.session?.sessionId) renderCost(m.session);
+      for (const queued of reconciled.queued) send({ kind: "user", ...queued });
+      renderBusy(m.busy);
+      setStatus("connected to bridge", "warn");
+      if (!m.session && !m.intentId && previous?.sessionId) {
+        const intentId = `history-${Date.now().toString(36)}-${++intentCounter}`;
+        const session = { provider: previous.provider, sessionId: previous.sessionId };
+        view.beginHistory({ intentId, session });
+        send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session });
+      }
+      return;
+    }
     case "health": return renderHealth(m.health);
     case "sessions": sessions = m.sessions; if (!sessionsEl.hidden) renderSessions(); return;
     case "started": {
@@ -102,7 +143,7 @@ function onDown(m: DownMsg) {
     case "permission": return permissionCard(m.id, m.tool, m.input);
     case "cancel_request": view.cancelCard({ id: m.id, reason: m.reason }); return;
     case "event": return onEvent(m.event);
-    case "busy": stopBtn.hidden = !m.busy; $("btn-flow").hidden = m.busy; if (m.busy) { empty.remove(); chat.append(working); chat.scrollTop = chat.scrollHeight; } else { working.remove(); } return;
+    case "busy": renderBusy(m.busy); return;
     case "error": if (view.starting) notifyCancelled(view.leave({ reason: "Start failed" }).length); bubble("error", m.message); return;
   }
 }
@@ -202,8 +243,11 @@ function renderSessions() {
     title.append(el("b", "", s.title), el("span", "", `${provider} · ${s.pageName} · ${s.updatedAt.slice(0, 16).replace("T", " ")} · ${cost} · ${s.turns} turn${s.turns === 1 ? "" : "s"}`));
     row.append(title, btn("Open", () => {
       leaveView("Opened a History session");
+      const intentId = `history-${Date.now().toString(36)}-${++intentCounter}`;
+      const session = { provider: s.provider, sessionId: s.sessionId };
+      view.beginHistory({ intentId, session });
       sessionsEl.hidden = true;
-      send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: s.provider, sessionId: s.sessionId } });
+      send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session });
     }));
     sessionsEl.append(row);
   }
@@ -235,7 +279,7 @@ function start(anchor: Anchor, text: string, resume?: SessionRef) {
 }
 /** History → Open: show the past conversation; the session itself is resumed by the next message. */
 function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
-  if (!view.showHistory(m.session)) return;
+  if (!view.confirmHistory({ intentId: m.intentId, session: m.session })) return;
   clearChat();
   renderCost(m.session);
   opened = m.attached ? undefined : m.session;
