@@ -35,7 +35,8 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - `npm ci`, `npm run check`, `npm run build`, and `git diff --check` pass in the supplied worktree.
 - Real Claude smoke passed with existing authorized sign-in, Haiku/low, synthetic focus request, three-turn and $0.10
   SDK bounds, isolated `SESORI_REVIEW_HOME`, and override port 43059. Result: one normalized streamed response, shared
-  `focus` tool round trip, persisted provider/cost provenance, 22,604 tokens and positive $0.0046 reported cost.
+  `focus` tool round trip, persisted provider/cost provenance, 22,605 tokens and positive $0.0046 reported cost on
+  final integrated head (port 43060).
 - Isolated startup/plugin-copy/protocol-mismatch fixture passed on port 43058. Port 3055 was already occupied and untouched.
   Owned fixture homes, logs, and bridge processes were removed. No login/global config was changed or copied.
 - User explicitly authorized bounded existing Claude/Codex sign-ins and acknowledged Claude API charges for remaining
