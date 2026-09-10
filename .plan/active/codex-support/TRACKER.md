@@ -1,13 +1,15 @@
 # Codex support tracker
 
 Plan: [PLAN.md](PLAN.md). Scope: full user-facing parity on Claude and Codex; Codex-native sandboxed file/command
-access approved. The user requested publication and monitoring of the plan PR; implementation is not started.
+access approved. The user authorized executing the whole series: automatically squash-merge each PR once ready
+for human review and continue without waiting for manual merges. Full verification and parity gates still apply.
+Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 ## Fixed PR series
 
 | Step | Exact title | State |
 | --- | --- | --- |
-| 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/7] | Plan prepared for PR; initial architecture review approved |
+| 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/7] | PR #1 open and monitored; initial architecture review approved |
 | 2 | 🚧 [codex-support] Isolate Claude behind normalized review contracts [step 2/7] | Not started |
 | 3 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 3/7] | Not started |
 | 4 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 4/7] | Not started |

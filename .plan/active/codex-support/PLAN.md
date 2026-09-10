@@ -1,7 +1,8 @@
 # Codex support — full user-facing parity
 
-Status: Plan ready for PR; initial architecture review approved. Planning only; implementation is not authorized
-by this document. The subsequent packaging-baseline reconciliation is recorded below.
+Status: Plan PR open; initial architecture review approved. The user has authorized execution of the entire series,
+automatic squash merges at ready-for-human-review, and continuation without waiting for manual merges. The
+subsequent packaging-baseline reconciliation is recorded below.
 
 ## Goal and locked user direction
 
@@ -22,6 +23,13 @@ is `codex-support-plan`. Do not create another worktree. Keep the existing root 
 Planning procedure: reuse `sesori-plan-maker` from `sesori_apps_monorepo/.agents/skills/`; implementation handoff
 uses `sesori-plan-worker`. Borrow their planning, review, and regression-proof principles, not the unrelated
 Dart/Flutter workspace layout or mandatory monorepo layers.
+
+Execution authorization: for this series, the user's latest instruction overrides the previous human-only merge
+rule. Automatically squash-merge each PR when its current head is ready for human review, then continue to the next
+step until the plan is completed. Monitor every PR; keep checks, feedback and mergeability current and use the
+reviewed head when merging. Do not bypass protection or merge after a readiness regression. Keep at most one PR open
+and one local successor in progress. Full-parity, security and retirement gates remain mandatory; a genuine missing
+capability, unavailable test access or required user decision is a blocker, not permission to weaken those gates.
 
 ## Current implementation and evidence
 
@@ -317,7 +325,8 @@ reproducible inspection against the qualified schema. No hand edits to generated
 - **Risk and test focus:** Full authoritative user journeys, native file policy, restart/recovery, accounting and
   no-provider regressions. Missing infrastructure is Blocked/Partial, never Pass.
 - **Expected result:** No new runtime or database behavior; verified parity evidence and retired plan, or an honest
-  active plan naming exact failures/blocked targets. Only the user merges PRs; this plan does not open one itself.
+  active plan naming exact failures/blocked targets. Automatically squash-merge ready PRs and continue under the
+  user's explicit series authorization above.
 
 ## Verification and retirement contract
 
