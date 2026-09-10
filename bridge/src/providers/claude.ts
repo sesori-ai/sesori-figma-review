@@ -509,6 +509,10 @@ export class ClaudeProvider implements ReviewProvider {
     };
   }
 
+  private notifyPrepared() {
+    try { this.args.onPrepared(); }
+    catch (error) { this.args.log("Claude readiness notification failed", error); }
+  }
   private closeResolvedWarm(query: NativeWarmQuery, reason: string) {
     try { query.close(); }
     catch (error) { this.args.log(`${reason}: failed to close warm query`, error); }
@@ -544,12 +548,12 @@ export class ClaudeProvider implements ReviewProvider {
     entry.query.then(() => {
       if (this.warm !== entry || this.runtime?.owner !== entry) return;
       this.runtime = { owner: entry, prepared: true };
-      this.args.onPrepared();
+      this.notifyPrepared();
     }, error => {
       if (this.warm !== entry || this.runtime?.owner !== entry) return;
       this.runtime = { owner: entry, error: `Claude failed to start: ${error instanceof Error ? error.message : String(error)}` };
       this.warm = undefined;
-      this.args.onPrepared();
+      this.notifyPrepared();
     });
   }
 
@@ -570,7 +574,7 @@ export class ClaudeProvider implements ReviewProvider {
     if (this.runtime?.owner !== runtimeOwner) {
       const changedHealth = this.runtime?.prepared || this.runtime?.error;
       this.runtime = { owner: runtimeOwner };
-      if (changedHealth) this.args.onPrepared();
+      if (changedHealth) this.notifyPrepared();
     }
     if (warm && useWarm) {
       warm.delegate.current = args.boundary;
@@ -581,7 +585,7 @@ export class ClaudeProvider implements ReviewProvider {
         if (this.runtime?.owner === warm) {
           nativeQuery = resolved.query(input.stream);
           this.runtime = { owner: runtimeOwner, prepared: true };
-          this.args.onPrepared();
+          this.notifyPrepared();
         } else {
           this.closeResolvedWarm(resolved, "stale consumed warm query");
           this.args.log("discarded stale consumed warm query");
@@ -590,7 +594,7 @@ export class ClaudeProvider implements ReviewProvider {
         if (resolved) this.closeResolvedWarm(resolved, "unusable consumed warm query");
         if (this.runtime?.owner === runtimeOwner && (this.runtime.prepared || this.runtime.error)) {
           this.runtime = { owner: runtimeOwner };
-          this.args.onPrepared();
+          this.notifyPrepared();
         }
         this.args.log("pre-warmed query unusable, starting cold", error);
       }
@@ -607,8 +611,7 @@ export class ClaudeProvider implements ReviewProvider {
     } catch (error) {
       if (ownsRuntime()) {
         this.runtime = { owner: runtimeOwner, error: `Claude failed to start: ${error instanceof Error ? error.message : String(error)}` };
-        try { this.args.onPrepared(); }
-        catch (notifyError) { this.args.log("Claude startup failure notification failed", notifyError); }
+        this.notifyPrepared();
       }
       input.push(null);
       throw error;
@@ -623,14 +626,14 @@ export class ClaudeProvider implements ReviewProvider {
       onInitialized: health => {
         if (!ownsRuntime()) return;
         this.runtime = { owner: runtimeOwner, prepared: true, version: health.version };
-        this.args.onPrepared();
+        this.notifyPrepared();
       },
       onClose: failure => {
         if (!ownsRuntime()) return;
         this.runtime = failure
           ? { owner: runtimeOwner, error: `Claude session failed: ${failure.cause instanceof Error ? failure.cause.message : String(failure.cause)}` }
           : undefined;
-        this.args.onPrepared();
+        this.notifyPrepared();
       },
       log: this.args.log,
     });
@@ -642,7 +645,7 @@ export class ClaudeProvider implements ReviewProvider {
     this.warm = undefined;
     this.runtime = undefined;
     if (warm) this.closeWarm(warm, "disposed warm query");
-    this.args.onPrepared();
+    this.notifyPrepared();
   }
 }
 

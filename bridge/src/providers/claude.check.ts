@@ -134,7 +134,7 @@ assert.equal(provider.health({ settings: { model: "haiku", effort: "low" } }).st
 type Native = NonNullable<ConstructorParameters<typeof ClaudeProvider>[0]["native"]>;
 type WarmCall = { options: Parameters<Native["warm"]>[0]["options"]; pending: ReturnType<typeof deferred<FakeWarm>> };
 const lifecycle = (args: {
-  messages?: unknown[]; coldError?: Error; streamError?: Error; closeError?: Error;
+  messages?: unknown[]; coldError?: Error; streamError?: Error; closeError?: Error; notifyError?: Error;
 } = {}) => {
   const warmCalls: WarmCall[] = [], coldQueries: FakeQuery[] = [];
   const coldOptions: Parameters<Native["cold"]>[0]["options"][] = [];
@@ -152,8 +152,9 @@ const lifecycle = (args: {
   };
   let callbacks = 0;
   const logs: unknown[][] = [];
+  const onPrepared = () => { callbacks++; if (args.notifyError) throw args.notifyError; };
   const provider = new ClaudeProvider({
-    version: "test", log: (...values) => logs.push(values), onPrepared: () => callbacks++, native,
+    version: "test", log: (...values) => logs.push(values), onPrepared, native,
   });
   return { provider, warmCalls, coldQueries, coldOptions, logs, callbacks: () => callbacks };
 };
@@ -330,14 +331,17 @@ assert.throws(() => beforeInitSession.send({ text: "closed", selection: [] }), /
 await assert.rejects(beforeInitSession.applySettings({ settings: { model: "sonnet", effort: "low" } }), /session is closed/);
 
 const afterInitError = new Error("stream failed after init"), cleanupError = new Error("cleanup failed");
-const afterInitFailure = lifecycle({ messages: [nativeInit], streamError: afterInitError, closeError: cleanupError });
+const afterInitFailure = lifecycle({ messages: [nativeInit], streamError: afterInitError,
+  closeError: cleanupError, notifyError: new Error("observer failed") });
 const afterInitSession = await afterInitFailure.provider.start({ ...warmArgs(firstBoundary), baseRecord });
 const afterInitOutput = afterInitSession.output[Symbol.asyncIterator]();
 assert.equal((await afterInitOutput.next()).value?.kind, "initialized");
+assert.equal(afterInitFailure.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "ready");
 await assert.rejects(afterInitOutput.next(), error => error === afterInitError);
 assert.deepEqual([afterInitFailure.provider.health({ settings: { model: "haiku", effort: "low" } }).status,
   afterInitFailure.callbacks(), afterInitFailure.coldQueries[0].closes], ["unavailable", 2, 1]);
 assert.ok(afterInitFailure.logs.some(values => String(values[0]).includes("query cleanup failed")));
+assert.ok(afterInitFailure.logs.some(values => String(values[0]).includes("readiness notification failed")));
 
 const rejected = lifecycle();
 rejected.provider.prepare(warmArgs(firstBoundary));
@@ -346,31 +350,23 @@ rejected.warmCalls[0].pending.reject(new Error("startup failed"));
 await rejectedStart;
 assert.equal(rejected.coldQueries.length, 1, "failed consumed warm falls back cold");
 
-const failedPrepared = deferred<FakeWarm>();
-const retryQuery = new FakeQuery([nativeInit, nativeResult]);
-const retryNative: Native = { warm: () => failedPrepared.promise, cold: () => retryQuery };
-let retryCallbacks = 0;
-const retryProvider = new ClaudeProvider({
-  version: "test", log: () => {}, onPrepared: () => retryCallbacks++, native: retryNative,
-});
-retryProvider.prepare(warmArgs(firstBoundary));
-failedPrepared.reject(new Error("prepare failed"));
+const retry = lifecycle({ messages: [nativeInit, nativeResult] });
+retry.provider.prepare(warmArgs(firstBoundary));
+retry.warmCalls[0].pending.reject(new Error("prepare failed"));
 await Promise.resolve();
-assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "unavailable");
-assert.equal(retryCallbacks, 1);
-const retrySession = await retryProvider.start({ ...warmArgs(firstBoundary), baseRecord });
-assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting",
-  "owned cold retry clears completed prepare error without claiming readiness");
-assert.equal(retryCallbacks, 2);
+assert.deepEqual([retry.provider.health({ settings: { model: "haiku", effort: "low" } }).status, retry.callbacks()],
+  ["unavailable", 1]);
+const retrySession = await retry.provider.start({ ...warmArgs(firstBoundary), baseRecord });
+assert.equal(retry.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
+assert.equal(retry.callbacks(), 2);
 const retryIterator = retrySession.output[Symbol.asyncIterator]();
 const retryInitialized = (await retryIterator.next()).value;
 assert.equal(retryInitialized?.kind === "initialized" ? retryInitialized.health.status : undefined, "ready");
-assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "ready");
-assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).model, "haiku");
-assert.equal(retryCallbacks, 3, "owned cold init publishes provider readiness once");
+assert.equal(retry.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "ready");
+assert.equal(retry.callbacks(), 3, "owned cold init publishes provider readiness once");
 await retryIterator.return?.();
-assert.equal(retryProvider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
-assert.deepEqual([retryCallbacks, retryQuery.closes], [4, 1], "consumer return retires owned runtime once");
+assert.equal(retry.provider.health({ settings: { model: "haiku", effort: "low" } }).status, "starting");
+assert.deepEqual([retry.callbacks(), retry.coldQueries[0].closes], [4, 1], "consumer return retires owned runtime once");
 assert.throws(() => retrySession.send({ text: "closed", selection: [] }), /session is closed/);
 
 const consumeThrows = lifecycle();
@@ -530,6 +526,7 @@ await assert.rejects(failedStop, /interrupt failed/);
 const naturalTurnEnd = await naturalResult;
 assert.equal(naturalTurnEnd.value?.kind === "event" && naturalTurnEnd.value.event.type === "turn_end"
   ? naturalTurnEnd.value.event.outcome : undefined, "completed", "rejected concurrent Stop cannot rewrite natural result");
+await failedStopOutput.return?.();
 
 const duplicateStopQuery = new FakeQuery([nativeInit, nativeResult]);
 const duplicateStopSession = await sessionWith(duplicateStopQuery);
