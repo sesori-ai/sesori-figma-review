@@ -10,8 +10,8 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | Step | Exact title | State |
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
-| 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | PR #3 feedback fixed/verified locally; pending parent push and current-head review |
-| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Not started; coordinated activation from preserved checkpoint obligations |
+| 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Implemented and independently validated on local `codex-support-step-3`; awaiting parent review/publication |
 | 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
@@ -30,12 +30,15 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 ## Step 2 replacement foundation
 
-- Full implementation stays at `origin/codex-support-step-2` (`f7265eb`); superseded PR #2 was not merged.
+- Predecessor receipt confirmed: PR #3 squash-merged as `ece1379d6768ecc032d6f030933034007d357910`; Step 3 started from fetched `origin/master` at that commit.
+- Full older cutover reference stays at `origin/codex-support-step-2` (`f7265eb`); superseded PR #2 was not merged.
 - Dormant foundation adds normalized contracts, neutral tools and Claude tests; released bridge/workspace/selfcheck stay
   byte-identical to master, with catalog/history reuse adapter-only.
 - Step 3 retains all ownership, protocol, view, close, settings, accounting, smoke and qualification obligations below,
   plus exact legacy catalog/history adoption, legacy SDK removal and the UUID integration assertion.
-- Historical smokes used Claude Haiku/low, isolated homes/free ports and four-turn/$0.10 limits.
+- Step 3 live activation smoke used Claude Haiku/low, isolated home/free port and four-turn/$0.10 process limits.
+  It proved busy steering through a question card, Stop cancellation, idle reconnect, native history, and nonzero
+  cumulative usage/cost after resume through a recreated bridge/query process.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
 

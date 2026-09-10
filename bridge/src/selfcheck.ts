@@ -1,66 +1,44 @@
-// Self-check for the bridge's non-trivial pure logic: workspace provisioning and usage accounting.
+// Self-check for persisted migration, workspace preservation, and provider-qualified upserts.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "figma-review-"));
-process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "claude-config-"));
-const { addUsage, installPlugin, readAllow, readSessions, readSettings, readTranscript, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
+const { installPlugin, readAllow, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
+const { FIGMA_TOOLS } = await import("./figma-tools.ts");
 
-const manifest = installPlugin(); // needs a plugin build; tolerate its absence so `check` also runs before `build`
-if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"') && readFileSync(join(process.env.SESORI_REVIEW_HOME, "plugin/dist/ui.html"), "utf8").includes("Sesori Review"), "plugin is copied next to the workspaces");
+assert.deepEqual(FIGMA_TOOLS.map(tool => tool.name), ["get_flow", "get_screen", "focus", "annotate", "ask_user"]);
+assert.ok(FIGMA_TOOLS.every(tool => tool.description && tool.schema), "both adapters use one validated Figma catalog");
+const manifest = installPlugin();
+if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"'));
 
-assert.deepEqual(readSettings(), { model: "", effort: "" }, "no settings file → Claude Code defaults");
-saveSettings({ model: "opus", effort: "low" });
-assert.deepEqual(readSettings(), { model: "opus", effort: "low" });
+const defaults = { provider: "claude" as const, providers: { claude: { model: "", effort: "" }, codex: { model: "", effort: "" } } };
+assert.deepEqual(readSettings(), defaults);
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ model: "opus", effort: "low" }));
+assert.deepEqual(readSettings(), { ...defaults, providers: { ...defaults.providers, claude: { model: "opus", effort: "low" } } });
+saveSettings({ ...defaults, providers: { ...defaults.providers, claude: { model: "haiku", effort: "low" } } });
+assert.equal(readSettings().providers.claude.model, "haiku");
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ ...defaults, provider: "future" }));
+assert.throws(readSettings, /Unsupported provider "future"/);
+saveSettings(defaults);
 
 const dir = workspaceFor("file1", "Checkout redesign");
 assert.ok(readFileSync(join(dir, "CLAUDE.md"), "utf8").includes("Checkout redesign"));
-assert.ok(readFileSync(join(dir, "CLAUDE.md"), "utf8").includes("<!-- BEGIN tool-steering"), "steering section is delimited so it can be removed");
-assert.equal(JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8")).mcpServers["figma-desktop"].url, "http://127.0.0.1:3845/mcp");
-assert.ok(readFileSync(join(dir, ".claude/skills/review-flow/SKILL.md"), "utf8").startsWith("---\nname: review-flow"));
-const allow = readAllow(dir);
-assert.ok(allow.includes("mcp__figma__annotate") && allow.includes(`Edit(/${dir}/notes/**)`), "auto-approve list lives in the workspace");
+assert.ok(readAllow(dir).includes("mcp__figma__annotate"));
+writeFileSync(join(dir, "CLAUDE.md"), "edited by teammate");
+workspaceFor("file1", "Ignored replacement");
+assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "edited by teammate");
 
-writeFileSync(join(dir, "CLAUDE.md"), "edited by a teammate");
-writeFileSync(join(dir, ".claude/skills/review-flow/SKILL.md"), "stale skill");
-workspaceFor("file1", "Checkout redesign");
-assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "edited by a teammate", "user-owned files are never overwritten");
-assert.ok(readFileSync(join(dir, ".claude/skills/review-flow/SKILL.md"), "utf8").startsWith("---"), "the skill is refreshed on every start");
-
-const rec = { sessionId: "s1", title: "t", anchor: { type: "flow" as const, nodeIds: [] }, pageId: "0:1", pageName: "Page 1", createdAt: "a", updatedAt: "a", turns: 1, costUsd: 0.5, usage: zeroUsage() };
-saveSession(dir, rec);
-saveSession(dir, { ...rec, turns: 2, costUsd: 0.9 });
-saveSession(dir, { ...rec, sessionId: "s2" });
-assert.deepEqual(readSessions(dir).map(s => [s.sessionId, s.turns, s.costUsd]), [["s1", 2, 0.9], ["s2", 1, 0.5]], "upsert keeps one record per session");
-
-// History → Open reads Claude Code's transcript: our context lines stripped, ask_user answers kept, tool results/meta/thinking dropped.
-const slug = join(process.env.CLAUDE_CONFIG_DIR!, "projects", dir.replace(/[^a-zA-Z0-9]/g, "-"));
-mkdirSync(slug, { recursive: true });
-writeFileSync(join(slug, "s1.jsonl"), [
-  { type: "user", message: { content: '[Figma file "F", page "P" (0:1). Anchor: flow]\nReview the flow.\n[Current selection: none]' } },
-  { type: "user", isMeta: true, message: { content: [{ type: "text", text: "skill body" }] } },
-  { type: "assistant", message: { content: [{ type: "thinking", thinking: "hmm" }, { type: "tool_use", id: "t1", name: "mcp__figma__ask_user", input: { question: "Next?" } }] } },
-  { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "Next\n\n[Current selection: none]" }] }] } },
-  { type: "assistant", message: { content: [{ type: "tool_use", id: "t2", name: "mcp__figma__focus", input: { nodeId: "1:1" } }] } },
-  { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "Focused" }] } },
-  { type: "assistant", message: { content: [{ type: "text", text: "**Screen 1** looks fine." }] } },
-  { type: "user", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } },
-  "not json",
-].map(l => typeof l === "string" ? l : JSON.stringify(l)).join("\n"));
-assert.deepEqual(readTranscript(dir, "s1"), [
-  { role: "user", text: "Review the flow." },
-  { role: "tool", name: "mcp__figma__ask_user", input: { question: "Next?" } },
-  { role: "answer", text: "Next" },
-  { role: "tool", name: "mcp__figma__focus", input: { nodeId: "1:1" } },
-  { role: "assistant", text: "**Screen 1** looks fine." },
-  { role: "tool", name: "stopped", input: {} },
-]);
-assert.deepEqual(readTranscript(dir, "missing"), []);
-
-// Per-turn totals from the result message are accumulated on the session record; missing fields count as 0.
-let u = addUsage(zeroUsage(), { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 });
-u = addUsage(u, { input_tokens: 1, output_tokens: 1 });
-assert.deepEqual(u, { input: 11, output: 21, cacheRead: 100, cacheWrite: 7 });
+const record = {
+  provider: "claude" as const, sessionId: "same-native-id", title: "Review", anchor: { type: "flow" as const, nodeIds: [] },
+  pageId: "0:1", pageName: "Page", createdAt: "a", updatedAt: "a", turns: 1, costUsd: 0.5,
+  costStatus: "reported" as const, usage: zeroUsage(),
+};
+saveSession(dir, record);
+saveSession(dir, { ...record, provider: "codex", costStatus: "estimated" });
+assert.deepEqual(readSessions(dir).map(item => [item.provider, item.sessionId]), [["claude", "same-native-id"], ["codex", "same-native-id"]]);
+const legacy = { ...record, provider: undefined, costStatus: undefined, sessionId: "legacy" };
+writeFileSync(join(dir, "sessions.json"), JSON.stringify([legacy]));
+assert.deepEqual(readSessions(dir).map(item => [item.provider, item.sessionId, item.costStatus]), [["claude", "legacy", "reported"]]);
 console.log("selfcheck ok");

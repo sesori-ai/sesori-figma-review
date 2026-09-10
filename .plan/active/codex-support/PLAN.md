@@ -1,9 +1,8 @@
 # Codex support — full user-facing parity
 
-Status: Step 1 squash-merged as `232048a`. Oversized Step 2 checkpoint `f7265eb` is preserved on
-`origin/codex-support-step-2`; superseded PR #2 is closed, not merged. The fixed replacement series stages additive
-foundations before coordinated live activation. User authorization for automatic ready-PR squash merges and
-continuation remains in force.
+Status: Steps 1 and 2 squash-merged as `232048a` and `ece1379d6768ecc032d6f030933034007d357910`. Older cutover
+checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not merged.
+Step 3 normalized activation is implemented and locally validated, awaiting parent review/publication.
 
 ## Goal and locked user direction
 
