@@ -11,35 +11,37 @@ const VERSION = "0.1.0";
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 const now = () => new Date().toISOString();
 
-// ---- plugin connection --------------------------------------------------------
-let plugin: WebSocket | undefined;
-const pending = new Map<string, { resolve: (v: any) => void; onDrop: unknown }>();
-const send = (m: DownMsg) => { if (plugin && plugin.readyState === plugin.OPEN) plugin.send(JSON.stringify(m)); };
+// ---- plugin connections (one per open Figma file, keyed by fileId) ----------------
+const clients = new Map<string, WebSocket>();
+const pending = new Map<string, { ws: WebSocket; resolve: (v: any) => void; onDrop: unknown }>();
+const live = (ws?: WebSocket): ws is WebSocket => !!ws && ws.readyState === ws.OPEN;
+const send = (fileId: string, m: DownMsg) => { const ws = clients.get(fileId); if (live(ws)) ws.send(JSON.stringify(m)); };
 
-/** Send a request to the plugin and wait for its `reply`; resolves with `onDrop` if the plugin is gone. */
-function ask<T>(m: { kind: "tool"; tool: string; args: Record<string, unknown> } | { kind: "permission"; tool: string; input: Record<string, unknown> }, onDrop: T): Promise<T> {
+/** Send a request to the file's plugin and wait for its `reply`; resolves with `onDrop` if the plugin is gone. */
+function ask<T>(fileId: string, m: { kind: "tool"; tool: string; args: Record<string, unknown> } | { kind: "permission"; tool: string; input: Record<string, unknown> }, onDrop: T): Promise<T> {
   return new Promise(resolve => {
-    if (!plugin || plugin.readyState !== plugin.OPEN) return resolve(onDrop);
+    const ws = clients.get(fileId);
+    if (!live(ws)) return resolve(onDrop);
     const id = randomUUID();
-    pending.set(id, { resolve, onDrop });
-    send({ ...m, id });
+    pending.set(id, { ws, resolve, onDrop });
+    ws.send(JSON.stringify({ ...m, id }));
   });
 }
 
 // ---- Figma tools (in-process MCP server; each call is executed by the plugin) --------
 const disconnected: ToolResult = { content: [{ type: "text", text: "The Figma plugin is not connected. Ask the user to reopen it." }], isError: true };
-const figmaTool = (name: string, description: string, shape: z.ZodRawShape) =>
-  tool(name, description, shape, args => ask({ kind: "tool", tool: name, args }, disconnected));
+const figmaTool = (fileId: string, name: string, description: string, shape: z.ZodRawShape) =>
+  tool(name, description, shape, args => ask(fileId, { kind: "tool", tool: name, args }, disconnected));
 
 // One server instance per query: an MCP server instance binds to a single transport.
-const figmaServer = () => createSdkMcpServer({ name: "figma", version: VERSION, tools: [
-  figmaTool("get_flow", "Prototype flow of the user's current Figma page: screens (id, name, size) and transitions (from, to, trigger, navigation, via which element). Falls back to listing top-level frames when the page has no prototype flow.", {}),
-  figmaTool("get_screen", "PNG screenshot of a node plus its layer tree (ids, names, types, bounds relative to the node, text, existing annotations). Works for whole screens and for single components.",
+const figmaServer = (fileId: string) => createSdkMcpServer({ name: "figma", version: VERSION, tools: [
+  figmaTool(fileId, "get_flow", "Prototype flow of the user's current Figma page: screens (id, name, size) and transitions (from, to, trigger, navigation, via which element). Falls back to listing top-level frames when the page has no prototype flow.", {}),
+  figmaTool(fileId, "get_screen", "PNG screenshot of a node plus its layer tree (ids, names, types, bounds relative to the node, text, existing annotations). Works for whole screens and for single components.",
     { nodeId: z.string().describe("Node id such as 12:34"), scale: z.number().min(0.25).max(3).default(1).describe("Export scale; use 2 for small components") }),
-  figmaTool("focus", "Select a node and scroll/zoom the user's canvas to it. Call it before discussing a node so the user sees what you mean.", { nodeId: z.string() }),
-  figmaTool("annotate", "Attach a Dev Mode annotation (markdown) to a node. The user approves each call in the plugin.",
+  figmaTool(fileId, "focus", "Select a node and scroll/zoom the user's canvas to it. Call it before discussing a node so the user sees what you mean.", { nodeId: z.string() }),
+  figmaTool(fileId, "annotate", "Attach a Dev Mode annotation (markdown) to a node. The user approves each call in the plugin.",
     { nodeId: z.string(), markdown: z.string().describe("Annotation body, markdown"), replace: z.boolean().default(false).describe("Replace the node's existing annotations instead of appending") }),
-  figmaTool("ask_user", "Ask the user a question about a specific spot in the design. Focuses their canvas on nodeId (if given), shows the question with optional choice buttons in the plugin, and waits for the answer. Returns the answer and the user's current selection.",
+  figmaTool(fileId, "ask_user", "Ask the user a question about a specific spot in the design. Focuses their canvas on nodeId (if given), shows the question with optional choice buttons in the plugin, and waits for the answer. Returns the answer and the user's current selection.",
     { nodeId: z.string().optional(), question: z.string(), options: z.array(z.string()).max(4).optional() }),
 ]});
 
@@ -47,7 +49,7 @@ const SYSTEM = `You are a senior product designer and front-end lead doing a des
 Use the figma tools to look at and steer the user's canvas. Be concrete and brief in chat; put implementation detail into annotations.
 When something is ambiguous, ask with ask_user instead of assuming.`;
 
-function options(dir: string, resume?: string): Options {
+function options(fileId: string, dir: string, resume?: string): Options {
   const appRepo = process.env.APP_REPO;
   return {
     cwd: dir,
@@ -55,7 +57,7 @@ function options(dir: string, resume?: string): Options {
     settingSources: ["project"], // CLAUDE.md, .claude/skills, .mcp.json from the workspace
     additionalDirectories: appRepo ? [appRepo] : [],
     systemPrompt: SYSTEM,
-    mcpServers: { figma: figmaServer(), "figma-desktop": { type: "http", url: FIGMA_MCP_URL } },
+    mcpServers: { figma: figmaServer(fileId), "figma-desktop": { type: "http", url: FIGMA_MCP_URL } },
     strictMcpConfig: true, // do not pull in the user's personal MCP servers
     tools: ["Read", "Glob", "Grep", "Write", "Edit", "Skill"],
     allowedTools: [
@@ -67,18 +69,19 @@ function options(dir: string, resume?: string): Options {
     disallowedTools: ["AskUserQuestion"], // ask_user replaces it (it focuses the canvas)
     permissionMode: "default",
     canUseTool: async (toolName, input) => { // everything not allowed above (annotate, writes outside notes/) → plugin card
-      const d = await ask<PermissionDecision>({ kind: "permission", tool: toolName, input }, { behavior: "deny", message: "Figma plugin disconnected" });
+      const d = await ask<PermissionDecision>(fileId, { kind: "permission", tool: toolName, input }, { behavior: "deny", message: "Figma plugin disconnected" });
       return d.behavior === "allow" ? { behavior: "allow", updatedInput: input } : d;
     },
     includePartialMessages: true,
     model: process.env.FIGMA_REVIEW_MODEL,
+    effort: process.env.FIGMA_REVIEW_EFFORT as Options["effort"],
     stderr: d => log("[claude]", d.trim()),
   };
 }
 
 // ---- conversations --------------------------------------------------------------
-type Conv = { q: Query; push: (m: SDKUserMessage | null) => void; dir: string; rec: SessionRecord; baseCost: number; baseUsage: SessionRecord["usage"]; usageById: Map<string, any> };
-let conv: Conv | undefined;
+type Conv = { q: Query; push: (m: SDKUserMessage | null) => void; fileId: string; dir: string; rec: SessionRecord; baseCost: number; baseUsage: SessionRecord["usage"]; usageById: Map<string, any> };
+let conv: Conv | undefined; // ponytail: one conversation at a time across all files; starting one ends the previous
 let warm: { dir: string; wq: Promise<WarmQuery> } | undefined;
 const health: Health = { bridge: VERSION, figmaMcp: "down" };
 
@@ -102,12 +105,12 @@ function userMessage(text: string, selection: NodeRef[], context?: string): SDKU
 }
 
 /** Spawn the CLI for the next fresh session in this workspace so `start` does not pay the boot cost. */
-function prewarm(dir: string) {
+function prewarm(fileId: string, dir: string) {
   if (warm?.dir === dir) return;
   warm?.wq.then(w => w.close()).catch(() => {});
-  const wq = startup({ options: options(dir) });
+  const wq = startup({ options: options(fileId, dir) });
   warm = { dir, wq };
-  wq.then(() => { health.claude ??= "ready"; health.error = undefined; }, e => { health.error = `Claude failed to start: ${e.message ?? e}`; warm = undefined; }).then(() => send({ kind: "health", health }));
+  wq.then(() => { health.claude ??= "ready"; health.error = undefined; }, e => { health.error = `Claude failed to start: ${e.message ?? e}`; warm = undefined; }).then(() => send(fileId, { kind: "health", health }));
 }
 
 async function startConv(m: Extract<UpMsg, { kind: "start" }>) {
@@ -119,15 +122,15 @@ async function startConv(m: Extract<UpMsg, { kind: "start" }>) {
     const w = warm; warm = undefined;
     try { q = (await w.wq).query(gen); } catch (e) { log("pre-warmed query unusable, starting cold", e); }
   }
-  q ??= query({ prompt: gen, options: options(dir, m.resume) });
+  q ??= query({ prompt: gen, options: options(m.fileId, dir, m.resume) });
   const prev = m.resume ? readSessions(dir).find(s => s.sessionId === m.resume) : undefined;
   const rec: SessionRecord = prev ?? { sessionId: "", title: m.text.slice(0, 80), anchor: m.anchor, pageId: m.pageId, pageName: m.pageName, createdAt: now(), updatedAt: now(), turns: 0, costUsd: 0, usage: zeroUsage() };
-  conv = { q, push, dir, rec, baseCost: rec.costUsd, baseUsage: rec.usage, usageById: new Map() }; // ponytail: cost/usage assumed not restored by --resume; base + this process
+  conv = { q, push, fileId: m.fileId, dir, rec, baseCost: rec.costUsd, baseUsage: rec.usage, usageById: new Map() }; // ponytail: cost/usage assumed not restored by --resume; base + this process
   const anchor = `Figma file "${m.fileName}", page "${m.pageName}" (${m.pageId}). Anchor: ${m.anchor.type}${m.anchor.nodeIds.length ? " " + m.anchor.nodeIds.join(", ") : ""}`;
   push(userMessage(m.text, m.selection, anchor));
-  send({ kind: "busy", busy: true });
+  send(m.fileId, { kind: "busy", busy: true });
   void pump(conv);
-  prewarm(dir); // next fresh session boots while this one runs
+  prewarm(m.fileId, dir); // next fresh session boots while this one runs
 }
 
 function endConv() {
@@ -138,16 +141,17 @@ function endConv() {
 }
 
 async function pump(c: Conv) {
+  const out = (m: DownMsg) => send(c.fileId, m);
   try {
     for await (const msg of c.q) {
       if (conv !== c) break;
       if (msg.type === "system" && msg.subtype === "init") {
         c.rec.sessionId = msg.session_id;
         Object.assign(health, { claude: msg.claude_code_version, model: msg.model, servers: msg.mcp_servers, error: undefined });
-        c.q.mcpServerStatus().then(s => { health.servers = s.map(x => ({ name: x.name, status: x.status, error: x.error })); send({ kind: "health", health }); }).catch(() => {});
-        send({ kind: "health", health });
+        c.q.mcpServerStatus().then(s => { health.servers = s.map(x => ({ name: x.name, status: x.status, error: x.error })); out({ kind: "health", health }); }).catch(() => {});
+        out({ kind: "health", health });
         saveSession(c.dir, c.rec);
-        send({ kind: "session", session: c.rec });
+        out({ kind: "session", session: c.rec });
       }
       if (msg.type === "assistant") c.usageById.set(msg.message.id, msg.message.usage);
       if (msg.type === "result") {
@@ -156,17 +160,17 @@ async function pump(c: Conv) {
         c.rec.usage = sumUsage(c.usageById, c.baseUsage);
         c.rec.updatedAt = now();
         saveSession(c.dir, c.rec);
-        send({ kind: "session", session: c.rec });
-        send({ kind: "sessions", sessions: readSessions(c.dir) });
-        send({ kind: "busy", busy: false });
+        out({ kind: "session", session: c.rec });
+        out({ kind: "sessions", sessions: readSessions(c.dir) });
+        out({ kind: "busy", busy: false });
       }
-      if (msg.type !== "user") send({ kind: "sdk", msg }); // tool results (with screenshots) stay in the bridge
+      if (msg.type !== "user") out({ kind: "sdk", msg }); // tool results (with screenshots) stay in the bridge
     }
   } catch (e) {
     log("session error", e);
-    send({ kind: "error", message: `Session error: ${(e as Error).message ?? e}` });
+    out({ kind: "error", message: `Session error: ${(e as Error).message ?? e}` });
   } finally {
-    if (conv === c) { conv = undefined; send({ kind: "busy", busy: false }); }
+    if (conv === c) { conv = undefined; out({ kind: "busy", busy: false }); }
   }
 }
 
@@ -179,39 +183,42 @@ async function probeFigmaMcp(): Promise<Health["figmaMcp"]> {
     return "up";
   } catch { return "down"; }
 }
-async function sendHealth() { health.figmaMcp = await probeFigmaMcp(); send({ kind: "health", health }); }
+async function sendHealth(fileId: string) { health.figmaMcp = await probeFigmaMcp(); send(fileId, { kind: "health", health }); }
 
 // ---- inbound ---------------------------------------------------------------------
-async function onUp(m: UpMsg) {
+async function onUp(ws: WebSocket & { fileId?: string }, m: UpMsg) {
   switch (m.kind) {
     case "hello": {
+      const old = clients.get(m.fileId);
+      if (old && old !== ws) old.close(); // same file opened twice: the newest plugin instance wins
+      clients.set(m.fileId, ws);
+      ws.fileId = m.fileId;
       const dir = workspaceFor(m.fileId, m.fileName);
-      send({ kind: "sessions", sessions: readSessions(dir) });
-      if (conv?.dir === dir) send({ kind: "session", session: conv.rec }); // plugin reopened mid-session: re-attach
-      prewarm(dir);
-      return sendHealth();
+      send(m.fileId, { kind: "sessions", sessions: readSessions(dir) });
+      const mine = conv && conv.fileId === m.fileId;
+      if (mine) send(m.fileId, { kind: "session", session: conv!.rec }); // plugin reopened mid-session: re-attach
+      send(m.fileId, { kind: "busy", busy: !!mine });
+      prewarm(m.fileId, dir);
+      return sendHealth(m.fileId);
     }
     case "start": return startConv(m);
     case "user":
-      if (!conv) return send({ kind: "error", message: "No active session. Start one or resume from History." });
+      if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or resume from History." });
       conv.push(userMessage(m.text, m.selection)); // Claude Code merges it into the running turn between tool calls (steer)
-      return send({ kind: "busy", busy: true });
+      return send(conv.fileId, { kind: "busy", busy: true });
     case "reply": { const p = pending.get(m.id); pending.delete(m.id); p?.resolve(m.result); return; }
-    case "interrupt": await conv?.q.interrupt(); return;
-    case "health": return sendHealth();
+    case "interrupt": if (conv && conv.fileId === ws.fileId) await conv.q.interrupt(); return;
+    case "health": return sendHealth(ws.fileId!);
   }
 }
 
-new WebSocketServer({ port: BRIDGE_PORT, host: "127.0.0.1" }).on("connection", ws => {
-  plugin?.close(); // ponytail: one plugin connection at a time, last one wins
-  plugin = ws;
+new WebSocketServer({ port: BRIDGE_PORT, host: "127.0.0.1" }).on("connection", (ws: WebSocket & { fileId?: string }) => {
   log("plugin connected");
-  ws.on("message", raw => { onUp(JSON.parse(String(raw))).catch(e => send({ kind: "error", message: String(e) })); });
+  ws.on("message", raw => { onUp(ws, JSON.parse(String(raw))).catch(e => { if (ws.fileId) send(ws.fileId, { kind: "error", message: String(e) }); }); });
   ws.on("close", () => {
-    if (plugin === ws) plugin = undefined;
-    for (const p of pending.values()) p.resolve(p.onDrop); // unblock tool calls waiting on a plugin that is gone
-    pending.clear();
-    log("plugin disconnected");
+    if (ws.fileId && clients.get(ws.fileId) === ws) clients.delete(ws.fileId);
+    for (const [id, p] of pending) if (p.ws === ws) { pending.delete(id); p.resolve(p.onDrop); } // unblock tool calls waiting on a plugin that is gone
+    log("plugin disconnected", ws.fileId ?? "");
   });
 });
 log(`bridge ${VERSION} listening on ws://127.0.0.1:${BRIDGE_PORT}` + (process.env.APP_REPO ? ` · app repo ${process.env.APP_REPO}` : ""));

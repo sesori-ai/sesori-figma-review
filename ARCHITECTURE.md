@@ -5,7 +5,7 @@ Three processes, two of them inside Figma:
 ```
 ┌──────────────────────── Figma desktop ────────────────────────┐      ┌────────────── bridge (Node) ──────────────┐
 │  plugin sandbox (code.ts)      plugin UI iframe (ui.ts)       │      │  WebSocket server :3055                    │
-│  • owns the document           • chat panel, cards, buttons   │      │  • one plugin connection at a time         │
+│  • owns the document           • chat panel, cards, buttons   │      │  • one plugin connection per Figma file    │
 │  • executes tools:             • WebSocket client → bridge    │  WS  │  • per-file workspace provisioning         │
 │    get_flow, get_screen,  ◄──► • relays tool calls to sandbox ├──────┤  • Claude Agent SDK query() per session    │
 │    focus, annotate             • answers ask_user/permission  │ JSON │    - in-process MCP "figma" (5 tools)      │
@@ -154,6 +154,7 @@ On resume, stored totals are used as the base for the new process (assumed not r
 
 - File id is not a UUID; unique enough for a folder name.
 - Layer tree is capped at 300 visible nodes per `get_screen`; the agent zooms into children for more.
-- One plugin connection at a time; the newest wins.
+- One plugin connection per Figma file (a second instance for the same file replaces the first); one
+  conversation at a time across files, starting a new one ends the previous.
 - No markdown rendering in the chat; text is shown as-is.
 - Cost after resume is base + new process total (see above).

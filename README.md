@@ -68,6 +68,7 @@ and the Figma MCP server are all reachable; hover it for details.
 | `APP_REPO` | unset | Path to the app's source. Mounted read-only so annotations can reference real components. |
 | `FIGMA_REVIEW_HOME` | `~/.figma-review` | Where per-file workspaces live (`files/<fileId>/`). |
 | `FIGMA_REVIEW_MODEL` | Claude Code default | Model alias or id, e.g. `sonnet`, `opus`, `haiku`. |
+| `FIGMA_REVIEW_EFFORT` | Claude Code default | Effort level: `low`, `medium`, `high`, `xhigh`, `max`. |
 
 Each Figma file gets a workspace with an editable `CLAUDE.md` (review conventions and a removable
 "tool steering" section about the Figma MCP server), `.mcp.json`, the `review-flow` skill, `notes/` and
