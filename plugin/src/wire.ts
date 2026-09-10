@@ -15,7 +15,10 @@ export function decodeBridgeMessage(raw: unknown): DownMsg | undefined {
   switch (message.kind) {
     case "connection": valid = message.protocolVersion === PROTOCOL_VERSION && typeof message.busy === "boolean"
       && (message.intentId === undefined || typeof message.intentId === "string")
-      && (message.session === undefined || session(message.session)); break;
+      && (message.session === undefined || session(message.session))
+      && (message.activeText === undefined || (Array.isArray(message.activeText) && message.activeText.every(value => {
+        const item = object(value); return session(item?.session) && typeof item?.itemId === "string" && typeof item.text === "string";
+      }))); break;
     case "health": {
       const health = object(message.health), settings = object(health?.settings), providers = object(settings?.providers);
       const claude = object(providers?.claude), codex = object(providers?.codex);

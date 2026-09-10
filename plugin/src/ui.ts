@@ -13,6 +13,7 @@ const md = (s: string) => marked.parse(s.replace(/</g, "&lt;"), { async: false }
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const chat = $("chat"), input = $<HTMLTextAreaElement>("input"), statusEl = $("status"), dot = $("dot"), costEl = $("cost"), sessionsEl = $("sessions"), settingsEl = $("settings"), selEl = $("sel").lastElementChild as HTMLElement, stopBtn = $("btn-stop"), footer = document.querySelector("footer")!, empty = $("empty");
 const modelSel = $<HTMLSelectElement>("model"), effortSel = $<HTMLSelectElement>("effort");
+modelSel.disabled = effortSel.disabled = true;
 
 let ctx = { fileId: "", fileName: "", pageId: "", pageName: "", selection: [] as NodeRef[] };
 let ws: WebSocket | undefined;
@@ -20,6 +21,7 @@ let sessions: SessionRecord[] = [];
 let pendingAsk: { id: string; answer: (text: string) => void; cancel: (reason?: string) => void } | undefined;
 let opened: SessionRecord | undefined;
 let health: Health | undefined;
+let settingsNotice: HTMLElement | undefined;
 let busy = false;
 let intentCounter = 0;
 const admission = new ConnectionAdmission();
@@ -45,7 +47,13 @@ const working = el("div", "typing"); working.append(el("i"), el("i"), el("i")); 
 const bubble = (cls: string, text = "") => { empty.remove(); const b = el("div", cls, text); chat.insertBefore(b, working.parentNode === chat ? working : null); chat.scrollTop = chat.scrollHeight; return b; };
 const assistant = (html: string) => { const b = bubble("msg assistant"); const body = el("div", "body"); body.innerHTML = html; b.append(body); return body; };
 const selText = () => ctx.selection.length ? ctx.selection.map(n => `${n.name} (${n.type} ${n.id})`).join(", ") : "none";
-const clearChat = () => { items.clear(); chat.innerHTML = ""; pendingAsk = undefined; opened = undefined; };
+const clearChat = (preserveCards = false) => {
+  const cards = preserveCards ? Array.from(chat.querySelectorAll<HTMLElement>(".actionable")) : [];
+  items.clear(); chat.innerHTML = "";
+  for (const card of cards) chat.append(card);
+  if (!preserveCards) pendingAsk = undefined;
+  opened = undefined;
+};
 const notifyCancelled = (count: number) => {
   if (count) toMain({ kind: "notify", text: `${count} queued message${count === 1 ? " was" : "s were"} cancelled.` });
 };
@@ -86,7 +94,8 @@ function connect() {
     send({ kind: "hello", protocolVersion: PROTOCOL_VERSION, fileId: ctx.fileId, fileName: ctx.fileName });
   };
   ws.onclose = () => {
-    admission.disconnected();
+    admission.disconnected(); modelSel.disabled = effortSel.disabled = true;
+    if (settingsControl.disconnected()) settingsNotice = bubble("error", "Settings change was sent but not confirmed. Reconnecting will show the saved setting.");
     view.disconnect({ reason: "Bridge disconnected" });
     pendingAsk = undefined; footer.hidden = false; renderBusy(false);
     chat.prepend(offline); setStatus("bridge offline", "bad"); setTimeout(connect, 2000);
@@ -101,6 +110,10 @@ function connect() {
   };
 }
 const send = (m: UpMsg) => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
+const admit = (message: string) => admission.admit({
+  socketReady: ws?.readyState === WebSocket.OPEN,
+  onBlocked: () => toMain({ kind: "notify", text: message }),
+});
 function setStatus(text: string, level: "ok" | "warn" | "bad") { statusEl.textContent = text; dot.className = `dot ${level}`; }
 function protocolMismatch() {
   drift.textContent = `Plugin protocol ${PROTOCOL_VERSION} cannot use this bridge. Update with ${INSTALL}@latest, restart the bridge, then refresh the plugin in Figma.`;
@@ -118,15 +131,16 @@ function onDown(m: DownMsg) {
     case "connection": {
       admission.acknowledge(); drift.remove();
       const previous = view.session;
-      const reconciled = view.reconcile({ intentId: m.intentId, session: m.session });
+      const reconciled = view.reconcile({ intentId: m.intentId, session: m.session, activeText: m.activeText });
       notifyCancelled(reconciled.cancelled.length);
       if (reconciled.cancelledStart) bubble("error", "The pending start was cancelled before the bridge accepted it. Send it again if needed.");
       if (m.session?.sessionId) renderCost(m.session);
       for (const queued of reconciled.queued) send({ kind: "user", ...queued });
       renderBusy(m.busy); setStatus("connected to bridge", "warn");
       const attachedChanged = m.session?.sessionId && (!previous || previous.provider !== m.session.provider || previous.sessionId !== m.session.sessionId);
-      if (attachedChanged) requestHistory(m.session!, true);
-      else if (!m.session && !m.intentId && previous?.sessionId) requestHistory(previous, true);
+      if (reconciled.historyRetry) send({ kind: "open", intentId: reconciled.historyRetry.intentId, fileId: ctx.fileId, fileName: ctx.fileName, session: reconciled.historyRetry.session });
+      else if (attachedChanged) requestHistory(m.session!, true, m.activeText);
+      else if (!m.session && !m.intentId && previous?.sessionId) requestHistory(previous, true, m.activeText);
       return;
     }
     case "health": return renderHealth(m.health);
@@ -151,7 +165,7 @@ function onDown(m: DownMsg) {
 }
 
 function renderHealth(h: Health) {
-  health = h;
+  health = h; settingsNotice?.remove(); settingsNotice = undefined;
   const providerId = view.session?.provider ?? h.selectedProvider;
   const settingState = settingsControl.acceptHealth({ health: h, provider: providerId });
   if (settingState.error) bubble("error", `Settings update failed: ${settingState.error}`);
@@ -167,6 +181,7 @@ function renderHealth(h: Health) {
   modelSel.replaceChildren(...choices.models.map(model => new Option(model.label, model.value)));
   effortSel.replaceChildren(...choices.efforts.map(effort => new Option(effort.label, effort.value)));
   modelSel.value = settings.model; effortSel.value = settings.effort;
+  modelSel.disabled = effortSel.disabled = !(admission.ready && ws?.readyState === WebSocket.OPEN);
   $("about").textContent = `Sesori Review ${__VERSION__} · bridge ${h.bridge}${provider?.version ? ` · ${providerName} ${provider.version}` : ""}`;
   if (h.bridge !== __VERSION__ && !drift.isConnected) { drift.textContent = `Plugin ${__VERSION__} and bridge ${h.bridge} differ. Update bridge with ${INSTALL}@latest and refresh plugin from Figma.`; chat.prepend(drift); }
 }
@@ -181,7 +196,7 @@ function renderCost(s: SessionRecord) {
 function onEvent(event: ReviewEvent) {
   if (view.bufferEvent(event) || !eventBelongsToSession({ event, session: view.session })) return;
   if (event.type === "text_start") {
-    items.set(event.itemId, { element: assistant(""), markdown: "" });
+    if (!items.has(event.itemId)) items.set(event.itemId, { element: assistant(""), markdown: "" });
   } else if (event.type === "text_delta") {
     const item = items.get(event.itemId);
     if (item) { item.markdown += event.text; item.element.innerHTML = md(item.markdown); chat.scrollTop = chat.scrollHeight; }
@@ -202,11 +217,17 @@ function onEvent(event: ReviewEvent) {
 function askCard(id: string, args: Record<string, unknown>) {
   if (typeof args.nodeId === "string") toMain({ kind: "focus", nodeId: args.nodeId });
   pendingAsk?.cancel();
-  const card = bubble("card");
+  const card = bubble("card actionable");
   card.append(el("div", "q", typeof args.question === "string" ? args.question : "Question"));
   const ctl = el("div", "ctl");
-  const close = (label: string) => { ctl.remove(); const a = el("div", "a"); a.append(icon("check"), label); card.append(a); view.finishCard(id); if (pendingAsk?.id === id) pendingAsk = undefined; footer.hidden = false; };
-  const answer = (text: string) => { close(text); send({ kind: "reply", id, result: { content: [{ type: "text", text: `${text}\n\n[Current selection: ${selText()}]` }] } }); };
+  let settled = false;
+  const close = (label: string) => {
+    if (settled) return false;
+    settled = true; card.classList.remove("actionable"); ctl.remove();
+    const a = el("div", "a"); a.append(icon("check"), label); card.append(a);
+    view.finishCard(id); if (pendingAsk?.id === id) pendingAsk = undefined; footer.hidden = false; return true;
+  };
+  const answer = (text: string) => { if (close(text)) send({ kind: "reply", id, result: { content: [{ type: "text", text: `${text}\n\n[Current selection: ${selText()}]` }] } }); };
   const cancel = (reason = "No longer actionable") => close(`(${reason})`);
   pendingAsk = { id, answer, cancel }; view.addCard({ id, cancel });
   const options = Array.isArray(args.options) ? args.options.filter((option): option is string => typeof option === "string") : [];
@@ -219,13 +240,15 @@ function askCard(id: string, args: Record<string, unknown>) {
 
 function permissionCard(id: string, tool: string, input: Record<string, unknown>) {
   if (typeof input.nodeId === "string") toMain({ kind: "focus", nodeId: input.nodeId });
-  const card = bubble("card perm");
+  const card = bubble("card perm actionable");
   card.append(el("div", "q", `Allow ${tool.replace(/^mcp__/, "").replace("__", ": ")}?`));
   const preview = typeof input.markdown === "string" ? input.markdown : JSON.stringify(input, null, 1);
   card.append(el("pre", "", preview.slice(0, 2000)));
   const ctl = el("div", "ctl");
+  let settled = false;
   const done = (result: PermissionDecision | undefined, label: string) => {
-    ctl.remove(); card.append(el("div", "a", label)); view.finishCard(id);
+    if (settled) return;
+    settled = true; card.classList.remove("actionable"); ctl.remove(); card.append(el("div", "a", label)); view.finishCard(id);
     if (result) send({ kind: "reply", id, result });
   };
   view.addCard({ id, cancel: reason => done(undefined, `Cancelled: ${reason}`) });
@@ -233,9 +256,9 @@ function permissionCard(id: string, tool: string, input: Record<string, unknown>
   card.append(ctl);
 }
 
-function requestHistory(session: SessionRef, retainSession = false) {
+function requestHistory(session: SessionRef, retainSession = false, activeText: Extract<DownMsg, { kind: "connection" }>["activeText"] = []) {
   const intentId = `history-${Date.now().toString(36)}-${++intentCounter}`;
-  view.beginHistory({ intentId, session, retainSession });
+  view.beginHistory({ intentId, session, retainSession, activeText });
   send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session });
 }
 
@@ -248,6 +271,7 @@ function renderSessions() {
     const provider = s.provider === "claude" ? "Claude" : "Codex";
     title.append(el("b", "", s.title), el("span", "", `${provider} · ${s.pageName} · ${s.updatedAt.slice(0, 16).replace("T", " ")} · ${sessionCostLabel({ session: s, precision: 2 })} · ${s.turns} turn${s.turns === 1 ? "" : "s"}`));
     row.append(title, btn("Open", () => {
+      if (!admit("History was not opened because the bridge is not connected.")) return;
       leaveView("Opened a History session");
       requestHistory(s); sessionsEl.hidden = true;
     }));
@@ -259,6 +283,7 @@ function renderSessions() {
 const pushSettings = () => {
   if (!health) return;
   const provider = view.session?.provider ?? health.selectedProvider;
+  if (!admit("Settings were not changed because the bridge is not connected.")) return renderHealth(health);
   send(settingsControl.request({ provider, settings: { model: modelSel.value, effort: effortSel.value } }));
 };
 modelSel.onchange = effortSel.onchange = pushSettings;
@@ -266,8 +291,9 @@ $("btn-settings").onclick = () => { settingsEl.hidden = !settingsEl.hidden; sess
 
 // ---- composer -------------------------------------------------------------
 function start(anchor: Anchor, text: string, resume?: SessionRef) {
-  if (!admission.admit({ onBlocked: () => toMain({ kind: "notify", text: "Wait for the bridge connection, then send again." }) })) return;
+  if (!admit("Wait for the bridge connection, then send again.")) return;
   if (view.starting) return;
+  if (view.readingHistory) { toMain({ kind: "notify", text: "Wait for History to finish loading, then send." }); return; }
   const intentId = `${Date.now().toString(36)}-${++intentCounter}`;
   view.begin({ intentId, retainSession: !!resume });
   if (!resume) clearChat();
@@ -279,22 +305,32 @@ function start(anchor: Anchor, text: string, resume?: SessionRef) {
 function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
   const confirmed = view.confirmHistory({ intentId: m.intentId, session: m.session });
   if (!confirmed) return;
-  clearChat();
+  clearChat(true);
   renderCost(confirmed.session);
   opened = m.attached ? undefined : confirmed.session;
+  const historyIds = new Set<string>();
   for (const h of m.messages) {
-    if (h.role === "tool") h.name === "stopped" ? bubble("chip stopped", "Stopped") : chip(h.name, h.input);
-    else if (h.role === "assistant") assistant(md(h.text));
-    else bubble("msg user", h.text); // user message or ask_user answer
+    if (h.role === "tool") {
+      const element = h.name === "stopped" ? bubble("chip stopped", "Stopped") : chip(h.name, h.input);
+      if (h.itemId) { historyIds.add(h.itemId); items.set(h.itemId, { element, markdown: "" }); }
+    } else if (h.role === "assistant") {
+      const element = assistant(md(h.text));
+      if (h.itemId) { historyIds.add(h.itemId); items.set(h.itemId, { element, markdown: h.text }); }
+    } else bubble("msg user", h.text); // user message or ask_user answer
   }
-  for (const event of confirmed.events) onEvent(event);
+  for (const snapshot of confirmed.activeText) if (!historyIds.has(snapshot.itemId)
+    && eventBelongsToSession({ event: { type: "text_start", ...snapshot }, session: view.session })) {
+    items.set(snapshot.itemId, { element: assistant(md(snapshot.text)), markdown: snapshot.text });
+  }
+  for (const event of confirmed.events) if (!historyIds.has(event.itemId)) onEvent(event);
   if (busy) chat.append(working);
   chat.scrollTop = chat.scrollHeight;
 }
 function submit() {
   const text = input.value.trim();
   if (!text) return;
-  if (!admission.admit({ onBlocked: () => toMain({ kind: "notify", text: "Still connecting to the bridge. Your message is kept here." }) })) return;
+  if (!admit("Still connecting to the bridge. Your message is kept here.")) return;
+  if (view.readingHistory) { toMain({ kind: "notify", text: "History is still loading. Your message is kept here." }); return; }
   input.value = ""; autosize();
   if (view.starting) { bubble("msg user", text); view.queue({ text, selection: [...ctx.selection] }); return; }
   if (!view.session) return start({ type: "page", nodeIds: [] }, text);
@@ -312,6 +348,10 @@ $("btn-selection").onclick = () => {
   if (!ctx.selection.length) return toMain({ kind: "notify", text: "Select something first" });
   start({ type: "selection", nodeIds: ctx.selection.map(n => n.id) }, `Review the selected node(s): ${selText()}. Focus each one, assess clarity and dev-readiness, and propose annotations.`);
 };
-$("btn-new").onclick = () => { leaveView("Started a new view"); clearChat(); chat.append(empty); costEl.textContent = ""; settingsEl.hidden = sessionsEl.hidden = true; input.focus(); };
+$("btn-new").onclick = () => {
+  if (!admit("New was not started because the bridge is not connected.")) return;
+  leaveView("Started a new view"); clearChat(); chat.append(empty); costEl.textContent = "";
+  settingsEl.hidden = sessionsEl.hidden = true; input.focus();
+};
 $("btn-history").onclick = () => { sessionsEl.hidden = !sessionsEl.hidden; settingsEl.hidden = true; if (!sessionsEl.hidden) renderSessions(); };
 stopBtn.onclick = () => send({ kind: "interrupt" });

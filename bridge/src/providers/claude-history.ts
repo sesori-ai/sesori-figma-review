@@ -21,7 +21,9 @@ export function readClaudeTranscript(args: { dir: string; sessionId: string }): 
     let parsed: unknown;
     try { parsed = JSON.parse(line); } catch { continue; } // interrupted writes can leave a partial trailing line
     const record = object(parsed);
-    const content = object(record?.message)?.content;
+    const message = object(record?.message);
+    const content = message?.content;
+    const messageId = typeof message?.id === "string" ? message.id : undefined;
     if (record?.type === "user" && !record.isMeta) {
       if (typeof content === "string") out.push({ role: "user", text: strip(content) });
       for (const blockValue of Array.isArray(content) ? content : []) {
@@ -41,14 +43,15 @@ export function readClaudeTranscript(args: { dir: string; sessionId: string }): 
         }
       }
     }
-    if (record?.type === "assistant") for (const blockValue of Array.isArray(content) ? content : []) {
+    if (record?.type === "assistant") for (const [index, blockValue] of (Array.isArray(content) ? content : []).entries()) {
       const block = object(blockValue);
+      const itemId = messageId ? `${args.sessionId}:${messageId}:${index}` : undefined;
       if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
-        out.push({ role: "assistant", text: block.text });
+        out.push({ role: "assistant", text: block.text, ...(itemId ? { itemId } : {}) });
       }
       if (block?.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
         toolNames.set(block.id, block.name);
-        out.push({ role: "tool", name: block.name, input: object(block.input) ?? {} });
+        out.push({ role: "tool", name: block.name, input: object(block.input) ?? {}, itemId: block.id });
       }
     }
   }

@@ -74,8 +74,10 @@ export type ReviewEvent =
   | { type: "turn_end"; session: SessionRef; itemId: string; outcome: "completed" | "interrupted" | "failed"; message?: string };
 
 export type HistoryItem =
-  | { role: "user" | "assistant" | "answer"; text: string }
-  | { role: "tool"; name: string; input: Record<string, unknown> };
+  | { role: "user" | "answer"; text: string }
+  | { role: "assistant"; text: string; itemId?: string }
+  | { role: "tool"; name: string; input: Record<string, unknown>; itemId?: string };
+export type TextSnapshot = { session: SessionRef; itemId: string; text: string };
 
 // ---- plugin -> bridge -------------------------------------------------------
 export type UpMsg =
@@ -108,7 +110,7 @@ export type UpMsg =
 
 // ---- bridge -> plugin -------------------------------------------------------
 export type DownMsg =
-  | { kind: "connection"; protocolVersion: number; intentId?: string; session?: SessionRecord; busy: boolean }
+  | { kind: "connection"; protocolVersion: number; intentId?: string; session?: SessionRecord; activeText?: TextSnapshot[]; busy: boolean }
   | { kind: "health"; health: Health }
   | { kind: "sessions"; sessions: SessionRecord[] }
   | { kind: "history"; intentId: string; session: SessionRecord; messages: HistoryItem[]; attached: boolean }

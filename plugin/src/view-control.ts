@@ -1,8 +1,8 @@
-import type { NodeRef, ReviewEvent, SessionRecord, SessionRef } from "../../shared/protocol.ts";
+import type { NodeRef, ReviewEvent, SessionRecord, SessionRef, TextSnapshot } from "../../shared/protocol.ts";
 
 export type QueuedInput = { text: string; selection: NodeRef[] };
 type StartIntent = { kind: "start"; id: string; inputs: QueuedInput[]; adopted: boolean };
-type HistoryIntent = { kind: "history"; id: string; session: SessionRef; events: ReviewEvent[]; latest?: SessionRecord };
+type HistoryIntent = { kind: "history"; id: string; session: SessionRef; events: ReviewEvent[]; activeText: TextSnapshot[]; latest?: SessionRecord };
 type ViewIntent = StartIntent | HistoryIntent;
 const sameSession = (left: SessionRecord, right: SessionRecord) =>
   left.provider === right.provider && left.sessionId === right.sessionId;
@@ -15,14 +15,15 @@ export class ConversationView {
 
   get session(): SessionRecord | undefined { return this.current; }
   get starting(): boolean { return this.intent?.kind === "start"; }
+  get readingHistory(): boolean { return this.intent?.kind === "history"; }
 
   begin(args: { intentId: string; retainSession: boolean }) {
     this.cancelCards({ reason: "Session replaced" });
     this.intent = { kind: "start", id: args.intentId, inputs: [], adopted: false };
     if (!args.retainSession) this.current = undefined;
   }
-  beginHistory(args: { intentId: string; session: SessionRef; retainSession?: boolean }) {
-    this.intent = { kind: "history", id: args.intentId, session: args.session, events: [] };
+  beginHistory(args: { intentId: string; session: SessionRef; retainSession?: boolean; activeText?: TextSnapshot[] }) {
+    this.intent = { kind: "history", id: args.intentId, session: args.session, events: [], activeText: args.activeText ?? [] };
     if (!args.retainSession) this.current = undefined;
   }
   queue(input: QueuedInput) { if (this.intent?.kind === "start") this.intent.inputs.push(input); }
@@ -33,9 +34,9 @@ export class ConversationView {
     this.current = args.session;
     return result;
   }
-  confirmHistory(args: { intentId: string; session: SessionRecord }): { events: ReviewEvent[]; session: SessionRecord } | undefined {
+  confirmHistory(args: { intentId: string; session: SessionRecord }): { events: ReviewEvent[]; activeText: TextSnapshot[]; session: SessionRecord } | undefined {
     if (this.intent?.kind !== "history" || this.intent.id !== args.intentId) return;
-    const result = { events: this.intent.events, session: this.intent.latest ?? args.session };
+    const result = { events: this.intent.events, activeText: this.intent.activeText, session: this.intent.latest ?? args.session };
     this.intent = undefined;
     this.current = result.session;
     return result;
@@ -47,13 +48,17 @@ export class ConversationView {
     return true;
   }
   /** Reconcile one authoritative connection snapshot without retrying lost work. */
-  reconcile(args: { intentId?: string; session?: SessionRecord }): {
+  reconcile(args: { intentId?: string; session?: SessionRecord; activeText?: TextSnapshot[] }): {
     queued: QueuedInput[];
     cancelled: QueuedInput[];
     adoptedStart: boolean;
     cancelledStart: boolean;
+    historyRetry?: { intentId: string; session: SessionRef };
   } {
-    const result = { queued: [] as QueuedInput[], cancelled: [] as QueuedInput[], adoptedStart: false, cancelledStart: false };
+    const result: {
+      queued: QueuedInput[]; cancelled: QueuedInput[]; adoptedStart: boolean; cancelledStart: boolean;
+      historyRetry?: { intentId: string; session: SessionRef };
+    } = { queued: [], cancelled: [], adoptedStart: false, cancelledStart: false };
     if (this.intent?.kind === "start") {
       if (args.intentId === this.intent.id) {
         if (!args.session?.sessionId) return result;
@@ -64,7 +69,14 @@ export class ConversationView {
       result.cancelled.push(...this.intent.inputs);
       result.cancelledStart = true;
       this.intent = undefined;
-    } else if (this.intent?.kind === "history") this.intent = undefined;
+    } else if (this.intent?.kind === "history") {
+      if (args.activeText) this.intent.activeText = args.activeText;
+      if (args.session?.provider === this.intent.session.provider && args.session.sessionId === this.intent.session.sessionId) {
+        this.current = args.session; this.intent.latest = args.session;
+      }
+      result.historyRetry = { intentId: this.intent.id, session: this.intent.session };
+      return result;
+    }
     if (args.session?.sessionId) this.current = args.session;
     else if (args.intentId) {
       this.current = undefined;

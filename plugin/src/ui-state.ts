@@ -3,8 +3,8 @@ import type { Health, ProviderId, ProviderSettings, UpMsg } from "../../shared/p
 export class ConnectionAdmission {
   private acknowledged = false;
   get ready() { return this.acknowledged; }
-  admit(args: { onBlocked: () => void }): boolean {
-    if (this.acknowledged) return true;
+  admit(args: { socketReady: boolean; onBlocked: () => void }): boolean {
+    if (this.acknowledged && args.socketReady) return true;
     args.onBlocked(); return false;
   }
   opened() { this.acknowledged = false; }
@@ -25,6 +25,12 @@ export class SettingsControl {
     const pending = { requestId: `settings-${++this.sequence}`, provider: args.provider, settings: { ...args.settings } };
     this.pending = pending;
     return { kind: "settings", ...pending, selectedProvider: args.selectedProvider };
+  }
+
+  disconnected(): boolean {
+    const interrupted = !!this.pending;
+    this.pending = undefined;
+    return interrupted;
   }
 
   acceptHealth(args: { health: Health; provider: ProviderId }): { settings: ProviderSettings; error?: string } {

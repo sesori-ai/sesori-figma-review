@@ -28,6 +28,7 @@ type Conversation = {
   record: SessionRecord;
   session: ReviewSession;
   busy: boolean;
+  textItems: Map<string, string>;
   health?: ProviderHealth;
   servers?: Health["servers"];
 };
@@ -189,7 +190,7 @@ export function createReviewBridge(args: {
         },
         isCurrent: () => starting === reservation,
         accept: session => {
-          const current: Conversation = { owner, intentId: message.intentId, fileId: message.fileId, dir, record, session, busy: true };
+          const current: Conversation = { owner, intentId: message.intentId, fileId: message.fileId, dir, record, session, busy: true, textItems: new Map() };
           starting = undefined;
           conv = current;
           const anchor = `Figma file "${message.fileName}", page "${message.pageName}" (${message.pageId}). Anchor: ${message.anchor.type}${message.anchor.nodeIds.length ? ` ${message.anchor.nodeIds.join(", ")}` : ""}`;
@@ -237,8 +238,12 @@ export function createReviewBridge(args: {
           saveSession(current.dir, current.record);
           send(current.fileId, { kind: "health", health: makeHealth() });
           send(current.fileId, { kind: "started", intentId: current.intentId, session: current.record });
-        } else if (output.kind === "event") send(current.fileId, output);
-        else {
+        } else if (output.kind === "event") {
+          const event = output.event;
+          if (event.type === "text_start") current.textItems.set(event.itemId, "");
+          if (event.type === "text_delta") current.textItems.set(event.itemId, (current.textItems.get(event.itemId) ?? "") + event.text);
+          send(current.fileId, output);
+        } else {
           current.record.usage = output.usage;
           current.record.costUsd = output.cost.usd;
           current.record.costStatus = output.cost.status;
@@ -341,6 +346,9 @@ export function createReviewBridge(args: {
           protocolVersion: PROTOCOL_VERSION,
           intentId: mine ? conv!.intentId : pendingMine ? starting!.intentId : undefined,
           session: mine ? conv!.record : undefined,
+          activeText: mine && conv!.record.sessionId ? [...conv!.textItems].map(([itemId, text]) => ({
+            session: { provider: conv!.record.provider, sessionId: conv!.record.sessionId }, itemId, text,
+          })) : undefined,
           busy: mine ? conv!.busy : false,
         });
         send(message.fileId, { kind: "sessions", sessions: readSessions(dir) });
@@ -360,6 +368,7 @@ export function createReviewBridge(args: {
       }
       case "user":
         if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or open one from History." });
+        if (!conv.busy) conv.textItems.clear();
         conv.busy = true;
         conv.session.send({ text: message.text, selection: message.selection });
         return send(conv.fileId, { kind: "busy", busy: true });
