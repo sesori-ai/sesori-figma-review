@@ -49,12 +49,31 @@ const sumUsage = (left: Usage, right: Usage): Usage => ({
 /** Live stream values are provisional per turn; final result usage commits once without double counting. */
 export class ClaudeUsageTracker {
   private turn = zeroUsage();
+  private response = zeroUsage();
   private committed: Usage;
   constructor(args: { committed: Usage }) { this.committed = args.committed; }
-  messageStart(value: unknown): Usage { this.turn = addClaudeUsage(this.turn, value); return this.snapshot(); }
-  messageDelta(value: unknown): Usage { this.turn = addClaudeUsage(this.turn, value); return this.snapshot(); }
-  complete(value: unknown): Usage { this.committed = addClaudeUsage(this.committed, value); this.turn = zeroUsage(); return this.snapshot(); }
-  snapshot(): Usage { return sumUsage(this.committed, this.turn); }
+  messageStart(value: unknown): Usage {
+    this.turn = sumUsage(this.turn, this.response);
+    this.response = addClaudeUsage(zeroUsage(), value);
+    return this.snapshot();
+  }
+  messageDelta(value: unknown): Usage {
+    const usage = object(value);
+    // Messages API delta usage is cumulative for this response; omitted fields retain their last value.
+    this.response = {
+      input: typeof usage?.input_tokens === "number" ? usage.input_tokens : this.response.input,
+      output: typeof usage?.output_tokens === "number" ? usage.output_tokens : this.response.output,
+      cacheRead: typeof usage?.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : this.response.cacheRead,
+      cacheWrite: typeof usage?.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : this.response.cacheWrite,
+    };
+    return this.snapshot();
+  }
+  complete(value: unknown): Usage {
+    this.committed = addClaudeUsage(this.committed, value);
+    this.turn = zeroUsage(); this.response = zeroUsage();
+    return this.snapshot();
+  }
+  snapshot(): Usage { return sumUsage(this.committed, sumUsage(this.turn, this.response)); }
 }
 
 function userMessage(args: { text: string; selection: NodeRef[]; context?: string }): SDKUserMessage {

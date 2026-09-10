@@ -57,9 +57,12 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   replies. Automated fixtures cover each seam. Enhanced Haiku/low smoke on isolated port 43064 proved cancelled
   `ask_user` → interrupted turn → same-session `focus` follow-up, live tokens while busy, stable confirmed cost,
   started-block text accumulation, and two final turns: 34,487 tokens, positive $0.0241 cost. Owned fixture removed.
-- Review repairs and required ordinary-flow fixtures bring Step 2 to 1,592 changed lines, slightly above the
-  1,500 soft cap (measured against `origin/master` after base reconciliation). Splitting would publish the provider seam with known Stop, usage, stream identity, or startup
-  regressions, so the coherent repair stays in Step 2 rather than omitting proof or shipping a broken intermediary.
+- Final parent audit corrected cumulative Messages API usage within each response, including nonzero initial output,
+  repeated usage deltas and multiple responses in one turn. Deterministic regression assertions, full check and build
+  pass; no additional paid smoke was needed for this pure accounting correction.
+- Review repairs and required ordinary-flow fixtures bring Step 2 to approximately 1,620 changed lines, above the
+  1,500 soft cap (against `origin/master`). Splitting would publish the provider seam with known Stop, usage, stream
+  identity, or startup regressions, so the coherent repair stays with its proof rather than shipping a broken intermediary.
 
 ## Qualification gates before user-facing Codex exposure
 

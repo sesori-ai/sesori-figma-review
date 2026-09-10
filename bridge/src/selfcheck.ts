@@ -79,11 +79,19 @@ let usage = addClaudeUsage(zeroUsage(), { input_tokens: 10, output_tokens: 20, c
 usage = addClaudeUsage(usage, { input_tokens: 1, output_tokens: 1 });
 assert.deepEqual(usage, { input: 11, output: 21, cacheRead: 100, cacheWrite: 7 });
 const usageTracker = new ClaudeUsageTracker({ committed: zeroUsage() });
-assert.deepEqual(usageTracker.messageStart({ input_tokens: 10, cache_read_input_tokens: 50 }), { input: 10, output: 0, cacheRead: 50, cacheWrite: 0 });
-assert.deepEqual(usageTracker.messageDelta({ output_tokens: 20 }), { input: 10, output: 20, cacheRead: 50, cacheWrite: 0 });
+assert.deepEqual(usageTracker.messageStart({ input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 50 }), { input: 10, output: 1, cacheRead: 50, cacheWrite: 0 });
+assert.deepEqual(usageTracker.messageDelta({ output_tokens: 8 }), { input: 10, output: 8, cacheRead: 50, cacheWrite: 0 });
+assert.deepEqual(usageTracker.messageDelta({ output_tokens: 20 }), { input: 10, output: 20, cacheRead: 50, cacheWrite: 0 }, "cumulative deltas replace the response total, including initial output");
 assert.deepEqual(usageTracker.complete({ input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 50 }), { input: 10, output: 20, cacheRead: 50, cacheWrite: 0 });
 assert.deepEqual(usageTracker.messageStart({ input_tokens: 2 }), { input: 12, output: 20, cacheRead: 50, cacheWrite: 0 });
 assert.deepEqual(usageTracker.complete({ input_tokens: 2, output_tokens: 3 }), { input: 12, output: 23, cacheRead: 50, cacheWrite: 0 });
+const multiResponse = new ClaudeUsageTracker({ committed: { input: 5, output: 7, cacheRead: 0, cacheWrite: 0 } });
+multiResponse.messageStart({ input_tokens: 10, output_tokens: 1 });
+multiResponse.messageDelta({ output_tokens: 4 });
+assert.deepEqual(multiResponse.messageStart({ input_tokens: 12, output_tokens: 1 }), { input: 27, output: 12, cacheRead: 0, cacheWrite: 0 });
+assert.deepEqual(multiResponse.messageDelta({ output_tokens: 6, cache_read_input_tokens: 3 }), { input: 27, output: 17, cacheRead: 3, cacheWrite: 0 });
+assert.deepEqual(multiResponse.messageDelta({ output_tokens: 8 }), { input: 27, output: 19, cacheRead: 3, cacheWrite: 0 }, "successive responses accumulate once and absent usage fields persist");
+assert.deepEqual(multiResponse.complete({ input_tokens: 22, output_tokens: 12, cache_read_input_tokens: 3 }), { input: 27, output: 19, cacheRead: 3, cacheWrite: 0 });
 
 // Message id + block index, not changing stream-envelope UUID, correlates text across native responses.
 const session = { provider: "claude" as const, sessionId: "s1" };
