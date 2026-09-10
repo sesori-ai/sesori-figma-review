@@ -1,7 +1,7 @@
 {
   "name": "@sesori/figma-review",
   "version": "0.3.0",
-  "description": "Claude reviews your Figma prototype from inside Figma: the flow, then every screen, asking at the right spot and writing Dev Mode annotations. `npx @sesori/figma-review` starts the local bridge.",
+  "description": "Claude reviews your Figma prototype from inside Figma: the flow, then every screen, asking at the right spot and writing Dev Mode annotations. `npm install -g @sesori/figma-review`, then `sesori-figma-review` starts the local bridge.",
   "license": "Apache-2.0",
   "author": "Sesori",
   "repository": {

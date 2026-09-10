@@ -2,11 +2,14 @@
 
 ## 0.3.0 — 2026-09-10
 
-- Published as **`@sesori/figma-review`**: `npx @sesori/figma-review` starts the bridge, copies the plugin to `~/.sesori-review/plugin/` and prints the manifest path to import into Figma.
+- Published as **`@sesori/figma-review`**: `npm install -g @sesori/figma-review` then `sesori-figma-review` (or `npx -y @sesori/figma-review`) starts the bridge, copies the plugin to `~/.sesori-review/plugin/` and prints the manifest path to import into Figma.
 - Bridge is bundled to `bridge/dist/bridge.mjs`; dependencies hoisted to the root package.
 - Bridge start hints when no Claude credentials are found.
-- Plugin re-attaches to its conversation after a bridge restart.
+- Plugin re-attaches to its conversation after a bridge restart. Reopening the plugin while Claude is idle shows the empty state instead of a stuck Stop button; the last conversation is in History.
 - README rewritten around the quick start.
+- Product name is **Sesori Review** (Figma Community does not allow "Figma" in plugin names); the npm package stays `@sesori/figma-review`.
+- Offline card in the panel with the install and start commands and Copy buttons; a notice when the plugin is opened in the browser version of Figma, and one when plugin and bridge versions differ.
+- The SDK's permission-shadowing warning is silenced (the auto-approve list is intended).
 
 ## 0.2.0 — 2026-09-10
 

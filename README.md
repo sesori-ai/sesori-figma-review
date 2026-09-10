@@ -1,9 +1,9 @@
-<p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/plugin/assets/icon-128.png" width="96" alt="Sesori Figma Review"></p>
-<h1 align="center">Sesori Figma Review</h1>
+<p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/plugin/assets/icon-128.png" width="96" alt="Sesori Review"></p>
+<h1 align="center">Sesori Review</h1>
 <p align="center"><b>Claude reviews your Figma prototype with you, inside Figma.</b><br>
 It walks the canvas screen by screen, asks before it assumes, and leaves Dev Mode annotations your developers can build from.</p>
 
-<p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/docs/screenshot.png" width="440" alt="The plugin panel: a question about the selected screen, Claude focuses it, looks at it and lists the top three gaps before dev"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/docs/screenshot.png" alt="The plugin panel: empty state, a question about the selected screen with Claude focusing and reading it, and a selection review with findings"></p>
 
 ## Why you'd want this
 
@@ -15,19 +15,20 @@ It walks the canvas screen by screen, asks before it assumes, and leaves Dev Mod
 
 ## Quick start
 
-You need **Node 22+**, the **Figma desktop app**, and **Claude Code signed in** (run `claude` once) or an `ANTHROPIC_API_KEY` in your shell.
+You need **Node 22+**, the **Figma desktop app** (the browser version cannot reach a local process), and **Claude Code signed in** (run `claude` once) or an `ANTHROPIC_API_KEY` in your shell.
 
-**1. Start the bridge** and keep the terminal open:
+**1. Install and start the bridge**, and keep the terminal open:
 
 ```bash
-npx @sesori/figma-review
+npm install -g @sesori/figma-review   # once
+sesori-figma-review                   # every time you review
 ```
 
-It prints the path of a plugin manifest, something like `~/.sesori-review/plugin/manifest.json`.
+It prints the path of a plugin manifest, something like `~/.sesori-review/plugin/manifest.json`. (No install? `npx -y @sesori/figma-review` does both in one go.)
 
 **2. Add the plugin to Figma** (once): **Plugins → Development → Import plugin from manifest…** and pick that file.
 
-**3. Review**: open a file, run **Plugins → Development → Sesori Figma Review**, click **Review flow**. The header dot turns green when the bridge and Claude are ready.
+**3. Review**: open a file, run **Plugins → Development → Sesori Review**, click **Review flow**. The header dot turns green when the bridge and Claude are ready.
 
 Next time you only need step 1 and step 3.
 
@@ -49,7 +50,7 @@ Annotations are written without asking and appended to what is there. Anything n
 ## How it works
 
 ```
-Figma desktop ── plugin UI ──► ws://localhost:3055 ──► bridge (npx @sesori/figma-review) ──► Claude Code ──► Anthropic API
+Figma desktop ── plugin UI ──► ws://localhost:3055 ──► bridge (sesori-figma-review) ──► Claude Code ──► Anthropic API
 ```
 
 The plugin is a thin client. The bridge is a small local process that runs the Claude Agent SDK, exposes Figma tools to Claude (`get_flow`, `get_screen`, `focus`, `annotate`, `ask_user`) and keeps a workspace per Figma file under `~/.sesori-review/files/<fileId>/`. See [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -81,12 +82,12 @@ Per-file workspace (`~/.sesori-review/files/<fileId>/`), the agent's working dir
 <details>
 <summary><b>Troubleshooting</b></summary>
 
-- **"bridge offline"** in the header: start `npx @sesori/figma-review`. The plugin reconnects every 2 seconds and picks the conversation back up.
+- **"bridge offline"** in the header: the panel shows the install and start commands. The plugin reconnects every 2 seconds and picks the conversation back up.
+- **Versions differ** notice: `npm install -g @sesori/figma-review@latest`, then update the plugin from Figma (Community) or by restarting the bridge (manifest import).
 - **Claude failed to start**: run `claude` in a terminal to check auth. The bridge terminal shows the error.
 - **Figma MCP off**: enable the desktop MCP server in Dev Mode, or ignore it.
 - **Annotations fail**: free Figma plan, or a node type that cannot hold annotations (groups, some vectors).
 - **Nothing happens after "Review flow"**: check the bridge terminal. Closing the plugin mid-turn fails pending tool calls and Claude is told so.
-- **Upgrading**: `npx @sesori/figma-review@latest`. The bridge refreshes the plugin copy on every start; Figma reloads it the next time you run the plugin.
 </details>
 
 <details>

@@ -24,6 +24,15 @@ const cards = new Map<string, (reason?: string) => void>();
 const el = (tag: string, cls = "", text = "") => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const icon = (id: string) => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.innerHTML = `<use href="#i-${id}"/>`; return s; };
 const btn = (label: string, onClick: () => void, cls = "") => { const b = el("button", cls, label) as HTMLButtonElement; b.onclick = onClick; return b; };
+// Offline card. Browser Figma cannot reach localhost; Electron token is the iframe's available desktop signal.
+const INSTALL = "npm install -g @sesori/figma-review", START = "sesori-figma-review";
+const offline = el("div", "card offline");
+offline.innerHTML = /Electron/.test(navigator.userAgent)
+  ? `<div class="q">The bridge is not running</div>` + [["Install once", INSTALL], ["Start it and keep the terminal open", START]].map(([label, command]) => `<div>${label}</div><div class="cmd"><code>${command}</code><button class="ghost" data-cmd="${command}">Copy</button></div>`).join("")
+    + `<div class="hint">Needs Node 22+ and Claude Code signed in (run <code>claude</code> once) or <code>ANTHROPIC_API_KEY</code>.</div>`
+  : `<div class="q">Sesori Review needs the Figma desktop app</div><div>The browser version of Figma cannot reach the bridge running on your machine.</div>`;
+offline.querySelectorAll("button").forEach(button => button.onclick = () => { const textarea = document.createElement("textarea"); textarea.value = button.dataset.cmd!; document.body.append(textarea); textarea.select(); document.execCommand("copy"); textarea.remove(); });
+const drift = el("div", "error");
 const working = el("div", "typing"); working.append(el("i"), el("i"), el("i")); // re-appended on every busy=true, so clearing the chat is safe
 const bubble = (cls: string, text = "") => { empty.remove(); const b = el("div", cls, text); chat.insertBefore(b, working.parentNode === chat ? working : null); chat.scrollTop = chat.scrollHeight; return b; };
 const assistant = (html: string) => { const b = bubble("msg assistant"); const body = el("div", "body"); body.innerHTML = html; b.append(body); return body; };
@@ -59,10 +68,10 @@ window.onmessage = (e: MessageEvent) => {
 function connect() {
   ws = new WebSocket(`ws://localhost:${BRIDGE_PORT}`);
   ws.onopen = () => {
-    setStatus("connected to bridge", "warn"); send({ kind: "hello", protocolVersion: PROTOCOL_VERSION, fileId: ctx.fileId, fileName: ctx.fileName });
+    offline.remove(); setStatus("connected to bridge", "warn"); send({ kind: "hello", protocolVersion: PROTOCOL_VERSION, fileId: ctx.fileId, fileName: ctx.fileName });
     if (live?.sessionId) send({ kind: "open", fileId: ctx.fileId, fileName: ctx.fileName, session: { provider: live.provider, sessionId: live.sessionId } }); // bridge restarted mid-conversation
   };
-  ws.onclose = () => { setStatus("bridge offline — run `npx @sesori/figma-review` in a terminal and keep it open", "bad"); setTimeout(connect, 2000); };
+  ws.onclose = () => { chat.prepend(offline); setStatus("bridge offline", "bad"); setTimeout(connect, 2000); };
   ws.onerror = () => {};
   ws.onmessage = e => onDown(JSON.parse(e.data));
 }
@@ -95,7 +104,11 @@ function renderHealth(h: Health) {
   setStatus(error ?? `${providerName} ${provider?.version ?? provider?.status ?? "starting…"}${provider?.model ? ` · ${provider.model.replace(/^claude-/, "")}` : ""} · ${mcp}`, error ? "bad" : h.figmaMcp === "up" && !failed.length ? "ok" : "warn");
   statusEl.title = [h.figmaMcp === "up" ? "" : "Figma desktop MCP server is off: Dev Mode → inspect panel → Enable desktop MCP server. The review still works without it.", ...failed].filter(Boolean).join("\n");
   const settings = h.settings.providers[providerId]; modelSel.value = settings.model; effortSel.value = settings.effort;
-  $("about").textContent = `Sesori Figma Review ${__VERSION__} · bridge ${h.bridge}${provider?.version ? ` · ${providerName} ${provider.version}` : ""}`;
+  $("about").textContent = `Sesori Review ${__VERSION__} · bridge ${h.bridge}${provider?.version ? ` · ${providerName} ${provider.version}` : ""}`;
+  if (h.bridge !== __VERSION__ && !drift.isConnected) {
+    drift.textContent = `Plugin ${__VERSION__} and bridge ${h.bridge} differ. Update bridge with ${INSTALL}@latest and refresh plugin from Figma.`;
+    chat.prepend(drift);
+  }
 }
 function renderCost(s: SessionRecord) {
   const k = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);

@@ -19,6 +19,11 @@ import { ClaudeProvider } from "./providers/claude.ts";
 import type { ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
 import { hasClaudeAuth, installPlugin, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
 
+const emitWarning = process.emitWarning.bind(process); // SDK warns that allowedTools bypasses canUseTool; that is the editable auto-approve list by design
+process.emitWarning = ((...args: Parameters<typeof process.emitWarning>) => {
+  if (!/canUseTool/.test(String(args[0]))) emitWarning(...args);
+}) as typeof process.emitWarning;
+
 const VERSION: string = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
 const log = (...values: unknown[]) => console.log(new Date().toISOString(), ...values);
 const now = () => new Date().toISOString();
@@ -265,6 +270,6 @@ new WebSocketServer({ port, host: "127.0.0.1" }).on("connection", (ws: WebSocket
 log(`bridge ${VERSION} listening on ws://127.0.0.1:${port}` + (process.env.APP_REPO ? ` · app repo ${process.env.APP_REPO}` : ""));
 const manifest = installPlugin();
 console.log(manifest
-  ? `\nSesori Figma Review is running. Keep this terminal open.\n\nFirst time? Add the plugin to Figma desktop once:\n  Plugins → Development → Import plugin from manifest… → ${manifest}\nThen run it from Plugins → Development → Sesori Figma Review.\n`
+  ? `\nSesori Review is running. Keep this terminal open.\n\nFirst time? Add the plugin to Figma desktop once:\n  Plugins → Development → Import plugin from manifest… → ${manifest}\nThen run it from Plugins → Development → Sesori Review.\n`
   : "\nPlugin build not found (run `npm run build`); the bridge is up but there is nothing to import into Figma.\n");
 if (!hasClaudeAuth()) console.log("No Claude credentials found: run `claude` once to sign in, or export ANTHROPIC_API_KEY. The plugin will show \"Claude failed to start\" until then.\n");

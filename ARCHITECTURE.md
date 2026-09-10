@@ -34,8 +34,9 @@ bridge/smoke.mjs            fake plugin for an end-to-end run without Figma
 ```
 
 Distribution: one npm package, `@sesori/figma-review`, root `package.json` owns the runtime dependencies and ships `bridge/dist`,
-`plugin/dist` and `plugin/manifest.json`. `npx @sesori/figma-review` runs the bridge, which copies the plugin to
-`~/.sesori-review/plugin/` (a stable path, unlike the npx cache) and prints the manifest path to import into Figma.
+`plugin/dist` and `plugin/manifest.json`. The `sesori-figma-review` bin (global install or npx) runs the bridge, which copies
+the plugin to `~/.sesori-review/plugin/` (a stable path, unlike npm's global or npx directories) and prints the manifest path to
+import into Figma.
 
 ## Per-file workspace (agent cwd)
 

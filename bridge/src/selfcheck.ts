@@ -10,7 +10,7 @@ const { installPlugin, readAllow, readSessions, readSettings, saveSession, saveS
 const { addClaudeUsage, normalizeClaudeDisplayEvents, readClaudeTranscript } = await import("./providers/claude.ts");
 
 const manifest = installPlugin(); // needs a plugin build; tolerate its absence so `check` also runs before `build`
-if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"') && readFileSync(join(process.env.SESORI_REVIEW_HOME, "plugin/dist/ui.html"), "utf8").includes("Sesori Figma Review"), "plugin is copied next to the workspaces");
+if (manifest) assert.ok(readFileSync(manifest, "utf8").includes('"main": "dist/code.js"') && readFileSync(join(process.env.SESORI_REVIEW_HOME, "plugin/dist/ui.html"), "utf8").includes("Sesori Review"), "plugin is copied next to the workspaces");
 
 const defaults = { provider: "claude" as const, providers: { claude: { model: "", effort: "" }, codex: { model: "", effort: "" } } };
 assert.deepEqual(readSettings(), defaults, "no settings file → Claude defaults and separate provider preferences");

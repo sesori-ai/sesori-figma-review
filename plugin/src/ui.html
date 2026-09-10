@@ -91,7 +91,8 @@
   .card pre { margin: 0; font: var(--mono); line-height: 1.45; white-space: pre-wrap; max-height: 160px; overflow: auto; background: var(--bg-2); padding: 8px; border-radius: 8px; }
   .card .ctl { display: flex; flex-wrap: wrap; gap: 6px; }
   .card .ctl button { border-radius: 999px; }
-  .card .ctl textarea { flex: 1 1 100%; }
+  .card.offline { margin-bottom: 8px; } .card.offline .cmd { display: flex; gap: 6px; align-items: center; }
+  .card.offline .cmd code { flex: 1; background: var(--bg-2); padding: 6px 10px; border-radius: 6px; font-size: 11px; user-select: all; }  .card .ctl textarea { flex: 1 1 100%; }
   .card .a { color: var(--fg-2); display: flex; align-items: center; gap: 6px; } .card .a svg { width: 12px; height: 12px; }
   .error { align-self: stretch; color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); border-radius: var(--r); padding: 8px 12px; white-space: pre-wrap; font-size: 11px; }
   .muted { color: var(--fg-3); font-size: 11px; }
@@ -129,7 +130,7 @@
 </svg>
 <header>
   <div class="brand">
-    <img class="logo" src="__MARK__" alt=""><b>Sesori Figma Review</b>
+    <img class="logo" src="__MARK__" alt=""><b>Sesori Review</b>
     <button id="btn-settings" class="icon" title="Model and effort"><svg><use href="#i-sliders"/></svg></button>
   </div>
   <div class="statusbar"><span id="dot" class="dot"></span><span id="status">connecting to bridge…</span><span id="cost"></span></div>
