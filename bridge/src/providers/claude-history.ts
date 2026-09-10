@@ -26,8 +26,12 @@ export function readClaudeTranscript(args: { dir: string; sessionId: string }): 
       if (typeof content === "string") out.push({ role: "user", text: strip(content) });
       for (const blockValue of Array.isArray(content) ? content : []) {
         const block = object(blockValue);
-        if (block?.type === "text" && typeof block.text === "string" && /^\[Request interrupted/.test(block.text)) {
-          out.push({ role: "tool", name: "stopped", input: {} });
+        if (block?.type === "text" && typeof block.text === "string") {
+          if (/^\[Request interrupted/.test(block.text)) out.push({ role: "tool", name: "stopped", input: {} });
+          else {
+            const text = strip(block.text);
+            if (text) out.push({ role: "user", text });
+          }
         } else if (block?.type === "tool_result" && typeof block.tool_use_id === "string"
           && toolNames.get(block.tool_use_id) === "mcp__figma__ask_user") {
           const values = Array.isArray(block.content) ? block.content : [];

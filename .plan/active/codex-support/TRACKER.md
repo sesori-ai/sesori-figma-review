@@ -45,8 +45,9 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   four-turn/$0.10 limits and no credential/config copying. They prove preserved intent, not this dormant foundation.
   Later live tests retain those rules. Codex tests use cheapest suitable catalog-reported image/tool-capable model and
   low effort; ask before premium/high-effort exceptions.
-- Foundation current diff is 1,301 changed lines (1,219 additions, 82 deletions), within the 1,500-line cap. `npm ci`, legacy workspace checks, focused mocked Claude adapter
-  checks, both builds and `git diff --check` pass. Tests cover exact legacy tool metadata/schema compatibility;
+- Foundation current diff is 1,478 changed lines (1,396 additions, 82 deletions), within the 1,500-line cap. `npm ci`, legacy workspace checks, focused mocked Claude adapter
+  checks, both builds and `git diff --check` pass. Tests cover exact tool description strings, selected parameter
+  metadata, representative schema cases and source-audited legacy catalog reuse;
   warm settings/boundary identity, replacement/consume/cold fallback/dispose/stale fencing; serialized settings,
   rollback and fail-closed behavior; init MCP fallback; safe UUID transcript projection; normalized stream identity;
   cumulative response/per-turn usage; and invalid/recovered immutable cost. No legacy wire/UI/session schema changed;
@@ -84,7 +85,13 @@ PR #3 current-head findings and local dispositions:
 | 3981475312, 3981525775 | Fixed: normalized init MCP snapshot survives refresh rejection and failure is logged. |
 | 3981525724, 3981525785 | Fixed: UUID-only native IDs before path construction; one SDK-free transcript leaf serves legacy wrapper and adapter, preserving filtering/interruption/trailing lines. |
 | 3981525740 | Fixed: invalid/nonfinite/negative native cost preserves known amount as unavailable; every valid cumulative snapshot is authoritative base+native (including a decrease) and recovers reported status. |
-| 3981525759 | Fixed: exact released descriptions/hints/schemas restored; legacy bridge uses neutral catalog through unchanged old tool/reply flow. |
+| 3981525759 | Fixed: released descriptions and hints restored exactly; representative schemas tested and legacy catalog reuse source-audited through unchanged old tool/reply flow. |
+| 3981834685 | Fixed: copied allow-list joins warm immutable key and same operation snapshot feeds options; real fixture edits replace prepare cache and force current cold start. |
+| 3981834697 | Fixed: one active-turn identity makes idle/failed/late Stop safe and clears old ownership before result yields; native starts and suspended iterator covered. |
+| 3981834703 | Fixed: MCP refresh has cleaned 1s deadline; timeout keeps init fallback, does not block following output, and safely observes late rejection. |
+| 3981805798 | Fixed: ordinary native user array text projects with context stripping; mixed image/non-question tool result stays hidden. |
+| 3981805806 | Fixed: proof wording limited to exact descriptions, selected metadata, representative schemas and source audit. |
+| 3981805787 | Declined with parent native evidence: inspected 13 app-scoped JSONL transcripts contain no native `result` rows; persisted assistant text is already projected. No synthetic format invented pending an actual supported native shape. |
 | 3981525734 | Fixed: narrow injectable Claude-native factory; mocked prepare/start/session iteration, lifecycle, MCP and settings paths; owned temp roots auto-clean. |
 | 3981525766, 3981525781 | Fixed: usage/cost documented as replacement cumulative session snapshots; transport/native-session qualification refs corrected to Steps 4/5. |
 

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ReviewProvider } from "./types.ts";
+import type { ProviderOutput, ReviewProvider } from "./types.ts";
 
 const testRoots = [mkdtempSync(join(tmpdir(), "claude-adapter-")), mkdtempSync(join(tmpdir(), "review-adapter-"))];
 process.env.CLAUDE_CONFIG_DIR = testRoots[0];
@@ -43,12 +43,16 @@ class FakeQuery implements AsyncIterable<unknown> {
   readonly efforts: (string | null)[] = [];
   interrupts = 0;
   closes = 0;
+  failInterrupts = 0;
   failEfforts = 0;
   failModelCalls = new Set<number>();
   nextEffortGate?: Promise<void>;
   constructor(readonly messages: unknown[] = [], readonly statuses: unknown = []) {}
   async *[Symbol.asyncIterator]() { yield* this.messages; }
-  async interrupt() { this.interrupts++; }
+  async interrupt() {
+    this.interrupts++;
+    if (this.failInterrupts-- > 0) throw new Error("interrupt failed");
+  }
   async setModel(model?: string) {
     this.models.push(model);
     if (this.failModelCalls.delete(this.models.length)) throw new Error("setModel failed");
@@ -62,6 +66,7 @@ class FakeQuery implements AsyncIterable<unknown> {
   }
   async mcpServerStatus() {
     if (this.statuses instanceof Error) throw this.statuses;
+    if (this.statuses instanceof Promise) return await this.statuses;
     return this.statuses as { name: string; status: string; error?: string }[];
   }
   close() { this.closes++; }
@@ -264,6 +269,30 @@ effortChanged.provider.dispose();
 await Promise.resolve();
 assert.equal(newEffortWarm.closes, 1);
 
+const permissionChanged = lifecycle();
+const permissionsPath = join(workspace, "permissions.json");
+const originalAllow = JSON.parse(readFileSync(permissionsPath, "utf8")).allow as string[];
+permissionChanged.provider.prepare(warmArgs(firstBoundary));
+const permissionWarm1 = new FakeWarm();
+permissionChanged.warmCalls[0].pending.resolve(permissionWarm1);
+await Promise.resolve();
+const prepareAllow = [...originalAllow.slice(1), "FixturePrepare"];
+writeFileSync(permissionsPath, JSON.stringify({ allow: prepareAllow }));
+permissionChanged.provider.prepare(warmArgs(firstBoundary));
+assert.equal(permissionChanged.warmCalls.length, 2, "prepare replaces warm query after permission revocation");
+await Promise.resolve();
+assert.equal(permissionWarm1.closes, 1);
+const permissionWarm2 = new FakeWarm();
+permissionChanged.warmCalls[1].pending.resolve(permissionWarm2);
+await Promise.resolve();
+const startAllow = [...prepareAllow.slice(1), "FixtureStart"];
+writeFileSync(permissionsPath, JSON.stringify({ allow: startAllow }));
+await permissionChanged.provider.start({ ...warmArgs(firstBoundary), baseRecord });
+await Promise.resolve();
+assert.equal(permissionWarm2.closes, 1, "start rejects warm snapshot after another permission change");
+assert.deepEqual(permissionChanged.coldOptions[0].allowedTools, startAllow, "cold options use one current allow snapshot");
+writeFileSync(permissionsPath, JSON.stringify({ allow: originalAllow }));
+
 const sessionWith = async (query: FakeQuery) => {
   const native: Native = { warm: async () => new FakeWarm(), cold: () => query };
   const provider = new ClaudeProvider({ version: "test", log: () => {}, onPrepared: () => {}, native });
@@ -273,6 +302,7 @@ const sessionWith = async (query: FakeQuery) => {
 // Partial update rolls back; updates serialize, while Stop stays independent of the settings queue.
 const settingsQuery = new FakeQuery();
 const settingsSession = await sessionWith(settingsQuery);
+settingsSession.send({ text: "active turn", selection: [] });
 settingsQuery.failEfforts = 1;
 await assert.rejects(settingsSession.applySettings({ settings: { model: "sonnet", effort: "high" } }), /effort failed/);
 assert.deepEqual(settingsQuery.models, ["sonnet", "haiku"]);
@@ -307,6 +337,66 @@ assert.throws(() => explicitlyClosed.send({ text: "must reject", selection: [] }
 await explicitlyClosed.interrupt();
 assert.equal(explicitlyClosedQuery.interrupts, 0);
 
+const turnOutcome = (outputs: ProviderOutput[]) => {
+  const output = outputs.find(item => item.kind === "event" && item.event.type === "turn_end");
+  return output?.kind === "event" && output.event.type === "turn_end" ? output.event.outcome : undefined;
+};
+const nativeInit = { type: "system", subtype: "init", session_id: baseRecord.sessionId, mcp_servers: [] };
+const idleStopQuery = new FakeQuery([nativeInit, {
+  type: "result", is_error: false, usage: {}, total_cost_usd: 0,
+}]);
+const idleStopSession = await sessionWith(idleStopQuery);
+await idleStopSession.interrupt();
+assert.equal(idleStopQuery.interrupts, 0, "idle Stop does not taint or call native control");
+idleStopSession.send({ text: "next turn", selection: [] });
+const idleOutputs = [];
+for await (const output of idleStopSession.output) idleOutputs.push(output);
+assert.equal(turnOutcome(idleOutputs), "completed", "idle Stop cannot mark next turn interrupted");
+await idleStopSession.interrupt();
+assert.equal(idleStopQuery.interrupts, 0, "late Stop after natural result is idle");
+
+const failedStopQuery = new FakeQuery([nativeInit, { type: "result", is_error: false, usage: {}, total_cost_usd: 0 }]);
+const failedStopSession = await sessionWith(failedStopQuery);
+failedStopSession.send({ text: "active", selection: [] });
+failedStopQuery.failInterrupts = 1;
+await assert.rejects(failedStopSession.interrupt(), /interrupt failed/);
+const failedStopOutputs = [];
+for await (const output of failedStopSession.output) failedStopOutputs.push(output);
+assert.equal(turnOutcome(failedStopOutputs), "completed", "failed interrupt rolls back only its active turn intent");
+
+const suspendedQuery = new FakeQuery([
+  nativeInit,
+  { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },
+  { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },
+]);
+const suspendedSession = await sessionWith(suspendedQuery);
+const iterator = suspendedSession.output[Symbol.asyncIterator]();
+suspendedSession.send({ text: "first", selection: [] });
+await iterator.next(); // init
+const firstTurnEnd = await iterator.next();
+assert.equal(firstTurnEnd.value?.kind, "event");
+suspendedSession.send({ text: "second", selection: [] });
+await suspendedSession.interrupt();
+await iterator.next(); // old result usage after consumer started next turn
+const secondTurnEnd = await iterator.next();
+assert.equal(secondTurnEnd.value?.kind === "event" && secondTurnEnd.value.event.type === "turn_end"
+  ? secondTurnEnd.value.event.outcome : undefined, "interrupted", "old result continuation cannot clear next turn");
+
+const nativeStartQuery = new FakeQuery([
+  nativeInit,
+  { type: "stream_event", event: { type: "message_start", message: { id: "native" } } },
+  { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } },
+  { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },
+]);
+const nativeStartSession = await sessionWith(nativeStartQuery);
+const nativeIterator = nativeStartSession.output[Symbol.asyncIterator]();
+await nativeIterator.next(); // init
+await nativeIterator.next(); // text_start after top-level message_start establishes active turn
+await nativeStartSession.interrupt();
+const nativeTurnEnd = await nativeIterator.next();
+assert.equal(nativeTurnEnd.value?.kind === "event" && nativeTurnEnd.value.event.type === "turn_end"
+  ? nativeTurnEnd.value.event.outcome : undefined, "interrupted");
+
 // Actual session iteration keeps native init MCP status if refresh fails, then emits normalized accounting.
 const initQuery = new FakeQuery([
   { type: "system", subtype: "init", session_id: baseRecord.sessionId, claude_code_version: "test", model: "haiku",
@@ -329,6 +419,27 @@ assert.deepEqual(outputs.at(-1), {
   kind: "usage", usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0 },
   cost: { usd: 0.01, status: "reported" }, turnCompleted: true,
 });
+
+const lateStatus = deferred<{ name: string; status: string }[]>();
+const stalledQuery = new FakeQuery([
+  { ...nativeInit, mcp_servers: [{ name: "figma", status: "disconnected" }] },
+  { type: "result", is_error: false, usage: {}, total_cost_usd: 0 },
+], lateStatus.promise);
+const stalledLogs: unknown[][] = [];
+const stalledNative: Native = { warm: async () => new FakeWarm(), cold: () => stalledQuery };
+const stalledProvider = new ClaudeProvider({
+  version: "test", log: (...values) => stalledLogs.push(values), onPrepared: () => {},
+  native: stalledNative, mcpStatusTimeoutMs: 5,
+});
+const stalledSession = await stalledProvider.start({ ...warmArgs(firstBoundary), resume: baseRecord.sessionId, baseRecord });
+const stalledOutputs = [];
+for await (const output of stalledSession.output) stalledOutputs.push(output);
+assert.deepEqual(stalledOutputs.find(output => output.kind === "initialized")?.servers,
+  [{ name: "figma", status: "disconnected", error: undefined }]);
+assert.equal(stalledOutputs.at(-1)?.kind, "usage", "MCP timeout cannot block following model output");
+assert.ok(stalledLogs.some(values => String(values[1]).includes("timed out")));
+lateStatus.reject(new Error("late refresh rejection"));
+await Promise.resolve(); // Promise.race retains rejection handler after timeout
 
 let usage = addClaudeUsage(zeroClaudeUsage(), {
   input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 100, cache_creation_input_tokens: 7,
@@ -384,12 +495,18 @@ const transcriptDir = join(process.env.CLAUDE_CONFIG_DIR, "projects", dir.replac
 mkdirSync(transcriptDir, { recursive: true });
 writeFileSync(join(transcriptDir, `${nativeSession}.jsonl`), [
   { type: "user", message: { content: "[Figma file F]\nReview.\n[Current selection: none]" } },
+  { type: "user", message: { content: [
+    { type: "text", text: "[Figma file F]\nArray text.\n[Current selection: none]" },
+    { type: "image", source: { data: "hidden" } },
+    { type: "tool_result", tool_use_id: "not-a-question", content: "ignored" },
+  ] } },
   { type: "assistant", message: { content: [{ type: "thinking", thinking: "hidden" }, { type: "image", source: { data: "hidden" } }, { type: "tool_use", id: "q", name: "mcp__figma__ask_user", input: { question: "Next?" } }] } },
   { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "q", content: "Next\n[Current selection: none]" }] } },
   { type: "assistant", message: { content: [{ type: "text", text: "Done" }] } },
 ].map(value => JSON.stringify(value)).join("\n"));
 assert.deepEqual(readClaudeTranscript({ dir, sessionId: nativeSession }), [
   { role: "user", text: "Review." },
+  { role: "user", text: "Array text." },
   { role: "tool", name: "mcp__figma__ask_user", input: { question: "Next?" } },
   { role: "answer", text: "Next" },
   { role: "assistant", text: "Done" },

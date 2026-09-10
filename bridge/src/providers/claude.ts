@@ -69,12 +69,34 @@ export const addClaudeUsage = (total: Usage, value: unknown): Usage => {
     cacheWrite: total.cacheWrite + number(usage?.cache_creation_input_tokens),
   };
 };
+const MCP_STATUS_TIMEOUT_MS = 1000;
 const serverStatuses = (value: unknown): { name: string; status: string; error?: string }[] =>
   (Array.isArray(value) ? value : []).flatMap(item => {
     const server = object(item);
     if (typeof server?.name !== "string" || typeof server.status !== "string") return [];
     return [{ name: server.name, status: server.status, error: typeof server.error === "string" ? server.error : undefined }];
   });
+async function refreshServerStatuses(args: {
+  query: NativeQuery;
+  fallback: NativeServerStatus[];
+  timeoutMs: number;
+  log: (...values: unknown[]) => void;
+}): Promise<NativeServerStatus[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return serverStatuses(await Promise.race([
+      args.query.mcpServerStatus(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Claude MCP status timed out after ${args.timeoutMs}ms`)), args.timeoutMs);
+      }),
+    ]));
+  } catch (error) {
+    args.log("failed to refresh Claude MCP status; using init snapshot", error);
+    return args.fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 const sumUsage = (left: Usage, right: Usage): Usage => ({
   input: left.input + right.input,
   output: left.output + right.output,
@@ -167,6 +189,7 @@ function options(args: {
   resume?: string;
   settings: ProviderSettings;
   boundary: ProviderRequestBoundary;
+  allowedTools: string[];
   log: (...values: unknown[]) => void;
 }): Options {
   const appRepo = process.env.APP_REPO;
@@ -184,7 +207,7 @@ function options(args: {
     },
     strictMcpConfig: true,
     tools: ["Read", "Glob", "Grep", "Write", "Edit", "Skill"],
-    allowedTools: readAllow(args.dir),
+    allowedTools: args.allowedTools,
     disallowedTools: ["AskUserQuestion"],
     permissionMode: "default",
     canUseTool: async (toolName, input) => {
@@ -267,7 +290,7 @@ export class ClaudeDisplayMapper {
 class ClaudeSession implements ReviewSession {
   readonly provider = "claude" as const;
   readonly output: AsyncIterable<ProviderOutput>;
-  private interrupted = false;
+  private activeTurn?: { interrupted: boolean };
   private effectiveSettings: ProviderSettings;
   private settingsQueue = Promise.resolve();
   private closed = false;
@@ -277,6 +300,7 @@ class ClaudeSession implements ReviewSession {
     push: (message: SDKUserMessage | null) => void;
     baseRecord: ProviderSessionRecord;
     settings: ProviderSettings;
+    mcpStatusTimeoutMs: number;
     log: (...values: unknown[]) => void;
   }) {
     this.query = args.query;
@@ -291,11 +315,18 @@ class ClaudeSession implements ReviewSession {
       const display = new ClaudeDisplayMapper();
       for await (const sdkMessage of self.query) {
         const message = object(sdkMessage);
+        const streamEvent = message?.type === "stream_event" ? object(message.event) : undefined;
+        if (streamEvent?.type === "message_start") self.activeTurn ??= { interrupted: false };
+        const completedTurn = message?.type === "result" ? self.activeTurn : undefined;
+        if (message?.type === "result") self.activeTurn = undefined;
         if (message?.type === "system" && message.subtype === "init" && typeof message.session_id === "string") {
           sessionId = message.session_id;
-          let servers = serverStatuses(message.mcp_servers);
-          try { servers = serverStatuses(await self.query.mcpServerStatus()); }
-          catch (error) { args.log("failed to refresh Claude MCP status; using init snapshot", error); }
+          const servers = await refreshServerStatuses({
+            query: self.query,
+            fallback: serverStatuses(message.mcp_servers),
+            timeoutMs: args.mcpStatusTimeoutMs,
+            log: args.log,
+          });
           yield {
             kind: "initialized",
             sessionId,
@@ -309,7 +340,11 @@ class ClaudeSession implements ReviewSession {
             servers,
           };
         }
-        for (const event of display.map({ message: sdkMessage, sessionId, interrupted: self.interrupted })) yield { kind: "event", event };
+        for (const event of display.map({
+          message: sdkMessage,
+          sessionId,
+          interrupted: (completedTurn ?? self.activeTurn)?.interrupted ?? false,
+        })) yield { kind: "event", event };
         if (message?.type === "stream_event") {
           const event = object(message.event);
           const streamUsage = event?.type === "message_start" ? object(event.message)?.usage : event?.type === "message_delta" ? event.usage : undefined;
@@ -326,7 +361,6 @@ class ClaudeSession implements ReviewSession {
             cost: cost.complete(message.total_cost_usd),
             turnCompleted: true,
           };
-          self.interrupted = false;
         }
       }
     })();
@@ -338,12 +372,18 @@ class ClaudeSession implements ReviewSession {
 
   send(args: { text: string; selection: NodeRef[]; context?: string }) {
     if (this.closed) throw new Error("Claude session is closed");
+    this.activeTurn ??= { interrupted: false };
     this.push(userMessage(args));
   }
   async interrupt() {
-    if (this.closed) return;
-    this.interrupted = true;
-    await this.query.interrupt();
+    const turn = this.activeTurn;
+    if (this.closed || !turn) return;
+    turn.interrupted = true;
+    try { await this.query.interrupt(); }
+    catch (error) {
+      if (this.activeTurn === turn) turn.interrupted = false;
+      throw error;
+    }
   }
   applySettings(args: { settings: ProviderSettings }): Promise<void> {
     const requested = { ...args.settings };
@@ -393,6 +433,7 @@ type WarmEntry = {
   fileId: string;
   dir: string;
   settings: ProviderSettings;
+  allowedTools: string[];
   delegate: BoundaryDelegate;
   query: Promise<NativeWarmQuery>;
 };
@@ -401,8 +442,11 @@ const matchesWarm = (entry: WarmEntry, args: {
   dir: string;
   settings: ProviderSettings;
   boundary: ProviderRequestBoundary;
+  allowedTools: string[];
 }) => entry.fileId === args.fileId && entry.dir === args.dir
-  && entry.settings.model === args.settings.model && entry.settings.effort === args.settings.effort;
+  && entry.settings.model === args.settings.model && entry.settings.effort === args.settings.effort
+  && entry.allowedTools.length === args.allowedTools.length
+  && entry.allowedTools.every((toolName, index) => toolName === args.allowedTools[index]);
 
 export class ClaudeProvider implements ReviewProvider {
   readonly id = "claude" as const;
@@ -415,6 +459,7 @@ export class ClaudeProvider implements ReviewProvider {
     log: (...values: unknown[]) => void;
     onPrepared: () => void;
     native?: NativeFactory;
+    mcpStatusTimeoutMs?: number;
   }) { this.native = args.native ?? DEFAULT_NATIVE; }
 
   health(args: { settings: ProviderSettings }): ProviderHealth {
@@ -438,7 +483,8 @@ export class ClaudeProvider implements ReviewProvider {
   }
 
   prepare(args: { fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary }) {
-    if (this.warm && matchesWarm(this.warm, args)) {
+    const preparedArgs = { ...args, allowedTools: [...readAllow(args.dir)] };
+    if (this.warm && matchesWarm(this.warm, preparedArgs)) {
       this.warm.delegate.current = args.boundary;
       return;
     }
@@ -450,9 +496,10 @@ export class ClaudeProvider implements ReviewProvider {
       fileId: args.fileId,
       dir: args.dir,
       settings: { ...args.settings },
+      allowedTools: preparedArgs.allowedTools,
       delegate,
       query: this.native.warm({
-        options: options({ ...args, boundary: delegate.boundary, version: this.args.version, log: this.args.log }),
+        options: options({ ...preparedArgs, boundary: delegate.boundary, version: this.args.version, log: this.args.log }),
       }),
     };
     this.warm = entry;
@@ -478,9 +525,10 @@ export class ClaudeProvider implements ReviewProvider {
     baseRecord: ProviderSessionRecord;
   }): Promise<ReviewSession> {
     const input = inputStream();
+    const startArgs = { ...args, allowedTools: [...readAllow(args.dir)] };
     let nativeQuery: NativeQuery | undefined;
     const warm = this.warm;
-    if (warm && (!args.resume && matchesWarm(warm, args))) {
+    if (warm && (!args.resume && matchesWarm(warm, startArgs))) {
       warm.delegate.current = args.boundary;
       this.warm = undefined;
       let resolved: NativeWarmQuery | undefined;
@@ -512,13 +560,14 @@ export class ClaudeProvider implements ReviewProvider {
     }
     nativeQuery ??= this.native.cold({
       prompt: input.stream,
-      options: options({ ...args, version: this.args.version, log: this.args.log }),
+      options: options({ ...startArgs, version: this.args.version, log: this.args.log }),
     });
     return new ClaudeSession({
       query: nativeQuery,
       push: input.push,
       baseRecord: args.baseRecord,
       settings: args.settings,
+      mcpStatusTimeoutMs: this.args.mcpStatusTimeoutMs ?? MCP_STATUS_TIMEOUT_MS,
       log: this.args.log,
     });
   }
