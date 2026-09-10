@@ -1,13 +1,19 @@
 {
-  "name": "AI Review",
+  "name": "Sesori Figma Review",
   "api": "1.0.0",
   "main": "dist/code.js",
   "ui": "dist/ui.html",
-  "editorType": ["figma"],
+  "editorType": [
+    "figma"
+  ],
   "documentAccess": "dynamic-page",
   "networkAccess": {
-    "allowedDomains": ["none"],
-    "devAllowedDomains": ["ws://localhost:3055"],
-    "reasoning": "Talks to the local review bridge (Claude Agent SDK) running on this machine."
+    "allowedDomains": [
+      "ws://localhost:3055"
+    ],
+    "devAllowedDomains": [
+      "ws://localhost:3055"
+    ],
+    "reasoning": "Talks only to the Sesori Figma Review bridge running on this machine (ws://localhost:3055), which runs the Claude Agent SDK. No other network access."
   }
 }

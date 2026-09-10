@@ -1,4 +1,4 @@
-# AI Review for Figma
+# Sesori Figma Review for Figma
 
 Claude reviews your prototype from inside Figma: the flow as a whole, then screen by screen. It moves your
 canvas to whatever it is talking about, asks you questions at the right spot, and writes Dev Mode annotations
@@ -6,7 +6,7 @@ so the design ends up dev-ready. Everything happens in the plugin panel; a small
 Claude Agent SDK next to Figma.
 
 ```
-figma-ai-review/
+sesori-review/
 ├── plugin/     Figma plugin (sandbox code + UI iframe). Import plugin/manifest.json into Figma desktop.
 ├── bridge/     Local Node process: WebSocket server + Claude Agent SDK. `npm run bridge`.
 ├── shared/     Wire protocol types used by both.
@@ -27,13 +27,13 @@ figma-ai-review/
 ## Setup
 
 ```bash
-cd figma-ai-review
+cd sesori-review
 npm install
 npm run build          # bundles plugin/dist/code.js and plugin/dist/ui.html
 ```
 
 Import the plugin into Figma desktop once: **Plugins → Development → Import plugin from manifest…** and pick
-`figma-ai-review/plugin/manifest.json`. Turn on **Plugins → Development → Hot reload plugin** so rebuilds are
+`sesori-review/plugin/manifest.json`. Turn on **Plugins → Development → Hot reload plugin** so rebuilds are
 picked up.
 
 ## Run
@@ -41,11 +41,11 @@ picked up.
 Terminal, keep it running while you review:
 
 ```bash
-cd figma-ai-review
+cd sesori-review
 APP_REPO=/path/to/your/app npm run bridge     # APP_REPO is optional (see below)
 ```
 
-In Figma: open a file, **Plugins → Development → AI Review**. The header dot turns green when the bridge, Claude
+In Figma: open a file, **Plugins → Development → Sesori Figma Review**. The header dot turns green when the bridge, Claude
 and the Figma MCP server are all reachable; hover it for details.
 
 ## Use
@@ -55,22 +55,25 @@ and the Figma MCP server are all reachable; hover it for details.
 - **New chat** – empty conversation anchored to the current page; just type a question.
 - **History** – earlier sessions for this file, with cost. *Open* shows the whole past conversation; your next
   message continues that session with all its context.
-- Typing while Claude is working **steers** it: the message is merged into the running turn. **Stop** interrupts.
-  While a question card is open, whatever you type in the composer answers that question.
+- Typing while Claude is working **steers** it: the message is merged into the running turn. **Stop** (in place of
+  *Review flow* while a turn runs) interrupts.
+- When Claude asks a question, the composer is replaced by the question card: pick an option or type in the card.
+- **⚙ Settings** (header) – choose the Claude **model** and **effort**. Applies to the running session and to new
+  ones; stored on the bridge machine in `~/.sesori-review/settings.json`.
 - Your current selection is attached to every message, so "make this one bigger" works.
 - Annotations are written without asking. Anything not on the auto-approve list (e.g. a file outside the notes
   folder) shows an **Allow / Deny** card. Questions from Claude arrive as cards with option buttons; the canvas
   jumps to the spot it is asking about.
 - The header shows session cost, input/output tokens and turn count.
 
-## Configuration (environment variables for the bridge)
+## Configuration
+
+Model and effort are chosen in the plugin (⚙). Environment variables for the bridge:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `APP_REPO` | unset | Path to the app's source. Mounted read-only so annotations can reference real components. |
-| `FIGMA_REVIEW_HOME` | `~/.figma-review` | Where per-file workspaces live (`files/<fileId>/`). |
-| `FIGMA_REVIEW_MODEL` | Claude Code default | Model alias or id, e.g. `sonnet`, `opus`, `haiku`. |
-| `FIGMA_REVIEW_EFFORT` | Claude Code default | Effort level: `low`, `medium`, `high`, `xhigh`, `max`. |
+| `SESORI_REVIEW_HOME` | `~/.sesori-review` | Where per-file workspaces live (`files/<fileId>/`). |
 
 Each Figma file gets a workspace with an editable `CLAUDE.md` (review conventions and a removable
 "tool steering" section about the Figma MCP server), `permissions.json` (the **auto-approve list**: add or
@@ -95,3 +98,12 @@ npm run smoke -w bridge       # fake plugin: one real turn through the bridge, ~
 - **Annotations fail**: the file is on a free plan, or the node type cannot hold annotations (groups, some vectors).
 - **Nothing happens after "Review flow"**: check the bridge terminal. Tool calls wait for the plugin; if you close
   the plugin mid-turn they fail with "plugin not connected" and Claude is told so.
+
+## Publishing to Figma Community
+
+The plugin is a thin client for a bridge the user runs themselves, so the listing must say so. Assets are in
+`plugin/assets/`: `icon.svg` / `icon-128.png` (plugin icon), `mark.svg` (the bare mark used inside the UI) and
+`cover-1920x960.png` (cover art). Regenerate the PNGs with `qlmanage -t -s 128 -o plugin/assets plugin/assets/icon.svg`
+(macOS) after editing the SVGs. `plugin/manifest.json` allows only `ws://localhost:3055`; Figma assigns the plugin
+`id` on first publish. Bump `version` in the three `package.json` files and add a `CHANGELOG.md` entry per release;
+the version shows in the plugin's settings panel.

@@ -1,13 +1,13 @@
-// Per-Figma-file workspace under ~/.figma-review/files/<fileId>/ plus the sessions index kept in it.
+// Per-Figma-file workspace under ~/.sesori-review/files/<fileId>/ plus the sessions index kept in it.
 // The workspace is the agent's cwd: CLAUDE.md, .mcp.json and the review-flow skill are loaded from here,
 // and notes/ is the only place it may write files. CLAUDE.md, settings and .mcp.json are written once and
 // never overwritten, so teammates can edit them per file; the skill is ours and is refreshed on every start.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { FIGMA_MCP_URL, type HistoryItem, type SessionRecord, type Usage } from "../../shared/protocol.ts";
+import { FIGMA_MCP_URL, type HistoryItem, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
 
-export const HOME = process.env.FIGMA_REVIEW_HOME ?? join(homedir(), ".figma-review");
+export const HOME = process.env.SESORI_REVIEW_HOME ?? join(homedir(), ".sesori-review");
 
 /** Tools that run without an Allow/Deny card. Per-file override: edit permissions.json in the workspace.
  *  (Not .claude/settings.json: the CLI ignores project permissions until the folder is trusted interactively.) */
@@ -31,6 +31,11 @@ export function workspaceFor(fileId: string, fileName: string): string {
 }
 const writeIfMissing = (path: string, content: string) => { if (!existsSync(path)) writeFileSync(path, content); };
 export const readAllow = (dir: string): string[] => JSON.parse(readFileSync(join(dir, "permissions.json"), "utf8")).allow;
+
+/** Model/effort chosen in the plugin; one file for the whole machine (the bridge runs one conversation at a time anyway). */
+const settingsPath = () => join(HOME, "settings.json");
+export const readSettings = (): Settings => ({ model: "", effort: "", ...(existsSync(settingsPath()) ? JSON.parse(readFileSync(settingsPath(), "utf8")) : {}) });
+export function saveSettings(s: Settings) { mkdirSync(HOME, { recursive: true }); writeFileSync(settingsPath(), JSON.stringify(s, null, 2) + "\n"); }
 
 export const readSessions = (dir: string): SessionRecord[] => JSON.parse(readFileSync(join(dir, "sessions.json"), "utf8"));
 export function saveSession(dir: string, rec: SessionRecord) {
@@ -80,7 +85,7 @@ export const addUsage = (t: Usage, u: any): Usage => ({
 const claudeMd = (fileName: string) => `# Figma design review — ${fileName}
 
 You review Figma designs from inside the Figma desktop app. The user talks to you through the
-"AI Review" plugin panel and sees the canvas next to your messages. There is no terminal.
+"Sesori Review" plugin panel and sees the canvas next to your messages. There is no terminal.
 
 ## What you are here for
 1. Review the prototype flow as a whole (structure, dead ends, missing states), then each screen.

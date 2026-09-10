@@ -4,9 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.FIGMA_REVIEW_HOME = mkdtempSync(join(tmpdir(), "figma-review-"));
+process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "figma-review-"));
 process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "claude-config-"));
-const { addUsage, readAllow, readSessions, readTranscript, saveSession, workspaceFor, zeroUsage } = await import("./workspace.ts");
+const { addUsage, readAllow, readSessions, readSettings, readTranscript, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
+
+assert.deepEqual(readSettings(), { model: "", effort: "" }, "no settings file → Claude Code defaults");
+saveSettings({ model: "opus", effort: "low" });
+assert.deepEqual(readSettings(), { model: "opus", effort: "low" });
 
 const dir = workspaceFor("file1", "Checkout redesign");
 assert.ok(readFileSync(join(dir, "CLAUDE.md"), "utf8").includes("Checkout redesign"));

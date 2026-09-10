@@ -23,19 +23,20 @@ The plugin never talks to Claude directly, and the bridge never renders anything
 
 ```
 shared/protocol.ts          UpMsg / DownMsg / ToolResult / SessionRecord types; port and MCP URL constants
-plugin/manifest.json        dynamic-page, editorType figma, devAllowedDomains ws://localhost:3055
+plugin/manifest.json        dynamic-page, editorType figma, allowedDomains ws://localhost:3055
+plugin/assets/              icon.svg, mark.svg (inlined into ui.html by build.mjs as data URIs), PNGs for the Community listing
 plugin/src/code.ts          sandbox: file id, context events, tool executor (+ sandbox.check.ts, runs it on a mock figma API)
 plugin/src/flow.ts          pure prototype-flow walker
 plugin/src/ui.html, ui.ts   UI iframe; build.mjs inlines the bundled ui.ts into dist/ui.html
 bridge/src/bridge.ts        WebSocket server, SDK session manager, health, cost accounting
-bridge/src/workspace.ts     ~/.figma-review/files/<fileId>/ provisioning, sessions index, usage math (+ selfcheck.ts)
+bridge/src/workspace.ts     ~/.sesori-review/ provisioning: files/<fileId>/ workspaces, settings.json, sessions index, transcript reader, usage math (+ selfcheck.ts)
 bridge/smoke.mjs            fake plugin for an end-to-end run without Figma
 ```
 
 ## Per-file workspace (agent cwd)
 
 ```
-~/.figma-review/files/<fileId>/
+~/.sesori-review/files/<fileId>/
 ├── CLAUDE.md                        review conventions; "tool-steering" section between BEGIN/END markers is removable
 ├── .mcp.json                        figma-desktop → http://127.0.0.1:3845/mcp (for CLI use; the bridge passes the same config)
 ├── .claude/skills/review-flow/SKILL.md
@@ -60,6 +61,7 @@ bridge/smoke.mjs            fake plugin for an end-to-end run without Figma
 | `disallowedTools` | `AskUserQuestion` | replaced by `ask_user`, which focuses the canvas first |
 | `includePartialMessages` | true | text streams into the chat as it is generated |
 | `resume` | session id | first message after History → Open |
+| `model`, `effort` | `~/.sesori-review/settings.json` | picked in the plugin's settings panel; `""` = Claude Code default |
 
 A fresh session for the connected file is pre-warmed with `startup()` as soon as the plugin says hello, and again
 after every start, so "Review flow" does not pay the CLI boot.
@@ -132,6 +134,14 @@ next composer message ──► UI ──start{resume: sessionId, text}──►
 The transcript is Claude Code's own file (our context lines are stripped, tool results and thinking dropped), so
 opening costs nothing; the CLI only spawns when the user actually continues.
 
+### Settings (model / effort)
+
+```
+UI ──settings{model, effort}──► bridge: saveSettings() · health.settings
+bridge: live query → setModel() + applyFlagSettings({effortLevel}) · warm query closed and re-warmed with the new options
+bridge ──health──► UI
+```
+
 ### Steer and Stop
 
 ```
@@ -158,7 +168,7 @@ On resume, stored totals are used as the base for the new process (assumed not r
 
 ## Security and permissions
 
-- The plugin's network access is limited by the manifest to `ws://localhost:3055` (development domains).
+- The plugin's network access is limited by the manifest to `ws://localhost:3055`.
 - The bridge binds to 127.0.0.1 only. There is no auth on the socket: anything on the machine can connect and
   drive a review (ponytail: acceptable for a local POC; add a token in `hello` if that changes).
 - The agent cannot run shell commands or reach the web. It can write only under `notes/` without asking.
@@ -170,5 +180,6 @@ On resume, stored totals are used as the base for the new process (assumed not r
 - Layer tree is capped at 300 visible nodes per `get_screen`; the agent zooms into children for more.
 - One plugin connection per Figma file (a second instance for the same file replaces the first); one
   conversation at a time across files, starting a new one ends the previous.
-- No markdown rendering in the chat; text is shown as-is.
+- History → Open parses Claude Code's transcript file; the format is the CLI's, not ours.
+- Model list in the settings panel is static (`MODELS` in protocol.ts); `query.supportedModels()` if it needs to be live.
 - Cost after resume is base + new process total (see above).

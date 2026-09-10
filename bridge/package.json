@@ -1,5 +1,7 @@
 {
-  "name": "figma-ai-review-bridge",
+  "name": "sesori-review-bridge",
+  "version": "0.2.0",
+  "description": "Sesori Figma Review \u2014 local bridge running the Claude Agent SDK",
   "private": true,
   "type": "module",
   "scripts": {

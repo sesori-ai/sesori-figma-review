@@ -1,7 +1,17 @@
 {
-  "name": "figma-ai-review",
+  "name": "sesori-review",
+  "version": "0.2.0",
+  "description": "Claude reviews your Figma prototype from inside Figma: flow, screens, questions, Dev Mode annotations.",
+  "author": "Sesori",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
   "private": true,
-  "workspaces": ["plugin", "bridge"],
+  "workspaces": [
+    "plugin",
+    "bridge"
+  ],
   "scripts": {
     "build": "npm run build -w plugin",
     "bridge": "npm run start -w bridge",

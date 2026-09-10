@@ -4,7 +4,7 @@
 import { walkFlow, type FlowNode } from "./flow.ts";
 import type { NodeRef, ToolResult } from "../../shared/protocol.ts";
 
-const NS = "figma_ai_review"; // shared plugin data namespaces allow only [A-Za-z0-9_.]
+const NS = "sesori_review"; // shared plugin data namespaces allow only [A-Za-z0-9_.]
 figma.showUI(__html__, { width: 440, height: 720, themeColors: true });
 
 // Stable per-file id. figma.fileKey is only exposed to private org plugins, so we mint our own once.

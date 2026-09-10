@@ -1,5 +1,7 @@
 {
-  "name": "figma-ai-review-plugin",
+  "name": "sesori-review-plugin",
+  "version": "0.2.0",
+  "description": "Sesori Figma Review \u2014 Figma plugin (sandbox + UI)",
   "private": true,
   "type": "module",
   "scripts": {

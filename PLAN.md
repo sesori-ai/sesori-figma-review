@@ -1,4 +1,4 @@
-# Plan: AI design review inside Figma
+# Plan: Sesori Figma Review
 
 ## Goal
 
@@ -15,7 +15,7 @@ plugin panel. Nobody talks to a terminal.
 | Local bridge process running the Claude Agent SDK | The SDK is Node-only and spawns Claude Code, so it cannot live in the plugin iframe. It gives us the agent loop, MCP, permissions, sessions and CLAUDE.md for free. Accepted cost: each teammate runs `npm run bridge`. |
 | Figma tools are an in-process MCP server in the bridge, executed by the plugin | Only the plugin's sandbox can move the viewport, export PNGs or write annotations. |
 | Figma desktop MCP server (`127.0.0.1:3845`), not the remote one | No OAuth, more reliable, already running on every designer's machine once enabled. Read-only, rate limited. |
-| Per-file workspace under `~/.figma-review/files/<fileId>/` as the agent's cwd | Gives CLAUDE.md, a skill, `.mcp.json`, notes/ and a sessions index per Figma file; keeps writes away from the app repo (which is mounted read-only as an additional directory). |
+| Per-file workspace under `~/.sesori-review/files/<fileId>/` as the agent's cwd | Gives CLAUDE.md, a skill, `.mcp.json`, notes/ and a sessions index per Figma file; keeps writes away from the app repo (which is mounted read-only as an additional directory). |
 | Own file id in shared plugin data | `figma.fileKey` is only available to private org plugins. |
 | Annotations via `node.annotations` (paid plan) | Native Dev Mode annotations; no fake pin layers. |
 | Every write goes through a permission card | `annotate` and any write outside `notes/` are not in `allowedTools`, so the SDK asks the plugin. |

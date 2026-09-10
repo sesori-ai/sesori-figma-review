@@ -1,5 +1,5 @@
 // Fake plugin: connects to a running bridge, starts a one-turn session and answers the tool call it triggers.
-// Costs a couple of cents. Run with the bridge up: `FIGMA_REVIEW_MODEL=haiku npm run bridge` then `npm run smoke -w bridge`.
+// Costs a couple of cents. Run with the bridge up: `npm run bridge` (pick Haiku in the plugin settings first) then `npm run smoke -w bridge`.
 const ws = new WebSocket("ws://127.0.0.1:3055");
 const seen = [];
 const done = why => { console.log(`\n${why}`); for (const s of seen) console.log(" ", s); process.exit(why === "ok" ? 0 : 1); };

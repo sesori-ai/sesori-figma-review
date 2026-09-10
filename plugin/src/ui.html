@@ -3,66 +3,167 @@
 <head>
 <meta charset="utf-8" />
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --accent: #874fff; --accent-2: #9d70ff; --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+    --bg: var(--figma-color-bg, #fff); --bg-2: var(--figma-color-bg-secondary, #f4f4f6); --bg-3: var(--figma-color-bg-tertiary, #e9e9ee);
+    --fg: var(--figma-color-text, #1e1e24); --fg-2: var(--figma-color-text-secondary, #6b6b76); --fg-3: var(--figma-color-text-tertiary, #9a9aa6);
+    --line: var(--figma-color-border, #e3e3e8); --danger: var(--figma-color-text-danger, #d5322f); --ok: #1bc47d; --warn: #f3a51b;
+    --r: 10px; --mono: 11px ui-monospace, "SF Mono", Menlo, monospace;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 12px/1.45 Inter, system-ui, sans-serif; color: var(--figma-color-text, #222); background: var(--figma-color-bg, #fff); display: flex; flex-direction: column; height: 100vh; }
-  header { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--figma-color-border, #e5e5e5); font-size: 11px; }
-  header .dot { width: 8px; height: 8px; border-radius: 50%; background: #999; flex: none; }
-  header .dot.ok { background: #1bc47d; } header .dot.warn { background: #f3a51b; } header .dot.bad { background: #f24822; }
-  header #status { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  header #cost { color: var(--figma-color-text-secondary, #666); white-space: nowrap; }
-  #toolbar { display: flex; gap: 4px; padding: 6px 10px; flex-wrap: wrap; }
-  button { font: inherit; padding: 4px 8px; border-radius: 5px; border: 1px solid var(--figma-color-border, #ddd); background: var(--figma-color-bg-secondary, #f5f5f5); color: inherit; cursor: pointer; }
-  button:hover { background: var(--figma-color-bg-tertiary, #eee); }
-  button.primary { background: var(--figma-color-bg-brand, #0d99ff); color: var(--figma-color-text-onbrand, #fff); border-color: transparent; }
-  button.danger { background: var(--figma-color-bg-danger, #f24822); color: #fff; border-color: transparent; }
-  #sessions { padding: 6px 10px; border-bottom: 1px solid var(--figma-color-border, #e5e5e5); max-height: 40%; overflow: auto; }
-  #sessions .row { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
-  #sessions .row .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  main { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
-  main > * { flex-shrink: 0; } /* overflow:hidden children (chips) would otherwise collapse once the chat overflows */
-  .msg { padding: 7px 10px; border-radius: 8px; max-width: 95%; word-break: break-word; }
-  .user { align-self: flex-end; background: var(--figma-color-bg-brand-tertiary, #e5f4ff); white-space: pre-wrap; }
-  .assistant { align-self: flex-start; background: var(--figma-color-bg-secondary, #f5f5f5); }
-  .assistant > :first-child { margin-top: 0; } .assistant > :last-child { margin-bottom: 0; }
-  .assistant p, .assistant ul, .assistant ol, .assistant pre, .assistant table { margin: 0 0 6px; }
-  .assistant ul, .assistant ol { padding-left: 18px; }
-  .assistant h1, .assistant h2, .assistant h3, .assistant h4 { font-size: 12px; margin: 8px 0 3px; }
-  .assistant hr { border: 0; border-top: 1px solid var(--figma-color-border, #ddd); margin: 6px 0; }
-  .assistant code { font: 11px ui-monospace, Menlo, monospace; background: var(--figma-color-bg-tertiary, #e8e8e8); padding: 0 3px; border-radius: 3px; }
-  .assistant pre { white-space: pre-wrap; } .assistant pre code { background: none; padding: 0; }
-  .assistant table { border-collapse: collapse; font-size: 11px; }
-  .assistant th, .assistant td { border: 1px solid var(--figma-color-border, #ddd); padding: 2px 5px; vertical-align: top; text-align: left; }
-  .chip { align-self: flex-start; font-size: 11px; color: var(--figma-color-text-secondary, #666); padding: 2px 8px; border: 1px dashed var(--figma-color-border, #ccc); border-radius: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 95%; }
-  .card { align-self: stretch; border: 1px solid var(--figma-color-border-brand, #0d99ff); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
-  .card.perm { border-color: var(--figma-color-border-warning, #f3a51b); }
-  .card .q { font-weight: 600; white-space: pre-wrap; }
-  .card pre { margin: 0; font: 11px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; max-height: 160px; overflow: auto; background: var(--figma-color-bg-secondary, #f5f5f5); padding: 6px; border-radius: 5px; }
-  .card .ctl { display: flex; flex-wrap: wrap; gap: 4px; }
-  .card .ctl textarea { flex: 1 1 100%; }
-  .card .a { color: var(--figma-color-text-secondary, #666); font-style: italic; }
-  .error { align-self: stretch; color: var(--figma-color-text-danger, #c00); border: 1px solid currentColor; border-radius: 8px; padding: 6px 10px; white-space: pre-wrap; }
-  .muted { color: var(--figma-color-text-secondary, #666); font-size: 11px; }
-  footer { border-top: 1px solid var(--figma-color-border, #e5e5e5); padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
-  footer .row { display: flex; gap: 6px; align-items: flex-end; }
-  textarea { font: inherit; flex: 1; resize: none; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--figma-color-border, #ddd); background: var(--figma-color-bg, #fff); color: inherit; }
+  body { margin: 0; font: 12px/1.5 Inter, -apple-system, system-ui, sans-serif; color: var(--fg); background: var(--bg); display: flex; flex-direction: column; height: 100vh; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 5px 10px; display: inline-flex; align-items: center; gap: 6px; line-height: 1.2; transition: background .12s, border-color .12s; }
+  button:hover { background: var(--bg-2); }
+  button:active { transform: translateY(0.5px); }
+  button.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+  button.primary:hover { background: var(--accent-2); }
+  button.danger { background: var(--danger); border-color: transparent; color: #fff; font-weight: 600; }
+  button.ghost { border-color: transparent; background: transparent; color: var(--fg-2); }
+  button.ghost:hover { background: var(--bg-2); color: var(--fg); }
+  button.icon { padding: 5px; border-color: transparent; background: transparent; color: var(--fg-2); }
+  button.icon:hover { background: var(--bg-2); color: var(--fg); }
+  button svg { width: 14px; height: 14px; flex: none; }
   [hidden] { display: none !important; }
+
+  /* header ---------------------------------------------------------------- */
+  header { padding: 10px 12px 0; }
+  .brand { display: flex; align-items: center; gap: 8px; }
+  .brand .logo { width: 22px; height: 22px; flex: none; }
+  .brand b { font-size: 13px; font-weight: 650; letter-spacing: -0.01em; flex: 1; }
+  .statusbar { display: flex; align-items: center; gap: 6px; margin: 6px 0 8px; font-size: 11px; color: var(--fg-2); min-height: 16px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 0%, transparent); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--danger); }
+  #status { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #cost { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--fg-2); }
+  #toolbar { display: flex; gap: 4px; padding: 0 12px 10px; border-bottom: 1px solid var(--line); }
+  #toolbar button { white-space: nowrap; }
+
+  /* panels (settings, history) -------------------------------------------- */
+  .panel { border-bottom: 1px solid var(--line); background: var(--bg-2); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; max-height: 45%; overflow: auto; }
+  .panel h4 { margin: 0; font-size: 11px; font-weight: 600; color: var(--fg-2); text-transform: uppercase; letter-spacing: .04em; }
+  .field { display: flex; align-items: center; gap: 8px; }
+  .field label { width: 52px; color: var(--fg-2); }
+  select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; flex: 1; }
+  .hint { color: var(--fg-3); font-size: 11px; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row .title { flex: 1; min-width: 0; }
+  .row .title b { display: block; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .title span { color: var(--fg-3); font-size: 11px; }
+
+  /* chat ------------------------------------------------------------------ */
+  main { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  main > * { flex-shrink: 0; } /* overflow:hidden children (chips) would otherwise collapse once the chat overflows */
+  #empty { margin: auto; text-align: center; color: var(--fg-2); max-width: 280px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  #empty .logo { width: 44px; height: 44px; border-radius: 12px; margin-bottom: 6px; }
+  #empty h3 { margin: 0; font-size: 14px; color: var(--fg); }
+  #empty ul { text-align: left; margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 11px; }
+  #empty li { display: flex; gap: 8px; } #empty li b { color: var(--fg); font-weight: 600; white-space: nowrap; }
+  .msg { max-width: 92%; word-break: break-word; }
+  .user { align-self: flex-end; background: var(--accent-soft); color: var(--fg); padding: 8px 12px; border-radius: 14px 14px 4px 14px; white-space: pre-wrap; }
+  .assistant { align-self: stretch; max-width: none; display: grid; grid-template-columns: 18px 1fr; gap: 8px; }
+  .assistant::before { content: ""; width: 18px; height: 18px; border-radius: 5px; margin-top: 1px; background: url(__MARK__) center / contain no-repeat; }
+  .assistant .body > :first-child { margin-top: 0; } .assistant .body > :last-child { margin-bottom: 0; }
+  .body p, .body ul, .body ol, .body pre, .body table, .body blockquote { margin: 0 0 8px; }
+  .body ul, .body ol { padding-left: 18px; }
+  .body li { margin: 2px 0; }
+  .body h1, .body h2, .body h3, .body h4 { font-size: 12px; margin: 10px 0 4px; font-weight: 650; }
+  .body hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
+  .body strong { font-weight: 650; }
+  .body code { font: var(--mono); background: var(--bg-3); padding: 1px 4px; border-radius: 4px; }
+  .body pre { white-space: pre-wrap; background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; } .body pre code { background: none; padding: 0; }
+  .body blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--fg-2); }
+  .body table { border-collapse: collapse; font-size: 11px; width: 100%; }
+  .body th, .body td { border: 1px solid var(--line); padding: 3px 6px; vertical-align: top; text-align: left; }
+  .body th { background: var(--bg-2); }
+  .chip { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg-2); padding: 3px 9px; background: var(--bg-2); border-radius: 999px; max-width: 92%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-left: 26px; }
+  .chip svg { width: 12px; height: 12px; flex: none; opacity: .8; }
+  .chip code { font: var(--mono); color: var(--fg); }
+  .chip.stopped { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+  .typing { display: inline-flex; gap: 4px; padding: 6px 0 0 26px; align-self: flex-start; }
+  .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--fg-3); animation: blink 1.2s infinite; }
+  .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+  .card { align-self: stretch; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: var(--r); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--bg); }
+  .card.perm { border-left-color: var(--warn); }
+  .card .q { font-weight: 600; white-space: pre-wrap; }
+  .card pre { margin: 0; font: var(--mono); line-height: 1.45; white-space: pre-wrap; max-height: 160px; overflow: auto; background: var(--bg-2); padding: 8px; border-radius: 8px; }
+  .card .ctl { display: flex; flex-wrap: wrap; gap: 6px; }
+  .card .ctl button { border-radius: 999px; }
+  .card .ctl textarea { flex: 1 1 100%; }
+  .card .a { color: var(--fg-2); display: flex; align-items: center; gap: 6px; } .card .a svg { width: 12px; height: 12px; }
+  .error { align-self: stretch; color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); border-radius: var(--r); padding: 8px 12px; white-space: pre-wrap; font-size: 11px; }
+  .muted { color: var(--fg-3); font-size: 11px; }
+
+  /* composer -------------------------------------------------------------- */
+  footer { border-top: 1px solid var(--line); padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px; }
+  #sel { display: flex; align-items: center; gap: 5px; color: var(--fg-3); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #sel svg { width: 11px; height: 11px; flex: none; }
+  .composer { display: flex; gap: 6px; align-items: flex-end; border: 1px solid var(--line); border-radius: 12px; padding: 6px 6px 6px 10px; background: var(--bg); transition: border-color .12s, box-shadow .12s; }
+  .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  textarea { font: inherit; color: inherit; flex: 1; resize: none; border: 0; outline: 0; background: transparent; padding: 3px 0; max-height: 120px; }
+  .card textarea { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: var(--bg); }
+  .card textarea:focus { border-color: var(--accent); }
+  #send { width: 28px; height: 28px; padding: 0; justify-content: center; border-radius: 8px; }
 </style>
 </head>
 <body>
-<header><span id="dot" class="dot"></span><span id="status">connecting to bridge…</span><span id="cost"></span></header>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-play" viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></symbol>
+    <symbol id="i-select" viewBox="0 0 16 16"><path d="M3 3h4M3 3v4M13 3H9M13 3v4M3 13h4M3 13V9M13 13H9M13 13V9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3.2l2 1.3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4L5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-send" viewBox="0 0 16 16"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-focus" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2" fill="currentColor"/><path d="M8 2v2.5M8 11.5V14M2 8h2.5M11.5 8H14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 16 16"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="2" fill="currentColor"/></symbol>
+    <symbol id="i-note" viewBox="0 0 16 16"><path d="M3 2.5h7l3 3V13.5H3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M5.5 8h5M5.5 10.5h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-flow" viewBox="0 0 16 16"><rect x="1.5" y="4" width="5" height="8" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="9.5" y="4" width="5" height="8" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6.5 8h3" stroke="currentColor" stroke-width="1.5"/></symbol>
+    <symbol id="i-ask" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6.3 6.5a1.8 1.8 0 1 1 2.6 1.6c-.6.3-.9.7-.9 1.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="11.3" r=".8" fill="currentColor"/></symbol>
+    <symbol id="i-tool" viewBox="0 0 16 16"><path d="M9.5 2.5a3.5 3.5 0 0 0 3.8 4.8l-6.6 6.6a1.5 1.5 0 0 1-2.1-2.1l6.6-6.6a3.5 3.5 0 0 0-1.7-2.7z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+<header>
+  <div class="brand">
+    <img class="logo" src="__MARK__" alt=""><b>Sesori Figma Review</b>
+    <button id="btn-settings" class="icon" title="Model and effort"><svg><use href="#i-gear"/></svg></button>
+  </div>
+  <div class="statusbar"><span id="dot" class="dot"></span><span id="status">connecting to bridge…</span><span id="cost"></span></div>
+</header>
 <div id="toolbar">
-  <button id="btn-flow" class="primary" title="Review the prototype flow on the current page">Review flow</button>
-  <button id="btn-selection" title="Review the selected nodes">Review selection</button>
-  <button id="btn-new" title="Start an empty conversation anchored to this page">New chat</button>
-  <button id="btn-history" title="Resume a previous session for this file">History</button>
-  <button id="btn-stop" class="danger" hidden title="Interrupt the current turn">Stop</button>
+  <button id="btn-flow" class="primary" title="Review the prototype flow on the current page"><svg><use href="#i-play"/></svg>Review flow</button>
+  <button id="btn-stop" class="danger" hidden title="Interrupt the current turn"><svg><use href="#i-stop"/></svg>Stop</button>
+  <button id="btn-selection" class="ghost" title="Review the selected nodes"><svg><use href="#i-select"/></svg>Selection</button>
+  <button id="btn-new" class="ghost" title="Start an empty conversation"><svg><use href="#i-plus"/></svg>New</button>
+  <button id="btn-history" class="ghost" title="Earlier sessions for this file"><svg><use href="#i-clock"/></svg>History</button>
 </div>
-<div id="sessions" hidden></div>
-<main id="chat"><div class="muted">Pick “Review flow”, select something and hit “Review selection”, or just ask a question.</div></main>
+<div id="settings" class="panel" hidden>
+  <h4>Claude</h4>
+  <div class="field"><label for="model">Model</label><select id="model"></select></div>
+  <div class="field"><label for="effort">Effort</label><select id="effort"></select></div>
+  <div class="hint">Applies to the running session and to new ones. “Default” uses Claude Code’s own setting.</div>
+  <div id="about" class="hint"></div>
+</div>
+<div id="sessions" class="panel" hidden></div>
+<main id="chat">
+  <div id="empty">
+    <img class="logo" src="__LOGO__" alt="">
+    <h3>Review this design with Claude</h3>
+    <div>It walks the canvas with you, asks at the right spot and leaves Dev Mode annotations.</div>
+    <ul>
+      <li><b>Review flow</b><span>the prototype on this page, then screen by screen</span></li>
+      <li><b>Selection</b><span>select frames or components first</span></li>
+      <li><b>Or just ask</b><span>your selection travels with every message</span></li>
+    </ul>
+  </div>
+</main>
 <footer>
-  <div id="sel" class="muted">No selection</div>
-  <div class="row"><textarea id="input" rows="2" placeholder="Ask about the design… Enter to send, Shift+Enter for a new line"></textarea><button id="send" class="primary">Send</button></div>
+  <div id="sel"><svg><use href="#i-select"/></svg><span>No selection</span></div>
+  <div class="composer"><textarea id="input" rows="1" placeholder="Ask about the design…"></textarea><button id="send" class="primary" title="Send (Enter)"><svg><use href="#i-send"/></svg></button></div>
 </footer>
 <!-- SCRIPT -->
 </body>

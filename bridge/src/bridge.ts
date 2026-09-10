@@ -5,9 +5,10 @@ import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import { BRIDGE_PORT, FIGMA_MCP_URL, type DownMsg, type Health, type NodeRef, type PermissionDecision, type SessionRecord, type ToolResult, type UpMsg } from "../../shared/protocol.ts";
-import { addUsage, readAllow, readSessions, readTranscript, saveSession, workspaceFor, zeroUsage } from "./workspace.ts";
+import { readFileSync } from "node:fs";
+import { addUsage, readAllow, readSessions, readSettings, readTranscript, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
 
-const VERSION = "0.1.0";
+const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 const now = () => new Date().toISOString();
 
@@ -52,6 +53,7 @@ Be concrete and brief in chat; put implementation detail into annotations. When 
 
 function options(fileId: string, dir: string, resume?: string): Options {
   const appRepo = process.env.APP_REPO;
+  const settings = readSettings();
   return {
     cwd: dir,
     resume,
@@ -69,8 +71,8 @@ function options(fileId: string, dir: string, resume?: string): Options {
       return d.behavior === "allow" ? { behavior: "allow", updatedInput: input } : d;
     },
     includePartialMessages: true,
-    model: process.env.FIGMA_REVIEW_MODEL,
-    effort: process.env.FIGMA_REVIEW_EFFORT as Options["effort"],
+    model: settings.model || undefined,
+    effort: settings.effort || undefined,
     stderr: d => log("[claude]", d.trim()),
   };
 }
@@ -79,7 +81,7 @@ function options(fileId: string, dir: string, resume?: string): Options {
 type Conv = { q: Query; push: (m: SDKUserMessage | null) => void; fileId: string; dir: string; rec: SessionRecord; baseCost: number };
 let conv: Conv | undefined; // ponytail: one conversation at a time across all files; starting one ends the previous
 let warm: { dir: string; wq: Promise<WarmQuery> } | undefined;
-const health: Health = { bridge: VERSION, figmaMcp: "down" };
+const health: Health = { bridge: VERSION, figmaMcp: "down", settings: readSettings() };
 
 function inputStream() {
   const buf: (SDKUserMessage | null)[] = [];
@@ -178,7 +180,7 @@ async function pump(c: Conv) {
 async function probeFigmaMcp(): Promise<Health["figmaMcp"]> {
   try { // any HTTP answer means the desktop server is listening; connection refused means it is off
     await fetch(FIGMA_MCP_URL, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "figma-ai-review", version: VERSION } } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "sesori-review", version: VERSION } } }),
       signal: AbortSignal.timeout(1500) });
     return "up";
   } catch { return "down"; }
@@ -215,6 +217,16 @@ async function onUp(ws: WebSocket & { fileId?: string }, m: UpMsg) {
       return send(conv.fileId, { kind: "busy", busy: true });
     case "reply": { const p = pending.get(m.id); pending.delete(m.id); p?.resolve(m.result); return; }
     case "interrupt": if (conv && conv.fileId === ws.fileId) await conv.q.interrupt(); return;
+    case "settings": {
+      saveSettings(m.settings);
+      health.settings = m.settings;
+      if (conv) { // live session switches too; effort "" falls back to Claude Code's default
+        await conv.q.setModel(m.settings.model || undefined);
+        await conv.q.applyFlagSettings({ effortLevel: m.settings.effort || null });
+      }
+      if (warm) { const dir = warm.dir; warm.wq.then(w => w.close()).catch(() => {}); warm = undefined; prewarm(ws.fileId!, dir); } // re-warm with the new model
+      return send(ws.fileId!, { kind: "health", health });
+    }
     case "health": return sendHealth(ws.fileId!);
   }
 }

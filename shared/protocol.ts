@@ -54,16 +54,24 @@ export type UpMsg =
   | { kind: "reply"; id: string; result: ToolResult | PermissionDecision }
   /** Stop button: interrupt the running turn. */
   | { kind: "interrupt" }
+  /** Model / effort picked in the plugin. Saved by the bridge, applied to the live session and the next ones. */
+  | { kind: "settings"; settings: Settings }
   /** Re-run the health probe. */
   | { kind: "health" };
 
 // ---- bridge -> plugin -------------------------------------------------------
+
+/** Empty string = Claude Code's default. Aliases (opus, sonnet, haiku) resolve to the latest model of that family. */
+export type Settings = { model: string; effort: "" | "low" | "medium" | "high" | "xhigh" | "max" };
+export const MODELS: [value: string, label: string][] = [["", "Default"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]]; // ponytail: static; query.supportedModels() if the list matters
+export const EFFORTS: Settings["effort"][] = ["", "low", "medium", "high", "xhigh", "max"];
 
 export type Health = {
   bridge: string;
   figmaMcp: "up" | "down";
   claude?: string;
   model?: string;
+  settings?: Settings;
   servers?: { name: string; status: string; error?: string }[];
   error?: string;
 };
