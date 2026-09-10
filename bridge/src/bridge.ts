@@ -37,10 +37,11 @@ const figmaTool = (fileId: string, name: string, description: string, shape: z.Z
 const figmaServer = (fileId: string) => createSdkMcpServer({ name: "figma", version: VERSION, tools: [
   figmaTool(fileId, "get_flow", "Prototype flow of the user's current Figma page: screens (id, name, size) and transitions (from, to, trigger, navigation, via which element). Falls back to listing top-level frames when the page has no prototype flow.", {}),
   figmaTool(fileId, "get_screen", "PNG screenshot of a node plus its layer tree (ids, names, types, bounds relative to the node, text, existing annotations). Works for whole screens and for single components.",
-    { nodeId: z.string().describe("Node id such as 12:34"), scale: z.number().min(0.25).max(3).default(1).describe("Export scale; use 2 for small components") }),
+    { nodeId: z.string().describe("Node id such as 12:34"), scale: z.number().min(0.25).max(3).optional().describe("Export scale, default 1; use 2 for small components") }),
   figmaTool(fileId, "focus", "Select a node and scroll/zoom the user's canvas to it. Call it before discussing a node so the user sees what you mean.", { nodeId: z.string() }),
-  figmaTool(fileId, "annotate", "Attach a Dev Mode annotation (markdown) to a node. The user approves each call in the plugin.",
-    { nodeId: z.string(), markdown: z.string().describe("Annotation body, markdown"), replace: z.boolean().default(false).describe("Replace the node's existing annotations instead of appending") }),
+  figmaTool(fileId, "annotate", "Attach a Dev Mode annotation (markdown) to a node, appended to what is already there.",
+    // .optional(), not .default(): the SDK's input validation rejected calls that omitted a defaulted field
+    { nodeId: z.string(), markdown: z.string().describe("Annotation body, markdown"), replace: z.boolean().optional().describe("Replace the node's existing annotations instead of appending; only when the user asked for it") }),
   figmaTool(fileId, "ask_user", "Ask the user a question about a specific spot in the design. Focuses their canvas on nodeId (if given), shows the question with optional choice buttons in the plugin, and waits for the answer. Returns the answer and the user's current selection.",
     { nodeId: z.string().optional(), question: z.string(), options: z.array(z.string()).max(4).optional() }),
 ]});
@@ -148,11 +149,16 @@ async function pump(c: Conv) {
         saveSession(c.dir, c.rec);
         out({ kind: "session", session: c.rec });
       }
+      if (msg.type === "stream_event" && !msg.parent_tool_use_id) { // live token count: one API response = message_start (input) + message_delta (output)
+        const ev = msg.event as any;
+        if (ev.type === "message_start") c.rec.usage = addUsage(c.rec.usage, { ...ev.message.usage, output_tokens: 0 });
+        if (ev.type === "message_delta") { c.rec.usage = addUsage(c.rec.usage, { output_tokens: ev.usage?.output_tokens }); out({ kind: "session", session: c.rec }); }
+      }
       if (msg.type === "result") {
         c.rec.turns++;
         c.rec.costUsd = c.baseCost + msg.total_cost_usd;
-        c.rec.usage = addUsage(c.rec.usage, msg.usage);
         c.rec.updatedAt = now();
+        log("turn done", { streamed: c.rec.usage, result: msg.usage, cost: msg.total_cost_usd });
         saveSession(c.dir, c.rec);
         out({ kind: "session", session: c.rec });
         out({ kind: "sessions", sessions: readSessions(c.dir) });

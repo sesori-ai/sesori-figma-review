@@ -14,6 +14,8 @@ let live: SessionRecord | undefined; // current conversation (placeholder until 
 let textEl: HTMLElement | undefined; // assistant text block currently being streamed
 let textRaw = ""; // its markdown source so far; re-rendered on every delta (ponytail: fine for chat-sized messages)
 let sessions: SessionRecord[] = [];
+let pendingAsk: ((text: string) => void) | undefined; // open ask_user card; a composer message answers it instead of queueing behind it
+let stopping = false; // Stop was clicked; the next result is the interrupt, not an error
 
 const el = (tag: string, cls = "", text = "") => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const btn = (label: string, onClick: () => void, cls = "") => { const b = el("button", cls, label) as HTMLButtonElement; b.onclick = onClick; return b; };
@@ -81,7 +83,9 @@ function onSdk(msg: any) {
   }
   if (msg.type === "result") {
     textEl = undefined;
-    if (msg.is_error) bubble("error", msg.result ?? msg.subtype);
+    if (stopping) bubble("chip", "stopped"); // an interrupted turn reports error_during_execution; that is expected
+    else if (msg.is_error) bubble("error", msg.result ?? msg.subtype);
+    stopping = false;
   }
   if (msg.type === "system" && msg.subtype === "status" && msg.status === "compacting") bubble("chip", "compacting context…");
 }
@@ -95,9 +99,10 @@ function askCard(id: string, args: any) {
   card.append(el("div", "q", args.question));
   const ctl = el("div", "ctl");
   const answer = (text: string) => {
-    ctl.remove(); card.append(el("div", "a", text));
+    ctl.remove(); card.append(el("div", "a", text)); pendingAsk = undefined;
     send({ kind: "reply", id, result: { content: [{ type: "text", text: `${text}\n\n[Current selection: ${selText()}]` }] } });
   };
+  pendingAsk = answer;
   for (const o of args.options ?? []) ctl.append(btn(o, () => answer(o)));
   const ta = document.createElement("textarea"); ta.rows = 2; ta.placeholder = "Or type an answer… Enter to send";
   ta.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (ta.value.trim()) answer(ta.value.trim()); } };
@@ -129,7 +134,7 @@ function renderSessions() {
 
 // ---- composer -------------------------------------------------------------
 function start(anchor: Anchor, text: string, resume?: string) {
-  chat.innerHTML = ""; textEl = undefined; costEl.textContent = "";
+  chat.innerHTML = ""; textEl = undefined; pendingAsk = undefined; costEl.textContent = "";
   live = { sessionId: resume ?? "" } as SessionRecord; // placeholder until the bridge sends `session`
   bubble("msg user", text);
   send({ kind: "start", fileId: ctx.fileId, fileName: ctx.fileName, pageId: ctx.pageId, pageName: ctx.pageName, anchor, resume, text, selection: ctx.selection });
@@ -139,6 +144,7 @@ function submit() {
   if (!text) return;
   input.value = "";
   if (!live) return start({ type: "page", nodeIds: [] }, text);
+  if (pendingAsk) return pendingAsk(text); // Claude is waiting on a question: this is the answer
   bubble("msg user", text);
   send({ kind: "user", text, selection: ctx.selection }); // delivered mid-turn as steering; Stop interrupts
 }
@@ -150,6 +156,6 @@ $("btn-selection").onclick = () => {
   if (!ctx.selection.length) return toMain({ kind: "notify", text: "Select something first" });
   start({ type: "selection", nodeIds: ctx.selection.map(n => n.id) }, `Review the selected node(s): ${selText()}. Focus each one, assess clarity and dev-readiness, and propose annotations.`);
 };
-$("btn-new").onclick = () => { chat.innerHTML = ""; live = undefined; costEl.textContent = ""; input.focus(); };
+$("btn-new").onclick = () => { chat.innerHTML = ""; live = undefined; pendingAsk = undefined; costEl.textContent = ""; input.focus(); };
 $("btn-history").onclick = () => { sessionsEl.hidden = !sessionsEl.hidden; if (!sessionsEl.hidden) renderSessions(); };
-stopBtn.onclick = () => send({ kind: "interrupt" });
+stopBtn.onclick = () => { stopping = true; send({ kind: "interrupt" }); };

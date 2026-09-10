@@ -97,7 +97,9 @@ async function getFlow(): Promise<ToolResult> {
 async function annotate(nodeId: string, markdown: string, replace = false): Promise<ToolResult> {
   const n = await sceneNode(nodeId);
   if (!("annotations" in n)) throw new Error(`${n.type} nodes cannot hold annotations`);
-  n.annotations = [...(replace ? [] : n.annotations), { labelMarkdown: markdown }];
+  // Figma returns existing annotations with both `label` and `labelMarkdown` but rejects setting both back.
+  const keep = replace ? [] : n.annotations.map(({ label, ...a }) => (a.labelMarkdown ? a : { label, ...a }));
+  n.annotations = [...keep, { labelMarkdown: markdown }];
   return text(`Annotated "${n.name}" (${n.id}); it now has ${n.annotations.length} annotation(s).`);
 }
 

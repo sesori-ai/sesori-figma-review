@@ -85,7 +85,8 @@ bridge: push user message = "[file/page/anchor]\n<text>\n[Current selection: …
 bridge ──busy:true──► UI
 SDK ──system.init──► bridge ──health{servers, model, version}──► UI · ──session{sessionId}──► UI
 SDK ──stream_event/assistant──► bridge ──sdk──► UI   (text deltas render live; tool_use blocks become chips)
-SDK ──result──► bridge: rec.cost = base + total_cost_usd; usage += result.usage
+SDK ──stream_event message_start/message_delta──► bridge: usage += input / output tokens ──session──► UI (live)
+SDK ──result──► bridge: rec.cost = base + total_cost_usd
 bridge ──session──► UI · ──sessions──► UI · ──busy:false──► UI
 ```
 
@@ -107,7 +108,7 @@ sandbox ──reply{id, result}──► UI ──reply──► bridge → hand
 ```
 SDK ──mcp__figma__ask_user{nodeId?, question, options?}──► bridge ──tool──► UI
 UI: postMessage focus{nodeId} to sandbox · render card with option buttons + free text
-user clicks/types ──► UI ──reply{answer + current selection}──► bridge → SDK
+user clicks an option, types in the card, or types in the main composer ──► UI ──reply{answer + current selection}──► bridge → SDK
 ```
 
 The handler blocks until the user answers. In-process SDK MCP servers are exempt from the tool idle timeout.
@@ -138,8 +139,10 @@ UI ──interrupt──► bridge: query.interrupt() → the turn ends with a r
 
 ## Cost and token accounting
 
-`result.total_cost_usd` is cumulative for the CLI process. Token usage is the `usage` on each `result` message (the
-turn's total), accumulated on the session record; per-block `assistant` usage is not final and is ignored.
+`result.total_cost_usd` is cumulative for the CLI process and only arrives when a turn ends, which in a guided walk
+can be many minutes. Token usage is therefore accumulated live from stream events: `message_start` carries the input
+and cache tokens of one API response, `message_delta` its final output tokens. The bridge logs both this sum and
+`result.usage` at the end of every turn so drift is visible.
 On resume, stored totals are used as the base for the new process (assumed not restored by `--resume`).
 
 ## Security and permissions

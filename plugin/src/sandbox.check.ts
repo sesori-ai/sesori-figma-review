@@ -87,10 +87,10 @@ const fallback = JSON.parse(text(await call("get_flow")));
 assert.deepEqual([fallback.screens.map((s: any) => s.id), fallback.transitions], [["2:1"], []]);
 assert.match(fallback.note, /no prototype flow/);
 
-// annotate: append, replace, unsupported node, reported in the tree
-await call("annotate", { nodeId: "1:2", markdown: "**What** first" });
+// annotate: append (existing entries come back with label + labelMarkdown; only one may be set), replace, unsupported node, tree
+title.annotations = [{ label: "first", labelMarkdown: "**What** first", categoryId: "c1" }];
 await call("annotate", { nodeId: "1:2", markdown: "**What** second" });
-assert.equal(title.annotations.length, 2);
+assert.deepEqual(title.annotations, [{ labelMarkdown: "**What** first", categoryId: "c1" }, { labelMarkdown: "**What** second" }], "append strips the duplicate plain label");
 await call("annotate", { nodeId: "1:2", markdown: "**What** only", replace: true });
 assert.deepEqual(title.annotations, [{ labelMarkdown: "**What** only" }]);
 assert.ok((await call("annotate", { nodeId: "1:8", markdown: "x" })).isError, "VECTOR without annotations mixin errors");

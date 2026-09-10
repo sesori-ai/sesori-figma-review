@@ -55,6 +55,7 @@ and the Figma MCP server are all reachable; hover it for details.
 - **New chat** – empty conversation anchored to the current page; just type a question.
 - **History** – earlier sessions for this file, with cost. *Resume* continues one.
 - Typing while Claude is working **steers** it: the message is merged into the running turn. **Stop** interrupts.
+  While a question card is open, whatever you type in the composer answers that question.
 - Your current selection is attached to every message, so "make this one bigger" works.
 - Annotations are written without asking. Anything not on the auto-approve list (e.g. a file outside the notes
   folder) shows an **Allow / Deny** card. Questions from Claude arrive as cards with option buttons; the canvas
