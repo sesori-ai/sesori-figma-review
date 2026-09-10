@@ -2,8 +2,8 @@
   "name": "sesori-review",
   "version": "0.2.0",
   "description": "Claude reviews your Figma prototype from inside Figma: flow, screens, questions, Dev Mode annotations.",
+  "license": "Apache-2.0",
   "author": "Sesori",
-  "license": "UNLICENSED",
   "engines": {
     "node": ">=22"
   },
