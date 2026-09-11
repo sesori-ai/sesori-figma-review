@@ -1,8 +1,9 @@
 # Codex support tracker
 
 Plan: [PLAN.md](PLAN.md). Scope: full user-facing parity on Claude and Codex; Codex-native sandboxed file/command
-access approved. The user authorized executing the whole series: automatically squash-merge each PR once ready
-for human review and continue without waiting for manual merges. Full verification and parity gates still apply.
+access approved. The user authorized executing the whole series: use automatic GitHub reviews only, automatically squash-merge each
+PR once ready for human review, and continue without manual review requests or extra review-completion gates. Full
+verification and parity gates still apply.
 Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 ## Fixed PR series
@@ -11,8 +12,8 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
-| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Cancellation, attached-History and final smoke-cleanup fixes implemented locally; focused review required |
-| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4); reviewed head `80707c2`, merge tree identical |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Complete locally: deterministic checks, frozen-config discovery/isolation, native 0.154.0 qualification, and fixture enforcement pass; awaits parent publication/automatic review |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
 | 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
@@ -27,6 +28,14 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - Installed `codex-cli 0.154.0` experimental generated schema inspected, not hand-edited or committed.
 - No live Codex/Claude turn, native security test, paid smoke, Figma test, or account/config modification performed
   during Step 1 planning.
+
+## Step 3 receipt
+
+- PR #4 is squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c`; reviewed head `80707c2` and merge
+  trees were verified identical (`5bb1f96b317f1b68e73c5963a2f118077f0f4afc`). Step 4 started from that clean
+  fetched `origin/master` checkpoint.
+- Publication/review coordination uses automatic GitHub reviews only. Parent owns all GitHub actions and merges;
+  implementation checkpoints do not wait for manual review requests.
 
 ## Step 2 replacement foundation
 
@@ -49,6 +58,88 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   hard ceiling 2,975, preferred <=2,970, for attached-History/final smoke cleanup and proof; later budgets are unchanged.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
+
+## Step 4 local evidence
+
+- Added lazy owned stdio lifecycle, bounded NDJSON framing, correlated client/server RPC, validated 0.154.0 consumed
+  projections, and zero-turn readiness checks for exact version, supported auth, image/model efforts, profile presence,
+  and effective config isolation.
+- Bridge-built named policy grants workspace and optional `APP_REPO` reads, grants writes only to canonical `notes/`,
+  disables command networking and unrelated apps/plugins/MCP/hooks/subagents/web tools, and routes eligible approvals
+  to the user. Unsafe, merged, or unqualified configuration fails closed.
+- Codex workspace provisioning is explicit: create-once `AGENTS.md` seeded from existing instructions, bridge-owned
+  `.agents/skills/review-flow/SKILL.md` refresh, and symlink/path safety checks. Existing user files stay unchanged.
+- Deterministic fake-child/static fixtures cover split/coalesced frames, bidirectional RPC, typed malformed responses,
+  stderr, timeouts, exit/EOF/disposal, line bounds, unsupported requests, config leakage, and workspace preservation.
+  These fixtures do not prove native sandbox enforcement, real auth/model behavior, or Figma.
+- An exactly bounded native probe was approved and attempted once. The 0.154.0 App Server candidate closed stdout
+  before returning `initialize`; no account/model/profile/config result was consumed. Per fail-closed approval, the
+  worker did not retry or run Part 2 enforcement. The driver also reported `kill EPERM` while checking the detached
+  process group after stdout closure; an exact fixture-path process scan found no remaining match, but the owned
+  fixture was retained in the run artifact output because exit ownership was not observed strongly enough to authorize
+  deletion.
+- One separately approved diagnosis used unchanged production policy and only attempted `initialize`. It observed
+  zero stdout bytes, 98 bounded stderr bytes, natural exit `1` with no signal, no response/`initialized`, and no child
+  descendants. Sanitization classified a semantic invalid config value but found no safe matching policy key or CLI
+  flag. The unique diagnostic fixture was deleted only after observing child exit; no retry or enforcement ran.
+- Schema-backed follow-up identified the semantic defect in bridge-owned overrides. Codex 0.154.0 applies CLI keys
+  by splitting every `.`; quoted dynamic filesystem paths therefore became nested path segments, while the schema
+  requires flattened filesystem path keys. The bridge now supplies the complete named profile as one inline TOML
+  table, keeping dynamic paths inside the value. Deterministic regression proof rejects filesystem dotted-key args.
+- Correction-confirmation start 2 passed initialize, exact 0.154.0 version, supported account, bounded image-model,
+  and named-profile gates, then failed closed during effective `config/read` isolation because active MCP state was
+  not limited to the bridge-owned Figma server. Raw account/config data was not retained. Codex deep-merges config
+  tables and exposes no schema-backed global MCP disable/replace switch; safely clearing arbitrary inherited server
+  names through known per-process settings is therefore unavailable. No third start or Part 2 enforcement ran.
+- Start 2 ended by observed App Server `SIGTERM`; its diagnostic counted six previously observed descendants and
+  conservatively marked cleanup uncertain even though the post-run fixture-path scan found no match. Per approval,
+  fixture `.tmp/codex-step4-config-4859cc40-c2c5-4389-9a9d-11a30f4977eb` remains in its original location.
+- Focused 0.154.0 source follow-up found `features.plugins` stable and default-enabled. Production App Server creates
+  `MessageProcessor` before processing `initialize`, then immediately starts plugin marketplace/cache tasks whenever
+  the effective feature is enabled. The release binary exposes no skip-startup switch; its switch is debug-only.
+  `config/read` is therefore not universally side-effect-free discovery because managed requirements can pin the
+  feature true despite a CLI false override. `mcpServerStatus/list` is not a safe substitute: it constructs an eager
+  connection set for every effective server.
+- Direct MCP entries expose `enabled`; connection startup filters disabled entries. Whole plugins and plugin MCP
+  entries also expose `enabled`, so transient discovered names, including dotted/quoted names, could be encoded as
+  quoted keys inside one inline TOML value. The policy now explicitly sets stable `features.plugins=false`, validates
+  it, and requires the Figma MCP entry to contain exactly `enabled=true` plus the owned loopback `url`, rejecting
+  inherited same-name command/header/auth transport fields.
+- `config/read` reloads effective layers, while `thread/start` independently reloads them without an expected config
+  version and installs an eager MCP runtime. The user accepted the operational limitation instead of an isolated home:
+  reuse the existing login, keep relevant user/project/managed config unchanged from discovery through the complete
+  review lifetime, and stop/restart the review around config changes. Managed settings forcing plugins/apps/other
+  capabilities on remain unsupported. This is not an atomic snapshot, watcher, lock, or concurrent-change guarantee.
+- Discovery now projects only transient direct MCP/plugin/app names. Final launch encodes arbitrary punctuation as
+  quoted keys inside atomic TOML values, disables every discovered unrelated entry, rejects a `figma-desktop` name
+  collision, and validates final active state. Figma transport validation rejects inherited command/auth/header/tool
+  extras while accepting schema serialization defaults (`environment_id=local`, absent/null tool timeout).
+- Frozen-config native discovery passed with privacy-safe counts (three direct MCP entries, thirteen plugin entries,
+  zero app entries), 53,449 bounded bytes, and certain stable-identity cleanup. Isolated startup then passed far enough
+  to return the large final config response (60,945 bounded bytes) and failed permission-profile validation. Source
+  inspection identifies `FilesystemPermissionsToml.glob_scan_max_depth: Option<usize>` as serialized null despite
+  being absent from the input profile; exact filesystem comparison had treated that schema default as a path entry.
+  Validation now ignores only absent/null `glob_scan_max_depth`, with deterministic coverage. Both App Server children
+  exited by owned `SIGTERM`; stable start identities were no longer live. No thread/model call ran in that sequence.
+- One approved corrected confirmation repeated fresh transient discovery and isolated qualification. Discovery found
+  the same privacy-safe counts (three direct MCP, thirteen plugin, zero app), then terminated with no live identity.
+  Isolated 0.154.0 qualification passed exact version, existing ChatGPT auth, five text/image models with advertised
+  efforts, allowed named profile, disabled inherited entries/features, exact bridge Figma transport, and final
+  filesystem/network config. It used 53,455 and 60,951 bounded bytes respectively; both children exited on owned
+  `SIGTERM`, with zero live identities.
+- The single approved fixture-only sandbox suite passed: workspace/app marker reads and notes write exited zero;
+  workspace-root, app-repo, outside, and symlink-escape writes exited one and left no targets; curl exited six with
+  explicit sandbox network-denial evidence. Output was 2,976 bytes with 28 deduplicated denial records, no overflow or
+  deadline; sandbox root plus observed descendants exited with zero live stable identities. No real `APP_REPO` write,
+  model/thread call, auth/config mutation, extra endpoint, or port 3055 use occurred.
+- Separate process note: accidental unapproved `codex sandbox macos --help` was parsed as a sandbox invocation, not
+  static inspection. It failed before requested executable `macos` launched with exact error
+  `sandbox-exec: execvp() of 'macos' failed: No such file or directory` and exit `71`. No side effects were observed;
+  it provides no enforcement qualification. `0.154.0` remains a schema/protocol candidate, not native support.
+- PR #5 feedback batch 1 hardened asynchronous stdin/output/timeout terminal handling, replaced quadratic stdout
+  concatenation, validated exact approval/profile inheritance state, excluded models without efforts, and closed
+  Codex workspace symlink/hardlink paths with deterministic tests. User-agent prefix tightening was rejected:
+  0.154.0 constructs it from mutable process-global originator state, so only exact consumed version is stable.
 
 ## Qualification gates before user-facing Codex exposure
 

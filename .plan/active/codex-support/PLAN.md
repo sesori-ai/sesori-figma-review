@@ -1,9 +1,21 @@
 # Codex support — full user-facing parity
 
-Status: Steps 1 and 2 squash-merged as `232048a` and `ece1379d6768ecc032d6f030933034007d357910`. Older cutover
-checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not merged.
-Step 3's reviewed queue/history/transport/smoke lifetime, pending-native cancellation, retained attached-History,
-and final smoke-cleanup fixes are implemented locally; focused independent review remains required before publication.
+Status: Steps 1–3 squash-merged as `232048a`, `ece1379d6768ecc032d6f030933034007d357910`, and
+`b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4; reviewed head `80707c2`, merge tree verified identical).
+Older cutover checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not
+merged. Step 4 is implemented locally from the verified Step 3 receipt with deterministic boundary proof. Approved
+native qualification stopped at its first fail-closed boundary. A bounded diagnostic identified the bridge's
+filesystem permission overrides as semantically invalid: Codex splits CLI override keys on every `.`, so dynamic
+paths cannot safely occupy dotted-key segments. Step 4 now emits the complete profile as one inline TOML table;
+a correction-confirmation startup passed initialize, exact version, account, model, and profile gates. Effective
+config validation then rejected non-isolated MCP state. Source follow-up confirmed discovered direct entries can be
+atomically disabled by name and identified pre-thread startup/config-reload gaps. The user accepted the weaker
+**reuse login, freeze configuration** contract: relevant user/project/managed config remains unchanged from discovery
+through review lifetime, and managed settings must not force capabilities on. Transient per-name isolation is now
+implemented under that contract. Corrected native discovery and isolated qualification pass on Codex 0.154.0 with
+existing ChatGPT auth, five qualifying models, disabled inherited capabilities, and exact final config validation.
+Fixture enforcement proves intended reads/notes write, denied workspace/app/outside/symlink writes, and explicit
+network denial. Step 4 is complete locally and awaits parent publication/automatic review.
 
 ## Goal and locked user direction
 
@@ -26,13 +38,18 @@ uses `sesori-plan-worker`. Borrow their planning, review, and regression-proof p
 Dart/Flutter workspace layout or mandatory monorepo layers.
 
 Execution authorization: for this series, the user's latest instruction overrides the previous human-only merge
-rule. Automatically squash-merge each PR when its current head is ready for human review, then continue to the next
-step until the plan is completed. Monitor every PR; keep checks, feedback and mergeability current and use the
-reviewed head when merging. Do not bypass protection or merge after a readiness regression. Keep at most one PR open
+rule. Use automatic GitHub reviews only; do not request manual reviews or add extra review-completion gates.
+Automatically squash-merge each PR when its current head is ready for human review, then continue to the next step
+until the plan is completed. Monitor every PR; keep checks, feedback and mergeability current and use the reviewed
+head when merging. Do not bypass protection or merge after a readiness regression. Keep at most one PR open
 and one local successor in progress. Full-parity, security and retirement gates remain mandatory; a genuine missing
 capability, unavailable test access or required user decision is a blocker, not permission to weaken those gates.
-Existing Claude/Codex sign-ins are authorized for bounded isolated tests without credential/config copying. Routine
-Claude tests use Haiku/low; Codex uses the cheapest suitable catalog-reported image/tool-capable model at low effort.
+Existing Claude/Codex sign-ins are authorized for bounded isolated tests without credential/config copying. Codex
+reuses the existing login only while relevant configuration remains frozen from discovery through review lifetime;
+stop the review before changing Codex user/project/managed config, then restart it afterward. Managed settings that
+force plugins, apps, or other capabilities on are unsupported. Routine Claude tests use Haiku/low; Codex uses the
+cheapest suitable catalog-reported image/tool-capable model at low effort. Setup limitation:
+[`docs/codex-configuration.md`](../../../docs/codex-configuration.md).
 Ask before premium/high-effort exceptions; keep explicit turn/output/$0.10 limits where supported.
 
 ## Current implementation and evidence

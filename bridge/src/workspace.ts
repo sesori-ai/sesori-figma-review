@@ -3,7 +3,10 @@
 // and notes/ is the only place it may write files. CLAUDE.md, settings and .mcp.json are written once and
 // never overwritten, so teammates can edit them per file; the skill is ours and is refreshed on every start.
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync, constants, copyFileSync, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync,
+  readFileSync, renameSync, rmSync, writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,11 +30,79 @@ export function workspaceFor(fileId: string, fileName: string): string {
   writeIfMissing(join(dir, "CLAUDE.md"), claudeMd(fileName));
   writeIfMissing(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "figma-desktop": { type: "http", url: FIGMA_MCP_URL } } }, null, 2) + "\n");
   writeIfMissing(join(dir, "permissions.json"), JSON.stringify({ allow: autoApprove(dir) }, null, 2) + "\n");
-  writeFileSync(join(dir, ".claude", "skills", "review-flow", "SKILL.md"), SKILL);
+  writeFileSync(join(dir, ".claude", "skills", "review-flow", "SKILL.md"), REVIEW_FLOW_SKILL);
   writeIfMissing(join(dir, "sessions.json"), "[]\n");
   return dir;
 }
 const writeIfMissing = (path: string, content: string) => { if (!existsSync(path)) writeFileSync(path, content); };
+
+const CODEX_INSTRUCTIONS_NOTE = [
+  "<!-- Seeded once from CLAUDE.md by Sesori Review.",
+  "AGENTS.md and CLAUDE.md are separately user-editable. -->\n\n",
+].join(" ");
+const writeOwnedIfMissing = (path: string, content: string) => {
+  try { writeFileSync(path, content, { flag: "wx" }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+};
+const replaceOwnedFile = (path: string, content: string) => {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+  try {
+    const entry = fstatSync(fd);
+    if (!entry.isFile() || entry.nlink !== 1) throw new Error(`Refusing unsafe Codex owned file: ${path}`);
+    ftruncateSync(fd); writeFileSync(fd, content);
+  } finally { closeSync(fd); }
+};
+const readSeedFile = (path: string) => {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (error) { throw new Error(`Refusing unsafe Codex seed file: ${path}`, { cause: error }); }
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`Refusing unsafe Codex seed file: ${path}`);
+    return readFileSync(fd, "utf8");
+  } finally { closeSync(fd); }
+};
+const lstatIfPresent = (path: string) => {
+  try { return lstatSync(path); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+};
+const ensureOwnedDirectory = (path: string) => {
+  const entry = lstatIfPresent(path);
+  if (entry) {
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw new Error(`Refusing unsafe Codex skill directory: ${path}`);
+    }
+    return;
+  }
+  mkdirSync(path);
+};
+/** Add Codex scaffolding only when explicitly prepared. Seed instructions once; refresh bridge-owned skill. */
+export function provisionCodexWorkspace(args: { dir: string }) {
+  if (lstatSync(args.dir).isSymbolicLink()) throw new Error(`Refusing unsafe Codex workspace: ${args.dir}`);
+  const agents = join(args.dir, ".agents"), skills = join(agents, "skills"), reviewFlow = join(skills, "review-flow");
+  const notes = join(args.dir, "notes");
+  if (!existsSync(notes) || lstatSync(notes).isSymbolicLink() || !lstatSync(notes).isDirectory()) {
+    throw new Error(`Refusing unsafe Codex notes directory: ${notes}`);
+  }
+  ensureOwnedDirectory(agents); ensureOwnedDirectory(skills); ensureOwnedDirectory(reviewFlow);
+  const instructionsPath = join(args.dir, "AGENTS.md"), skillPath = join(reviewFlow, "SKILL.md");
+  const instructions = lstatIfPresent(instructionsPath);
+  if (instructions && (instructions.isSymbolicLink() || !instructions.isFile())) {
+    throw new Error(`Refusing unsafe Codex instructions file: ${instructionsPath}`);
+  }
+  if (!instructions) {
+    const sourcePath = join(args.dir, "CLAUDE.md");
+    writeOwnedIfMissing(instructionsPath, CODEX_INSTRUCTIONS_NOTE + readSeedFile(sourcePath));
+  }
+  const skill = lstatIfPresent(skillPath);
+  if (skill && (skill.isSymbolicLink() || !skill.isFile() || skill.nlink !== 1)) {
+    throw new Error(`Refusing unsafe Codex skill file: ${skillPath}`);
+  }
+  replaceOwnedFile(skillPath, REVIEW_FLOW_SKILL);
+  return { instructionsPath, skillPath };
+}
+export const readReviewFlowSkill = () => REVIEW_FLOW_SKILL;
 export const readAllow = (dir: string): string[] => JSON.parse(readFileSync(join(dir, "permissions.json"), "utf8")).allow;
 
 /** Copy the built plugin next to the workspaces so Figma's "Import plugin from manifest" points at a path that
@@ -168,7 +239,7 @@ so it never replaces \`focus\` + \`get_screen\`. Pass node ids as \`12:34\`; if 
 <!-- END tool-steering -->
 `;
 
-const SKILL = `---
+const REVIEW_FLOW_SKILL = `---
 name: review-flow
 description: Structured review of a Figma prototype flow, screen by screen, ending with dev-ready annotations. Use when the user asks to review the flow, the page, or a set of screens.
 ---
