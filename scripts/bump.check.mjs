@@ -43,6 +43,10 @@ for (const bad of ["", "1.2", "01.2.3", "9.9.10-beta.1"]) {
   assert.deepEqual(snapshot(dir), before, `and writes nothing for ${bad || "a missing version"}`);
 }
 
+// [Unreleased] is empty here, so a new version would only fail later in publish.yml.
+assert.throws(() => bump(dir, "9.9.10"), "refuses a new version with nothing under [Unreleased]");
+assert.deepEqual(snapshot(dir), before, "and writes nothing");
+
 // A cut version plus new Unreleased entries would tag changes the release notes omit.
 writeFileSync(join(dir, "CHANGELOG.md"), cut.replace("## [Unreleased]\n", "## [Unreleased]\n\n### Fixed\n\n- Something found after the bump.\n"));
 const withEntries = snapshot(dir);
@@ -55,10 +59,16 @@ writeFileSync(join(stale, "CHANGELOG.md"), "# Changelog\n\n## [0.1.0]\n");
 assert.throws(() => bump(stale, "9.9.9"), "refuses a CHANGELOG with no [Unreleased] heading");
 assert.deepEqual(versions(stale), untouched, "and refuses before writing any version");
 
-const brokenLock = fixture();
-writeFileSync(join(brokenLock, "package-lock.json"), JSON.stringify({ version: "0.0.0", packages: { "": { version: "0.0.0" } } }, null, 2));
-const beforeBrokenLock = snapshot(brokenLock);
-assert.throws(() => bump(brokenLock, "9.9.9"), "refuses a lockfile missing a workspace record");
-assert.deepEqual(snapshot(brokenLock), beforeBrokenLock, "and refuses before rewriting the manifests");
+const workspaceRecords = { "": { version: "0.0.0" }, plugin: { version: "0.0.0" }, bridge: { version: "0.0.0" } };
+for (const [what, badLock] of [
+  ["a missing workspace record", { version: "0.0.0", packages: { "": { version: "0.0.0" } } }],
+  ["no top-level version", { packages: workspaceRecords }],
+]) {
+  const brokenLock = fixture();
+  writeFileSync(join(brokenLock, "package-lock.json"), JSON.stringify(badLock, null, 2));
+  const untouchedFiles = snapshot(brokenLock);
+  assert.throws(() => bump(brokenLock, "9.9.9"), `refuses a lockfile with ${what}`);
+  assert.deepEqual(snapshot(brokenLock), untouchedFiles, "and refuses before rewriting the manifests");
+}
 
 console.log("bump check ok");

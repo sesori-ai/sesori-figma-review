@@ -29,6 +29,10 @@ if (!alreadyCut && !/^## \[Unreleased\]\r?\n/m.test(changelog)) {
 if (alreadyCut && unreleased) {
   throw new Error(`CHANGELOG.md already has a [${version}] section and [Unreleased] is not empty: move those entries into [${version}], or bump the next version`);
 }
+// An empty section would only fail later, in publish.yml, with the tag already pushed.
+if (!alreadyCut && !unreleased) {
+  throw new Error("CHANGELOG.md has nothing under '## [Unreleased]' to release");
+}
 
 const sources = manifests.map((name) => {
   const text = readFileSync(file(name), "utf8");
@@ -39,6 +43,7 @@ const sources = manifests.map((name) => {
 // parse/stringify round-trip leaves every other byte of the file untouched.
 const lock = JSON.parse(readFileSync(file("package-lock.json"), "utf8"));
 const lockKeys = ["", "plugin", "bridge"];
+if (typeof lock.version !== "string") throw new Error("package-lock.json: no top-level version");
 for (const key of lockKeys) {
   if (typeof lock.packages?.[key]?.version !== "string") throw new Error(`package-lock.json: no version for "${key || "the root package"}"`);
 }
