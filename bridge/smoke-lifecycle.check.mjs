@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runInNewContext } from "node:vm";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,18 +45,31 @@ assert.equal(deliverSmokeCallback({ finished: () => finished, deliver: () => { d
 assert.equal(dispatches, 0, "queued post-terminal callback cannot dispatch protocol/model work");
 const valid = JSON.stringify([{ provider: "claude", sessionId: "owned", turns: 3, costStatus: "reported", costUsd: 2,
   usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 } }]);
-const finalCodes = [], finalErrors = [], finalReports = [];
+const smokeSource = readFileSync(new URL("./smoke.mjs", import.meta.url), "utf8");
+const passSource = smokeSource.slice(smokeSource.indexOf("function pass() {"), smokeSource.indexOf("\n\nasync function restartAndResume"));
+const finalCodes = [], finalDiagnostics = [];
 for (const read of [
-  () => readFileSync(join(root, "missing.json"), "utf8"), () => "not-json", () => "{}",
+  () => { throw new Error("missing persisted file"); }, () => "not-json", () => "{}",
   () => valid.replace('"costUsd":2', '"costUsd":0'), () => valid,
 ]) {
-  let finalFinished = false;
-  const args = { finished: () => finalFinished, finish: () => { finalFinished = true; }, read, provider: "claude", sessionId: "owned",
-    firstCost: 1, firstUsage: 1, observed: true, report: outcome => finalReports.push(outcome),
-    reportError: error => finalErrors.push(String(error)), cleanup: async code => { finalCodes.push(code); } };
-  assert.equal(await completeSmoke(args), true); assert.equal(await completeSmoke(args), false);
+  let completion, capturedArgs;
+  const context = {
+    completeSmoke: args => { capturedArgs = args; completion = completeSmoke(args); return completion; },
+    finished: false, readFileSync: () => read(), join, fixture: "controlled-fixture", ref: { sessionId: "owned" },
+    firstProcessCost: 1, firstProcessUsage: 1, sawSteeredFocus: true, sawCancelledCard: true,
+    reconnectChecked: true, restartCount: 1, seen: [],
+    console: { log: (...items) => finalDiagnostics.push(items.join(" ")) },
+    cleanup: async code => { finalCodes.push(code); },
+  };
+  const pass = runInNewContext(`(${passSource})`, context);
+  pass();
+  assert.ok(completion, "pass delegates to completeSmoke");
+  assert.equal(await completion, true); assert.equal(await completeSmoke(capturedArgs), false);
 }
-assert.deepEqual(finalCodes, [1, 1, 1, 1, 0]); assert.equal(finalErrors.length, 3); assert.deepEqual(finalReports.map(item => item.ok), [false, true]);
+assert.deepEqual(finalCodes, [1, 1, 1, 1, 0]);
+assert.ok(finalDiagnostics.filter(line => line.includes("failed final smoke assertion")).length >= 3);
+assert.equal(finalDiagnostics.filter(line => line.includes("failed persisted resume accounting")).length, 1);
+assert.equal(finalDiagnostics.filter(line => line.trim() === "ok").length, 1);
 let finalDeleted = 0, finalFinished = false; const finalChild = {}; let releaseFinal;
 const completing = completeSmoke({ finished: () => finalFinished, finish: () => { finalFinished = true; }, read: () => valid,
   provider: "claude", sessionId: "owned", firstCost: 1, firstUsage: 1, observed: true,
