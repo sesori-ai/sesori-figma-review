@@ -13,7 +13,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
 | 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4); reviewed head `80707c2`, merge tree identical |
-| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Transient isolation implemented; discovery passed, isolated native run reached final config validation, then exposed one harmless serialized filesystem default; corrected rerun/enforcement require approval |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Complete locally: deterministic checks, frozen-config discovery/isolation, native 0.154.0 qualification, and fixture enforcement pass; awaits parent publication/automatic review |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
 | 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
@@ -120,7 +120,18 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   inspection identifies `FilesystemPermissionsToml.glob_scan_max_depth: Option<usize>` as serialized null despite
   being absent from the input profile; exact filesystem comparison had treated that schema default as a path entry.
   Validation now ignores only absent/null `glob_scan_max_depth`, with deterministic coverage. Both App Server children
-  exited by owned `SIGTERM`; stable start identities were no longer live. No thread/model call or enforcement ran.
+  exited by owned `SIGTERM`; stable start identities were no longer live. No thread/model call ran in that sequence.
+- One approved corrected confirmation repeated fresh transient discovery and isolated qualification. Discovery found
+  the same privacy-safe counts (three direct MCP, thirteen plugin, zero app), then terminated with no live identity.
+  Isolated 0.154.0 qualification passed exact version, existing ChatGPT auth, five text/image models with advertised
+  efforts, allowed named profile, disabled inherited entries/features, exact bridge Figma transport, and final
+  filesystem/network config. It used 53,455 and 60,951 bounded bytes respectively; both children exited on owned
+  `SIGTERM`, with zero live identities.
+- The single approved fixture-only sandbox suite passed: workspace/app marker reads and notes write exited zero;
+  workspace-root, app-repo, outside, and symlink-escape writes exited one and left no targets; curl exited six with
+  explicit sandbox network-denial evidence. Output was 2,976 bytes with 28 deduplicated denial records, no overflow or
+  deadline; sandbox root plus observed descendants exited with zero live stable identities. No real `APP_REPO` write,
+  model/thread call, auth/config mutation, extra endpoint, or port 3055 use occurred.
 - Separate process note: accidental unapproved `codex sandbox macos --help` was parsed as a sandbox invocation, not
   static inspection. It failed before requested executable `macos` launched with exact error
   `sandbox-exec: execvp() of 'macos' failed: No such file or directory` and exit `71`. No side effects were observed;

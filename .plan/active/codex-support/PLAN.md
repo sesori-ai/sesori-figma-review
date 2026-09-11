@@ -12,9 +12,10 @@ config validation then rejected non-isolated MCP state. Source follow-up confirm
 atomically disabled by name and identified pre-thread startup/config-reload gaps. The user accepted the weaker
 **reuse login, freeze configuration** contract: relevant user/project/managed config remains unchanged from discovery
 through review lifetime, and managed settings must not force capabilities on. Transient per-name isolation is now
-implemented under that contract. Native discovery passed and isolated qualification reached final config validation,
-then rejected the serialized permission filesystem default. Source/tests now accept only its harmless null scan-depth
-default, but authorization permits no retry after failure. Enforcement did not run; Step 4 awaits one corrected rerun.
+implemented under that contract. Corrected native discovery and isolated qualification pass on Codex 0.154.0 with
+existing ChatGPT auth, five qualifying models, disabled inherited capabilities, and exact final config validation.
+Fixture enforcement proves intended reads/notes write, denied workspace/app/outside/symlink writes, and explicit
+network denial. Step 4 is complete locally and awaits parent publication/automatic review.
 
 ## Goal and locked user direction
 
