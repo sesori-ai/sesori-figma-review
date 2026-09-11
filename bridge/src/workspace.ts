@@ -8,11 +8,12 @@ import {
   readFileSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FIGMA_MCP_URL, type ProviderId, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
 
-const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+const xdgDataHome = process.env.XDG_DATA_HOME; // the XDG spec says a relative value is invalid and must be ignored
+const dataHome = xdgDataHome && isAbsolute(xdgDataHome) ? xdgDataHome : join(homedir(), ".local", "share");
 export const HOME = process.env.SESORI_REVIEW_HOME || join(dataHome, "sesori-figma-review");
 
 /** Tools that run without an Allow/Deny card. Per-file override: edit permissions.json in the workspace.

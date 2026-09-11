@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The plugin copy, settings and per-file workspaces live under `$XDG_DATA_HOME/sesori-figma-review` (default `~/.local/share/sesori-figma-review`) instead of `~/.sesori-review`. `SESORI_REVIEW_HOME` still overrides it; there is no migration of an existing `~/.sesori-review`.
+- The plugin copy, settings and per-file workspaces live under `$XDG_DATA_HOME/sesori-figma-review` (default `~/.local/share/sesori-figma-review`, and the default is also used when `XDG_DATA_HOME` is relative, which the XDG spec calls invalid) instead of `~/.sesori-review`. `SESORI_REVIEW_HOME` still overrides it; there is no migration of an existing `~/.sesori-review`.
 
 ## [0.3.1]
 
