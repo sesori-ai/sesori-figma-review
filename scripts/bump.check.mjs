@@ -10,6 +10,20 @@ import { join } from "node:path";
 const repo = new URL("../", import.meta.url);
 const manifests = ["package.json", "plugin/package.json", "bridge/package.json"];
 const files = [...manifests, "package-lock.json", "CHANGELOG.md"];
+// The changelog is seeded, never copied: after a release `[Unreleased]` is empty by design,
+// and this check has to pass on a release tree too — publish.yml runs it before publishing.
+const changelogFixture = `# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- Something worth releasing.
+
+## [0.1.0]
+
+- First release.
+`;
 
 const fixtures = [];
 process.on("exit", () => fixtures.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
@@ -17,7 +31,8 @@ const fixture = () => {
   const dir = mkdtempSync(join(tmpdir(), "bump-check-"));
   fixtures.push(dir);
   for (const sub of ["scripts", "plugin", "bridge"]) mkdirSync(join(dir, sub));
-  for (const name of [...files, "scripts/bump.mjs"]) cpSync(new URL(name, repo), join(dir, name));
+  for (const name of [...manifests, "package-lock.json", "scripts/bump.mjs"]) cpSync(new URL(name, repo), join(dir, name));
+  writeFileSync(join(dir, "CHANGELOG.md"), changelogFixture);
   return dir;
 };
 // stderr is piped, not inherited, so the runs that are supposed to fail stay quiet.
