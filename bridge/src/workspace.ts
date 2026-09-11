@@ -12,9 +12,12 @@ import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FIGMA_MCP_URL, type ProviderId, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
 
-const xdgDataHome = process.env.XDG_DATA_HOME; // the XDG spec says a relative value is invalid and must be ignored
-const dataHome = xdgDataHome && isAbsolute(xdgDataHome) ? xdgDataHome : join(homedir(), ".local", "share");
-export const HOME = process.env.SESORI_REVIEW_HOME || join(dataHome, "sesori-figma-review");
+/** SESORI_REVIEW_HOME wins; otherwise $XDG_DATA_HOME/sesori-figma-review, ignoring a relative
+ *  XDG_DATA_HOME because the XDG spec calls that invalid. Takes its inputs so selfcheck can cover the branches. */
+export const resolveHome = (env: NodeJS.ProcessEnv, home: string): string =>
+  env.SESORI_REVIEW_HOME
+  || join(env.XDG_DATA_HOME && isAbsolute(env.XDG_DATA_HOME) ? env.XDG_DATA_HOME : join(home, ".local", "share"), "sesori-figma-review");
+export const HOME = resolveHome(process.env, homedir());
 
 /** Tools that run without an Allow/Deny card. Per-file override: edit permissions.json in the workspace.
  *  (Not .claude/settings.json: the CLI ignores project permissions until the folder is trusted interactively.) */
