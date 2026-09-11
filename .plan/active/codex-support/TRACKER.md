@@ -11,7 +11,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
-| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Parent-probed queue/history/transport fixes implemented locally; focused independent review required |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Parent-probed queue/history/transport/smoke-lifetime fixes implemented; focused review required |
 | 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
@@ -38,7 +38,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   plus exact legacy catalog/history adoption, legacy SDK removal and the UUID integration assertion.
 - The `9bf1067` Step 3 live smoke used Claude Haiku/low, owned home, OS-assigned non-3055 ports and four-turn/$0.10
   limits. It proved steering, Stop/cards, reconnect/history, resumed-only output, 3 turns/$0.0248175 and cleanup.
-  Follow-up queue/history/transport/timeout fixes use fresh deterministic proof only; no second paid smoke was run.
+  Follow-up queue/history/transport/smoke-lifetime fixes use deterministic proof only; no second paid smoke was run.
 - First Step 3 review disposition: accepted provider-change derivation, handshake admission, and production-seam
   evidence findings. Qualified the settings finding: actual Claude disposal broadcasts health, so no outage was
   proven, but bridge-owned settled publication must not rely on that adapter callback. Parent also required pending-start/fresh

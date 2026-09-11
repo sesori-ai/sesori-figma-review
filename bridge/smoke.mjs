@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanupOwnedArtifacts, stopOwnedProcess, withTimeout } from "./smoke-lifecycle.mjs";
+import { cleanupOwnedArtifacts, cleanupSmoke, deliverSmokeCallback, restartSmoke, stopOwnedProcess, withTimeout } from "./smoke-lifecycle.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bridgePath = join(here, "dist", "bridge.mjs");
@@ -31,20 +31,20 @@ let firstProcessUsage = 0, firstProcessCost = 0, restartCount = 0, reconnectChec
 
 function launch() {
   bridgeOutput = "";
-  child = spawn(process.execPath, [bridgePath], {
+  const launched = child = spawn(process.execPath, [bridgePath], {
     env: { ...process.env, APP_REPO: "", SESORI_REVIEW_PORT: "0", SESORI_REVIEW_HOME: fixture,
       SESORI_REVIEW_MAX_TURNS: "4", SESORI_REVIEW_MAX_BUDGET_USD: "0.10" },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stderr.on("data", chunk => { bridgeOutput += String(chunk); });
+  launched.stderr.on("data", chunk => { bridgeOutput += String(chunk); });
   return new Promise((resolve, reject) => {
-    child.stdout.on("data", chunk => {
+    launched.stdout.on("data", chunk => {
       bridgeOutput += String(chunk);
       const match = bridgeOutput.match(/listening on ws:\/\/127\.0\.0\.1:(\d+)/);
-      if (match) { port = Number(match[1]); port === 3055 ? reject(new Error("OS assigned protected bridge port 3055")) : resolve(); }
+      if (match) { port = Number(match[1]); port === 3055 ? reject(new Error("OS assigned protected bridge port 3055")) : resolve(launched); }
     });
-    child.once("error", reject);
-    child.once("exit", code => {
+    launched.once("error", reject);
+    launched.once("exit", code => {
       if (!finished && phase !== "restarting") { const error = `bridge exited ${code}: ${bridgeOutput.slice(-1000)}`; fail(error); reject(new Error(error)); }
     });
   });
@@ -53,7 +53,8 @@ const send = message => ws.send(JSON.stringify(message));
 function rejectLegacyProtocol() {
   return new Promise((resolve, reject) => {
     const legacy = new WebSocket(`ws://127.0.0.1:${port}`); let actionable = false;
-    legacy.addEventListener("open", () => legacy.send(JSON.stringify({ kind: "hello", fileId: "legacy", fileName: "Legacy" })));
+    legacy.addEventListener("open", () => deliverSmokeCallback({ finished: () => finished,
+      deliver: () => legacy.send(JSON.stringify({ kind: "hello", fileId: "legacy", fileName: "Legacy" })) }));
     legacy.addEventListener("message", event => { const message = JSON.parse(event.data); actionable ||= message.kind === "error" && message.message.includes("protocol mismatch"); });
     legacy.addEventListener("close", () => actionable ? resolve() : reject(new Error("Legacy plugin did not receive protocol mismatch guidance")));
     legacy.addEventListener("error", reject, { once: true });
@@ -61,26 +62,27 @@ function rejectLegacyProtocol() {
 }
 function connect() {
   return new Promise((resolve, reject) => {
-    ws = new WebSocket(`ws://127.0.0.1:${port}`);
-    ws.addEventListener("open", () => send({ kind: "hello", protocolVersion: 3, fileId: "smoke", fileName: "Smoke" }), { once: true });
-    ws.addEventListener("error", () => reject(new Error(`WebSocket connect failed on ${port}: ${bridgeOutput.slice(-1000)}`)), { once: true });
-    ws.addEventListener("message", event => { if (JSON.parse(event.data).kind === "connection") resolve(); });
-    ws.addEventListener("message", onMessage);
+    const socket = ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    socket.addEventListener("open", () => deliverSmokeCallback({ finished: () => finished,
+      deliver: () => socket.send(JSON.stringify({ kind: "hello", protocolVersion: 3, fileId: "smoke", fileName: "Smoke" })) }), { once: true });
+    socket.addEventListener("error", () => reject(new Error(`WebSocket connect failed on ${port}: ${bridgeOutput.slice(-1000)}`)), { once: true });
+    socket.addEventListener("message", event => { if (JSON.parse(event.data).kind === "connection") resolve(socket); });
+    socket.addEventListener("message", onMessage);
   });
 }
 async function cleanup(code) {
   clearTimeout(timeout);
   try { ws?.close(); } catch {}
-  const wasRunning = child?.exitCode === null && child.signalCode === null;
-  const terminated = !child || await stopOwnedProcess({ child, timeoutMs: 10_000 });
-  if (!terminated) {
+  const ownedChild = child, wasRunning = ownedChild?.exitCode === null && ownedChild.signalCode === null;
+  const result = await cleanupSmoke({ current: () => child, stop: owned => stopOwnedProcess({ child: owned, timeoutMs: 10_000 }),
+    cleanup: () => cleanupOwnedArtifacts({ terminated: true, fixture, nativeProject, nativeProjectExisted,
+      transcript: ref?.sessionId ? join(nativeProject, `${ref.sessionId}.jsonl`) : undefined }) });
+  if (!result) {
     console.log("owned bridge termination unproven; all artifacts retained");
-    child?.stdout?.destroy(); child?.stderr?.destroy(); child?.unref();
+    ownedChild?.stdout?.destroy(); ownedChild?.stderr?.destroy(); ownedChild?.unref();
     process.exitCode = 1; return;
   }
   if (wasRunning) console.log("owned bridge process cleanup ok");
-  const result = cleanupOwnedArtifacts({ terminated, fixture, nativeProject, nativeProjectExisted,
-    transcript: ref?.sessionId ? join(nativeProject, `${ref.sessionId}.jsonl`) : undefined });
   if (result.nativeRemoved) console.log("owned native artifact cleanup ok");
   else if (result.cleanupFailed) console.log("owned native cleanup unproven; project retained");
   process.exitCode = code || result.cleanupFailed ? 1 : 0;
@@ -104,11 +106,11 @@ function pass() {
 }
 
 async function restartAndResume() {
-  phase = "restarting"; restartCount++;
-  ws.close();
-  if (!await stopOwnedProcess({ child, timeoutMs: 10_000 })) throw new Error("owned bridge restart termination timed out");
-  await withTimeout({ promise: launch(), timeoutMs: 15_000, label: "bridge restart" });
-  await withTimeout({ promise: connect(), timeoutMs: 5_000, label: "restart handshake" });
+  phase = "restarting"; restartCount++; ws.close();
+  await restartSmoke({ current: () => child, finished: () => finished,
+    stop: owned => stopOwnedProcess({ child: owned, timeoutMs: 10_000 }),
+    launch: () => withTimeout({ promise: launch(), timeoutMs: 15_000, label: "bridge restart" }),
+    connect: () => withTimeout({ promise: connect(), timeoutMs: 5_000, label: "restart handshake" }) });
 }
 function startFirst() {
   send({ kind: "start", intentId: "first", fileId: "smoke", fileName: "Smoke", pageId: "0:1", pageName: "Page",
@@ -117,6 +119,9 @@ function startFirst() {
 }
 
 function onMessage(event) {
+  deliverSmokeCallback({ finished: () => finished, deliver: () => onActiveMessage(event) });
+}
+function onActiveMessage(event) {
   const message = JSON.parse(event.data);
   if (message.kind === "connection") {
     if (phase === "steer") return startFirst();
