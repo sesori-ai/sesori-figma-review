@@ -193,20 +193,33 @@ queued.get("input").value = "queued"; queued.get("send").onclick?.(); queued.soc
 queued.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, intentId: queuedStart.intentId, session, busy: true });
 const queuedOpen = queued.sent("open").slice(-1)[0] as { intentId: string };
 assert.equal(queued.sent("user").length, 0);
-queued.deliver({ kind: "history", intentId: queuedOpen.intentId, session, attached: true, messages: [] });
+queued.deliver({ kind: "history", intentId: queuedOpen.intentId, session, attached: true, messages: [{ role: "assistant", text: "context" }] });
 assert.equal(queued.sent("user").length, 1);
+const queuedText = text(queued.get("chat")); assert.equal(count(queuedText, "queued"), 1); assert.ok(queuedText.indexOf("context") < queuedText.indexOf("queued"));
+const detached = new Harness(); detached.connect(); detached.get("input").value = "start"; detached.get("send").onclick?.();
+const detachedStart = detached.sent("start")[0] as { intentId: string }; detached.get("input").value = "detached"; detached.get("send").onclick?.(); detached.socket.close();
+detached.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, intentId: detachedStart.intentId, session, busy: false });
+const detachedOpen = detached.sent("open").slice(-1)[0] as { intentId: string };
+detached.deliver({ kind: "history", intentId: detachedOpen.intentId, session, attached: false, messages: [] });
+assert.equal(detached.sent("user").length, 0); assert.match(JSON.stringify(detached.posted), /queued message was cancelled/);
+detached.get("input").value = "deliberate"; detached.get("send").onclick?.();
+assert.deepEqual((detached.sent("start").slice(-1)[0] as { resume?: unknown }).resume, { provider: "claude", sessionId: session.sessionId });
 
-// Correlated History failure restores known resume context; stale intent failure cannot release a newer read.
-const failedHistory = new Harness(); failedHistory.connect();
-failedHistory.deliver({ kind: "sessions", sessions: [session] }); failedHistory.get("btn-history").onclick?.();
-failedHistory.get("sessions").querySelectorAll("button")[0]!.onclick?.();
-const failedOpen = failedHistory.sent("open").slice(-1)[0] as { intentId: string };
+// Correlated History failure uses authoritative attachment; stale failure cannot release a newer read.
+const failedHistory = new Harness(); failedHistory.connect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: false });
+let failedOpen = failedHistory.sent("open").slice(-1)[0] as { intentId: string };
+failedHistory.deliver({ kind: "history", intentId: failedOpen.intentId, session, attached: true, messages: [] });
+failedHistory.socket.close(); failedHistory.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, busy: false });
+failedOpen = failedHistory.sent("open").slice(-1)[0] as { intentId: string };
 failedHistory.deliver({ kind: "error", intentId: "stale-history", message: "stale" });
 failedHistory.get("input").value = "retry"; failedHistory.get("send").onclick?.(); assert.equal(failedHistory.get("input").value, "retry");
-failedHistory.deliver({ kind: "error", intentId: failedOpen.intentId, message: "native history failed" });
-failedHistory.get("send").onclick?.();
-const resumed = failedHistory.sent("start").slice(-1)[0] as { resume?: { provider: string; sessionId: string } };
-assert.deepEqual(resumed.resume, { provider: "claude", sessionId: session.sessionId });
+failedHistory.deliver({ kind: "error", intentId: failedOpen.intentId, message: "native history failed" }); failedHistory.get("send").onclick?.();
+assert.deepEqual((failedHistory.sent("start").slice(-1)[0] as { resume?: unknown }).resume, { provider: "claude", sessionId: session.sessionId });
+const attachedFailure = new Harness(); attachedFailure.connect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: false });
+const attachedOpen = attachedFailure.sent("open").slice(-1)[0] as { intentId: string };
+attachedFailure.deliver({ kind: "error", intentId: attachedOpen.intentId, message: "failed while attached" });
+attachedFailure.get("input").value = "live"; attachedFailure.get("send").onclick?.();
+assert.deepEqual([attachedFailure.sent("user").length, attachedFailure.sent("start").length], [1, 0]);
 
 // Retry adopts a newer identity snapshot boundary; completed native identity also rejects delayed SDK overlap.
 const history = new Harness();
@@ -307,6 +320,8 @@ assert.equal(stale.confirm({ intentId: "old", session }), undefined);
 assert.ok(stale.confirm({ intentId: "current", session }));
 assert.equal(stale.update({ ...session, sessionId: "wrong" }), false);
 assert.equal(stale.update({ ...session, provider: "codex" }), false);
+const abandonedHistory = new ConversationView(); abandonedHistory.beginHistory({ intentId: "abandoned", session, attached: true, inputs: [{ text: "owned", selection: [] }] });
+assert.equal(abandonedHistory.leave({ reason: "New or another History row" }).length, 1);
 let cancellations = 0; stale.addCard({ id: "card", cancel: () => cancellations++ });
 stale.disconnect({ reason: "offline" }); stale.disconnect({ reason: "offline again" }); assert.equal(cancellations, 1);
 console.log("bundled ui lifecycle check ok");

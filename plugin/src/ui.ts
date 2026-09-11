@@ -137,11 +137,11 @@ function onDown(m: DownMsg) {
       renderBusy(m.busy); setStatus("connected to bridge", "warn");
       const attachedChanged = m.session?.sessionId && (!previous || previous.provider !== m.session.provider || previous.sessionId !== m.session.sessionId);
       if (reconciled.historyRetry) send({ kind: "open", intentId: reconciled.historyRetry.intentId, fileId: ctx.fileId, fileName: ctx.fileName, session: reconciled.historyRetry.session });
-      else if (reconciled.restoreHistory && m.session) requestHistory(m.session, true, m.activeText, reconciled.queued);
+      else if (reconciled.restoreHistory && m.session) requestHistory({ session: m.session, attached: true, retainSession: true, activeText: m.activeText, inputs: reconciled.queued });
       else {
         for (const queued of reconciled.queued) send({ kind: "user", ...queued });
-        if (attachedChanged) requestHistory(m.session!, true, m.activeText);
-        else if (!m.session && !m.intentId && previous?.sessionId) requestHistory(previous, true, m.activeText);
+        if (attachedChanged) requestHistory({ session: m.session!, attached: true, retainSession: true, activeText: m.activeText });
+        else if (!m.session && !m.intentId && previous?.sessionId) requestHistory({ session: previous, attached: false, retainSession: true, activeText: m.activeText });
       }
       return;
     }
@@ -152,7 +152,7 @@ function onDown(m: DownMsg) {
       if (!confirmed) return;
       renderCost(m.session);
       for (const queued of confirmed.inputs) send({ kind: "user", ...queued });
-      if (confirmed.adopted) requestHistory(m.session, true);
+      if (confirmed.adopted) requestHistory({ session: m.session, attached: true, retainSession: true });
       return;
     }
     case "session": if (view.update(m.session)) renderCost(m.session); return;
@@ -166,7 +166,7 @@ function onDown(m: DownMsg) {
       if (m.intentId) {
         const failed = view.failHistory(m.intentId);
         if (!failed) return;
-        notifyCancelled(failed.inputs.length); opened = failed.resume ? failed.session : undefined; renderCost(failed.session);
+        notifyCancelled(failed.inputs.length); opened = failed.attached ? undefined : failed.session; renderCost(failed.session);
       } else if (view.starting) notifyCancelled(view.leave({ reason: "Start failed" }).length);
       bubble("error", m.message); return;
     }
@@ -265,10 +265,10 @@ function permissionCard(id: string, tool: string, input: Record<string, unknown>
   card.append(ctl);
 }
 
-function requestHistory(session: SessionRecord, retainSession = false, activeText: Extract<DownMsg, { kind: "connection" }>["activeText"] = [], inputs: { text: string; selection: NodeRef[] }[] = []) {
+function requestHistory(args: { session: SessionRecord; attached: boolean; retainSession?: boolean; activeText?: Extract<DownMsg, { kind: "connection" }>["activeText"]; inputs?: { text: string; selection: NodeRef[] }[] }) {
   const intentId = `history-${Date.now().toString(36)}-${++intentCounter}`;
-  view.beginHistory({ intentId, session, retainSession, activeText, inputs });
-  send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session });
+  view.beginHistory({ intentId, ...args });
+  send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session: args.session });
 }
 
 function renderSessions() {
@@ -282,7 +282,7 @@ function renderSessions() {
     row.append(title, btn("Open", () => {
       if (!admit("History was not opened because the bridge is not connected.")) return;
       leaveView("Opened a History session");
-      requestHistory(s); sessionsEl.hidden = true;
+      requestHistory({ session: s, attached: false }); sessionsEl.hidden = true;
     }));
     sessionsEl.append(row);
   }
@@ -312,7 +312,7 @@ function start(anchor: Anchor, text: string, resume?: SessionRef) {
 }
 /** History → Open: show the past conversation; the session itself is resumed by the next message. */
 function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
-  const confirmed = view.confirmHistory({ intentId: m.intentId, session: m.session });
+  const confirmed = view.confirmHistory({ intentId: m.intentId, session: m.session, attached: m.attached });
   if (!confirmed) return;
   const cards = clearChat(true);
   renderCost(confirmed.session);
@@ -332,9 +332,11 @@ function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
     items.set(snapshot.itemId, { element: assistant(md(snapshot.text)), markdown: snapshot.text });
   }
   for (const event of confirmed.events) if (!historyIds.has(event.itemId)) onEvent(event);
+  if (confirmed.attached) for (const queued of confirmed.inputs) bubble("msg user", queued.text);
+  else notifyCancelled(confirmed.inputs.length);
   for (const card of cards) chat.append(card);
   if (busy) chat.append(working);
-  for (const queued of confirmed.inputs) send({ kind: "user", ...queued });
+  if (confirmed.attached) for (const queued of confirmed.inputs) send({ kind: "user", ...queued });
   chat.scrollTop = chat.scrollHeight;
 }
 function submit() {

@@ -339,4 +339,12 @@ assert.match((await attachedClient.next(message => message.kind === "error")).me
 
 valid.close(); settingsOrigin.close(); fresh.close(); attachedClient.close(); other.close();
 await app.shutdown();
+const transportApp = createReviewBridge({ version: "test", port: 0, log: () => {},
+  createProviders: () => ({ claude: undefined, codex: undefined }) });
+const transportClient = await new Client(await transportApp.listening).opened();
+const transportShutdown = transportApp.shutdown();
+try {
+  await Promise.race([transportShutdown, new Promise<never>((_, reject) =>
+    AbortSignal.timeout(2000).addEventListener("abort", () => reject(new Error("shutdown left pre-hello transport open"))))]);
+} finally { transportClient.close(); await transportShutdown; }
 console.log("review bridge integration check ok");

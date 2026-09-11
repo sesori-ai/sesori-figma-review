@@ -467,7 +467,7 @@ export function createReviewBridge(args: {
       starting = undefined;
       endConversation("Bridge shutting down");
       for (const provider of Object.values(providers)) provider?.dispose();
-      for (const ws of clients.values()) ws.close();
+      for (const ws of server.clients) ws.terminate();
       await new Promise<void>(resolve => server.close(() => resolve()));
     },
   };

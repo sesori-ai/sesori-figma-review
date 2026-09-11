@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { cleanupOwnedArtifacts, stopOwnedProcess, withTimeout } from "./smoke-lifecycle.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bridgePath = join(here, "dist", "bridge.mjs");
@@ -43,7 +44,9 @@ function launch() {
       if (match) { port = Number(match[1]); port === 3055 ? reject(new Error("OS assigned protected bridge port 3055")) : resolve(); }
     });
     child.once("error", reject);
-    child.once("exit", code => { if (!finished && phase !== "restarting") fail(`bridge exited ${code}: ${bridgeOutput.slice(-1000)}`); });
+    child.once("exit", code => {
+      if (!finished && phase !== "restarting") { const error = `bridge exited ${code}: ${bridgeOutput.slice(-1000)}`; fail(error); reject(new Error(error)); }
+    });
   });
 }
 const send = message => ws.send(JSON.stringify(message));
@@ -59,29 +62,28 @@ function rejectLegacyProtocol() {
 function connect() {
   return new Promise((resolve, reject) => {
     ws = new WebSocket(`ws://127.0.0.1:${port}`);
-    ws.addEventListener("open", () => { send({ kind: "hello", protocolVersion: 3, fileId: "smoke", fileName: "Smoke" }); resolve(); }, { once: true });
+    ws.addEventListener("open", () => send({ kind: "hello", protocolVersion: 3, fileId: "smoke", fileName: "Smoke" }), { once: true });
     ws.addEventListener("error", () => reject(new Error(`WebSocket connect failed on ${port}: ${bridgeOutput.slice(-1000)}`)), { once: true });
+    ws.addEventListener("message", event => { if (JSON.parse(event.data).kind === "connection") resolve(); });
     ws.addEventListener("message", onMessage);
   });
 }
 async function cleanup(code) {
   clearTimeout(timeout);
   try { ws?.close(); } catch {}
-  if (child?.exitCode === null && child.signalCode === null) {
-    child.kill("SIGTERM");
-    await new Promise(resolve => child.once("exit", resolve));
-    console.log("owned bridge process cleanup ok");
+  const wasRunning = child?.exitCode === null && child.signalCode === null;
+  const terminated = !child || await stopOwnedProcess({ child, timeoutMs: 10_000 });
+  if (!terminated) {
+    console.log("owned bridge termination unproven; all artifacts retained");
+    child?.stdout?.destroy(); child?.stderr?.destroy(); child?.unref();
+    process.exitCode = 1; return;
   }
-  let cleanupFailed = false;
-  const transcript = ref?.sessionId ? join(nativeProject, `${ref.sessionId}.jsonl`) : undefined;
-  if (transcript && existsSync(transcript)) {
-    rmSync(nativeProject, { recursive: true, force: true });
-    console.log("owned native artifact cleanup ok");
-  }
-  else if (existsSync(nativeProject)) { cleanupFailed = true; console.log("owned native cleanup unproven; project retained"); }
-  rmSync(fixture, { recursive: true, force: true });
-  if (existsSync(nativeProject) && !nativeProjectExisted) cleanupFailed = true;
-  process.exitCode = code || cleanupFailed ? 1 : 0;
+  if (wasRunning) console.log("owned bridge process cleanup ok");
+  const result = cleanupOwnedArtifacts({ terminated, fixture, nativeProject, nativeProjectExisted,
+    transcript: ref?.sessionId ? join(nativeProject, `${ref.sessionId}.jsonl`) : undefined });
+  if (result.nativeRemoved) console.log("owned native artifact cleanup ok");
+  else if (result.cleanupFailed) console.log("owned native cleanup unproven; project retained");
+  process.exitCode = code || result.cleanupFailed ? 1 : 0;
 }
 function fail(reason) {
   if (finished) return; finished = true;
@@ -103,9 +105,10 @@ function pass() {
 
 async function restartAndResume() {
   phase = "restarting"; restartCount++;
-  ws.close(); child.kill("SIGTERM");
-  await new Promise(resolve => child.once("exit", resolve));
-  await launch(); await connect();
+  ws.close();
+  if (!await stopOwnedProcess({ child, timeoutMs: 10_000 })) throw new Error("owned bridge restart termination timed out");
+  await withTimeout({ promise: launch(), timeoutMs: 15_000, label: "bridge restart" });
+  await withTimeout({ promise: connect(), timeoutMs: 5_000, label: "restart handshake" });
 }
 function startFirst() {
   send({ kind: "start", intentId: "first", fileId: "smoke", fileName: "Smoke", pageId: "0:1", pageName: "Page",
@@ -182,7 +185,9 @@ function onMessage(event) {
   if (message.kind === "error") seen.push(`error ${message.message}`);
 }
 
+timeout = setTimeout(() => fail(`timeout phase=${phase}`), 180_000);
 try {
-  await launch(); await rejectLegacyProtocol(); await connect();
-  timeout = setTimeout(() => fail(`timeout phase=${phase}`), 180_000);
+  await withTimeout({ promise: launch(), timeoutMs: 15_000, label: "bridge startup" });
+  await withTimeout({ promise: rejectLegacyProtocol(), timeoutMs: 5_000, label: "legacy handshake" });
+  await withTimeout({ promise: connect(), timeoutMs: 5_000, label: "plugin handshake" });
 } catch (error) { fail(String(error)); }

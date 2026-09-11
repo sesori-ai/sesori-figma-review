@@ -2,7 +2,7 @@ import { PROTOCOL_VERSION, type DownMsg } from "../../shared/protocol.ts";
 
 const object = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-const optional = (value: unknown, valid: (value: unknown) => boolean) => value === undefined || valid(value);
+const optional = (args: { value: unknown; valid: (value: unknown) => boolean }) => args.value === undefined || args.valid(args.value);
 const string = (value: unknown) => typeof value === "string";
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value);
 const strings = (value: unknown) => Array.isArray(value) && value.every(string);
@@ -31,8 +31,8 @@ const model = (value: unknown) => {
 const providerHealth = (value: unknown) => {
   const item = object(value); return !!item && providerId(item.provider)
     && (item.status === "starting" || item.status === "ready" || item.status === "unavailable")
-    && optional(item.version, string) && optional(item.model, string) && Array.isArray(item.models) && item.models.every(model)
-    && optional(item.error, string);
+    && optional({ value: item.version, valid: string }) && optional({ value: item.model, valid: string }) && Array.isArray(item.models) && item.models.every(model)
+    && optional({ value: item.error, valid: string });
 };
 const settings = (value: unknown) => {
   const item = object(value), providers = object(item?.providers);
@@ -43,8 +43,8 @@ const historyItem = (value: unknown) => {
   const item = object(value);
   if (!item) return false;
   if (item.role === "user" || item.role === "answer") return string(item.text);
-  if (item.role === "assistant") return string(item.text) && optional(item.itemId, string);
-  return item.role === "tool" && string(item.name) && !!object(item.input) && optional(item.itemId, string);
+  if (item.role === "assistant") return string(item.text) && optional({ value: item.itemId, valid: string });
+  return item.role === "tool" && string(item.name) && !!object(item.input) && optional({ value: item.itemId, valid: string });
 };
 const reviewEvent = (value: unknown) => {
   const event = object(value);
@@ -54,19 +54,19 @@ const reviewEvent = (value: unknown) => {
   if (event.type === "tool") return string(event.name) && !!object(event.input);
   if (event.type === "error") return string(event.message);
   return event.type === "turn_end" && (event.outcome === "completed" || event.outcome === "interrupted" || event.outcome === "failed")
-    && optional(event.message, string);
+    && optional({ value: event.message, valid: string });
 };
 const health = (value: unknown) => {
   const item = object(value), result = object(item?.settingsResult);
   return !!item && item.protocolVersion === PROTOCOL_VERSION && string(item.bridge)
     && (item.figmaMcp === "up" || item.figmaMcp === "down") && providerId(item.selectedProvider)
-    && optional(item.liveProvider, providerId) && settings(item.settings)
+    && optional({ value: item.liveProvider, valid: providerId }) && settings(item.settings)
     && Array.isArray(item.providers) && item.providers.every(providerHealth)
-    && optional(item.servers, value => Array.isArray(value) && value.every(raw => {
-      const server = object(raw); return !!server && string(server.name) && string(server.status) && optional(server.error, string);
-    }))
+    && optional({ value: item.servers, valid: value => Array.isArray(value) && value.every(raw => {
+      const server = object(raw); return !!server && string(server.name) && string(server.status) && optional({ value: server.error, valid: string });
+    }) })
     && (item.settingsResult === undefined || (!!result && string(result.requestId) && typeof result.accepted === "boolean"
-      && optional(result.error, string))) && optional(item.error, string);
+      && optional({ value: result.error, valid: string }))) && optional({ value: item.error, valid: string });
 };
 
 /** Reject legacy/malformed envelopes before UI state or provider dereferences. */
@@ -76,10 +76,10 @@ export function decodeBridgeMessage(raw: unknown): DownMsg | undefined {
   let valid = false;
   switch (message.kind) {
     case "connection": valid = message.protocolVersion === PROTOCOL_VERSION && typeof message.busy === "boolean"
-      && optional(message.intentId, string) && optional(message.session, sessionRecord)
-      && optional(message.activeText, value => Array.isArray(value) && value.every(raw => {
+      && optional({ value: message.intentId, valid: string }) && optional({ value: message.session, valid: sessionRecord })
+      && optional({ value: message.activeText, valid: value => Array.isArray(value) && value.every(raw => {
         const item = object(raw); return !!item && sessionRef(item.session) && string(item.itemId) && string(item.text);
-      })); break;
+      }) }); break;
     case "health": valid = health(message.health); break;
     case "sessions": valid = Array.isArray(message.sessions) && message.sessions.every(sessionRecord); break;
     case "history": valid = string(message.intentId) && sessionRecord(message.session)
@@ -91,7 +91,7 @@ export function decodeBridgeMessage(raw: unknown): DownMsg | undefined {
     case "cancel_request": valid = string(message.id) && string(message.reason); break;
     case "event": valid = reviewEvent(message.event); break;
     case "busy": valid = typeof message.busy === "boolean"; break;
-    case "error": valid = string(message.message) && optional(message.intentId, string); break;
+    case "error": valid = string(message.message) && optional({ value: message.intentId, valid: string }); break;
   }
   return valid ? message as DownMsg : undefined;
 }
