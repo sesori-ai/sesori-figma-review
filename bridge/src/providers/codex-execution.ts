@@ -79,6 +79,7 @@ export function createCodexExecutionPolicy(args: {
     ...config("approvals_reviewer", tomlString("user")),
     ...config("web_search", tomlString("disabled")),
     ...config("features.apps", "false"),
+    ...config("features.plugins", "false"),
     ...config("apps._default.enabled", "false"),
     ...config("features.multi_agent", "false"),
     ...config("agents.enabled", "false"),
@@ -146,7 +147,7 @@ export function assertCodexConfigIsolated(args: { result: CodexConfigReadResult;
   if (effective.web_search !== "disabled") throw new Error("Codex web search is not disabled");
   const features = object(effective.features) ?? {};
   const forbiddenFeatures = [
-    "apps", "multi_agent", "remote_plugin", "hooks", "goals", "memories", "web_search",
+    "apps", "plugins", "multi_agent", "remote_plugin", "hooks", "goals", "memories", "web_search",
     "web_search_cached", "web_search_request", "skill_mcp_dependency_install",
   ] as const;
   for (const feature of forbiddenFeatures) assertFlag(features, feature, false);
@@ -157,7 +158,10 @@ export function assertCodexConfigIsolated(args: { result: CodexConfigReadResult;
     throw new Error(`Codex effective config exposes unrelated MCP servers: ${activeMcp.join(", ") || "none"}`);
   }
   const mcp = object(object(effective.mcp_servers)?.["figma-desktop"]);
-  if (mcp?.url !== FIGMA_MCP_URL) throw new Error("Codex Figma desktop MCP URL is not isolated to loopback");
+  const mcpKeys = Object.keys(mcp ?? {}).sort();
+  if (mcp?.url !== FIGMA_MCP_URL || mcp.enabled !== true || mcpKeys.join(",") !== "enabled,url") {
+    throw new Error("Codex Figma desktop MCP transport is not isolated to the bridge-owned loopback config");
+  }
   if (enabledEntries(effective.plugins).length) throw new Error("Codex effective config exposes inherited plugins");
   const apps = object(effective.apps) ?? {};
   const configuredApps = Object.fromEntries(Object.entries(apps).filter(([key]) => key !== "_default"));

@@ -64,6 +64,7 @@ assert.equal(
   false,
   "filesystem paths must stay TOML keys instead of becoming CLI dotted-path segments",
 );
+assert.ok(policy.args.includes("features.plugins=false"));
 assert.ok(policy.args.includes("features.multi_agent=false"));
 assert.ok(policy.args.includes("apps._default.enabled=false"));
 mkdirSync(join(dir, "source"));
@@ -230,7 +231,7 @@ const configFor = (selected: CodexExecutionPolicy): Record<string, unknown> => (
   approvals_reviewer: "user",
   web_search: "disabled",
   features: {
-    apps: false, multi_agent: false, remote_plugin: false, hooks: false, goals: false, memories: false,
+    apps: false, plugins: false, multi_agent: false, remote_plugin: false, hooks: false, goals: false, memories: false,
     web_search: false, web_search_cached: false, web_search_request: false, skill_mcp_dependency_install: false,
   },
   agents: { enabled: false }, feedback: { enabled: false }, apps: { _default: { enabled: false } }, plugins: {},
@@ -251,6 +252,13 @@ unsafeProfile.filesystem[policy.appRepo!] = "write";
 assert.throws(
   () => assertCodexConfigIsolated({ result: { config: unsafeConfig, origins: {} }, policy }),
   /differs from bridge-owned/,
+);
+const collidingConfig = configFor(policy);
+const collidingMcp = (collidingConfig.mcp_servers as Record<string, Record<string, unknown>>)["figma-desktop"];
+collidingMcp.command = "inherited-command";
+assert.throws(
+  () => assertCodexConfigIsolated({ result: { config: collidingConfig, origins: {} }, policy }),
+  /transport is not isolated/,
 );
 const qualificationChild = new FakeChild((message, server) => {
   const id = message.id, method = message.method;

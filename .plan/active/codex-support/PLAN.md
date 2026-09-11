@@ -8,8 +8,10 @@ native qualification stopped at its first fail-closed boundary. A bounded diagno
 filesystem permission overrides as semantically invalid: Codex splits CLI override keys on every `.`, so dynamic
 paths cannot safely occupy dotted-key segments. Step 4 now emits the complete profile as one inline TOML table;
 a correction-confirmation startup passed initialize, exact version, account, model, and profile gates. Effective
-config validation then rejected non-isolated MCP state, which per-process deep-merge semantics cannot clear without
-knowing inherited server names. Enforcement was therefore not run. Step 4 remains blocked on environment isolation.
+config validation then rejected non-isolated MCP state. Source follow-up confirmed discovered direct entries can be
+atomically disabled by name, but also found two pre-thread safety gaps: production App Server can start plugin tasks
+before `initialize`/`config/read`, and `thread/start` reloads config without an expected-version guard before eagerly
+starting MCP. Enforcement was therefore not run. Step 4 remains blocked on safe discovery and atomic validation.
 
 ## Goal and locked user direction
 

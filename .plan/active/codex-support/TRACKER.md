@@ -13,7 +13,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
 | 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4); reviewed head `80707c2`, merge tree identical |
-| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Local correction/deterministic proof complete; native startup passes version/account/model/profile gates, but effective config rejects non-isolated inherited MCP state, so qualification remains blocked and enforcement was not run |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Local correction/deterministic proof complete; native startup passes version/account/model/profile gates, but source shows discovery may run plugin startup tasks and thread creation can race config reload before eager MCP startup, so qualification remains blocked and enforcement was not run |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
 | 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
@@ -94,6 +94,21 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - Start 2 ended by observed App Server `SIGTERM`; its diagnostic counted six previously observed descendants and
   conservatively marked cleanup uncertain even though the post-run fixture-path scan found no match. Per approval,
   fixture `.tmp/codex-step4-config-4859cc40-c2c5-4389-9a9d-11a30f4977eb` remains in its original location.
+- Focused 0.154.0 source follow-up found `features.plugins` stable and default-enabled. Production App Server creates
+  `MessageProcessor` before processing `initialize`, then immediately starts plugin marketplace/cache tasks whenever
+  the effective feature is enabled. The release binary exposes no skip-startup switch; its switch is debug-only.
+  `config/read` is therefore not universally side-effect-free discovery because managed requirements can pin the
+  feature true despite a CLI false override. `mcpServerStatus/list` is not a safe substitute: it constructs an eager
+  connection set for every effective server.
+- Direct MCP entries expose `enabled`; connection startup filters disabled entries. Whole plugins and plugin MCP
+  entries also expose `enabled`, so transient discovered names, including dotted/quoted names, could be encoded as
+  quoted keys inside one inline TOML value. The policy now explicitly sets stable `features.plugins=false`, validates
+  it, and requires the Figma MCP entry to contain exactly `enabled=true` plus the owned loopback `url`, rejecting
+  inherited same-name command/header/auth transport fields.
+- A remaining API race prevents final proof: `config/read` reloads effective layers, while `thread/start` independently
+  reloads them without an expected config version and immediately installs an eager MCP runtime before returning.
+  Thread `config` overrides deep-merge as well. A new direct/project/managed entry between validation and thread load
+  can therefore start before the client detects it. No native invocation followed this static analysis.
 - Separate process note: accidental unapproved `codex sandbox macos --help` was parsed as a sandbox invocation, not
   static inspection. It failed before requested executable `macos` launched with exact error
   `sandbox-exec: execvp() of 'macos' failed: No such file or directory` and exit `71`. No side effects were observed;
