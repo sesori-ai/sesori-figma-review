@@ -40,6 +40,7 @@
     "build": "npm run build -w plugin && npm run build -w bridge",
     "bridge": "npm run start -w bridge",
     "check": "npm run check --workspaces",
+    "bump": "node scripts/bump.mjs",
     "prepack": "npm run build"
   },
   "dependencies": {

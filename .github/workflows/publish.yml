@@ -1,0 +1,47 @@
+name: publish
+
+# Releasing is `npm run bump X.Y.Z`, a "Release vX.Y.Z" commit, then an annotated vX.Y.Z tag.
+# Pushing that tag runs this. The Figma plugin is published by hand; Figma has no API for it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub Release
+  id-token: write # npm trusted publishing over OIDC, so no npm token lives in this repo
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest # setup-node ships npm 10; trusted publishing needs 11.5.1+
+      - run: npm ci
+
+      - name: Tag agrees with every manifest
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != package.json $version"; exit 1; }
+          for ws in plugin bridge; do
+            test "$(node -p "require('./$ws/package.json').version")" = "$version" || { echo "$ws/package.json is not $version"; exit 1; }
+          done
+
+      # Before publishing: npm versions are immutable, a missing changelog section is not.
+      - name: Release notes from the CHANGELOG section
+        run: |
+          awk -v heading="## [${GITHUB_REF_NAME#v}]" '$0 == heading { found = 1; next } found && /^## \[/ { exit } found' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for $GITHUB_REF_NAME"; exit 1; }
+
+      - run: npm run check
+      - run: npm publish --access public
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
