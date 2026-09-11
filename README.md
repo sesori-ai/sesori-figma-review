@@ -28,7 +28,7 @@ sesori-figma-review                   # every time you review
 
 (No install? `npx -y @sesori/figma-review` does both in one go.)
 
-**2. Add the plugin to Figma** (once): install [**Sesori Review** from the Figma Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review). Running from source instead? The bridge prints a manifest path (`~/.sesori-review/plugin/manifest.json`) for **Plugins → Development → Import plugin from manifest…**.
+**2. Add the plugin to Figma** (once): install [**Sesori Review** from the Figma Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review). Running from source instead? The bridge prints a manifest path (`~/.local/share/sesori-figma-review/plugin/manifest.json`) for **Plugins → Development → Import plugin from manifest…**.
 
 **3. Review**: open a file, run **Plugins → Sesori Review**, click **Review flow**. The header dot turns green when the bridge and Claude are ready.
 
@@ -55,19 +55,19 @@ Annotations are written without asking and appended to what is there. Anything n
 Figma desktop ── plugin UI ──► ws://localhost:3055 ──► bridge (sesori-figma-review) ──► Claude Code ──► Anthropic API
 ```
 
-The plugin is a thin client. The bridge is a small local process that runs the Claude Agent SDK, exposes Figma tools to Claude (`get_flow`, `get_screen`, `focus`, `annotate`, `ask_user`) and keeps a workspace per Figma file under `~/.sesori-review/files/<fileId>/`. See [ARCHITECTURE.md](ARCHITECTURE.md).
+The plugin is a thin client. The bridge is a small local process that runs the Claude Agent SDK, exposes Figma tools to Claude (`get_flow`, `get_screen`, `focus`, `annotate`, `ask_user`) and keeps a workspace per Figma file under `~/.local/share/sesori-figma-review/files/<fileId>/`. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 <details>
 <summary><b>Configuration</b></summary>
 
-Model and effort live in `~/.sesori-review/settings.json` (set from the plugin). Environment variables for the bridge:
+Model and effort live in `~/.local/share/sesori-figma-review/settings.json` (set from the plugin). Environment variables for the bridge:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `APP_REPO` | unset | Path to your app's source, mounted read-only so annotations use real component names. |
-| `SESORI_REVIEW_HOME` | `~/.sesori-review` | Where the plugin copy, settings and workspaces live. |
+| `SESORI_REVIEW_HOME` | `$XDG_DATA_HOME/sesori-figma-review`, else `~/.local/share/sesori-figma-review` | Where the plugin copy, settings and workspaces live. |
 
-Per-file workspace (`~/.sesori-review/files/<fileId>/`), the agent's working directory:
+Per-file workspace (`~/.local/share/sesori-figma-review/files/<fileId>/`), the agent's working directory:
 
 | File | Purpose |
 | --- | --- |

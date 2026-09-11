@@ -5,8 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "figma-review-"));
-const { installPlugin, readAllow, readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
+const { installPlugin, readAllow, readSessions, readSettings, resolveHome, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
 const { FIGMA_TOOLS } = await import("./figma-tools.ts");
+
+// join() everywhere, so the expectations hold on Windows separators too.
+const home = join("/home", "dev"), data = join("/data"), override = join("/override");
+const underHome = join(home, ".local", "share", "sesori-figma-review");
+assert.equal(resolveHome({}, home), underHome);
+assert.equal(resolveHome({ XDG_DATA_HOME: data }, home), join(data, "sesori-figma-review"));
+assert.equal(resolveHome({ XDG_DATA_HOME: join("relative", "data") }, home), underHome, "a relative XDG_DATA_HOME is invalid and ignored");
+assert.equal(resolveHome({ XDG_DATA_HOME: data, SESORI_REVIEW_HOME: override }, home), override);
 
 assert.deepEqual(FIGMA_TOOLS.map(tool => tool.name), ["get_flow", "get_screen", "focus", "annotate", "ask_user"]);
 assert.ok(FIGMA_TOOLS.every(tool => tool.description && tool.schema), "both adapters use one validated Figma catalog");
