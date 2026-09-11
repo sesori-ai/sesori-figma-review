@@ -4,8 +4,9 @@ Status: Steps 1–3 squash-merged as `232048a`, `ece1379d6768ecc032d6f0309330340
 `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4; reviewed head `80707c2`, merge tree verified identical).
 Older cutover checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not
 merged. Step 4 is implemented locally from the verified Step 3 receipt with deterministic boundary proof. Approved
-native qualification stopped at its first fail-closed boundary: the 0.154.0 candidate closed stdout before returning
-`initialize`; enforcement was therefore not run. Step 4 remains blocked on concrete native startup diagnosis.
+native qualification stopped at its first fail-closed boundary. One approved diagnostic startup then established
+that the 0.154.0 candidate exits `1` before `initialize` with a semantic invalid-config-value error, but exposed no
+safe config-key/flag identifier. Enforcement was therefore not run. Step 4 remains blocked on identifying that field.
 
 ## Goal and locked user direction
 

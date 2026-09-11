@@ -13,7 +13,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
 | 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4); reviewed head `80707c2`, merge tree identical |
-| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Local implementation complete and deterministic proof passed; native 0.154.0 candidate closed stdout before `initialize`, so qualification is blocked and enforcement was not run |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Local implementation/deterministic proof complete; native diagnosis found exit 1 from an unidentified invalid config value before `initialize`, so qualification remains blocked and enforcement was not run |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
 | 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
@@ -77,7 +77,17 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   worker did not retry or run Part 2 enforcement. The driver also reported `kill EPERM` while checking the detached
   process group after stdout closure; an exact fixture-path process scan found no remaining match, but the owned
   fixture was retained in the run artifact output because exit ownership was not observed strongly enough to authorize
-  deletion. `0.154.0` remains a schema/protocol candidate, not native support.
+  deletion.
+- One separately approved diagnosis used unchanged production policy and only attempted `initialize`. It observed
+  zero stdout bytes, 98 bounded stderr bytes, natural exit `1` with no signal, no response/`initialized`, and no child
+  descendants. Sanitization classified a semantic invalid config value but found no safe matching policy key or CLI
+  flag. The unique diagnostic fixture was deleted only after observing child exit; no retry or enforcement ran.
+- Static follow-up proved every generated `-c` assignment is syntactically valid TOML. It did not prove Codex schema
+  acceptance or identify whether the rejected semantic value comes from session overrides or inherited owner config.
+- Separate process note: accidental unapproved `codex sandbox macos --help` was parsed as a sandbox invocation, not
+  static inspection. It failed before requested executable `macos` launched with exact error
+  `sandbox-exec: execvp() of 'macos' failed: No such file or directory` and exit `71`. No side effects were observed;
+  it provides no enforcement qualification. `0.154.0` remains a schema/protocol candidate, not native support.
 
 ## Qualification gates before user-facing Codex exposure
 
