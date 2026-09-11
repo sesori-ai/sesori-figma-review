@@ -1,7 +1,7 @@
 // Owned fake-plugin + real Claude activation smoke. Isolated home/free port; Haiku/low, <=4 turns/process, <=$0.10/process.
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,16 +14,15 @@ mkdirSync(fixture, { recursive: true });
 writeFileSync(join(fixture, "settings.json"), `${JSON.stringify({
   provider: "claude", providers: { claude: { model: "haiku", effort: "low" }, codex: { model: "", effort: "" } },
 })}\n`);
-
-async function freePort() {
-  const server = createServer();
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("Could not reserve smoke port");
-  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  return address.port === 3055 ? freePort() : address.port;
+const workspace = join(fixture, "files", "smoke");
+const claudeRoot = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+const nativeProject = join(claudeRoot, "projects", workspace.replace(/[^a-zA-Z0-9]/g, "-"));
+const nativeProjectExisted = existsSync(nativeProject);
+if (nativeProjectExisted) {
+  rmSync(fixture, { recursive: true, force: true });
+  throw new Error("Unique smoke native project path already exists; ownership is not provable");
 }
-const port = await freePort();
+let port = 0;
 let child, ws, timeout, finished = false, bridgeOutput = "";
 const seen = [], text = new Map();
 let phase = "steer", ref, steerCard, stoppedCard, sawSteeredFocus = false, sawCancelledCard = false;
@@ -32,13 +31,17 @@ let firstProcessUsage = 0, firstProcessCost = 0, restartCount = 0, reconnectChec
 function launch() {
   bridgeOutput = "";
   child = spawn(process.execPath, [bridgePath], {
-    env: { ...process.env, APP_REPO: "", SESORI_REVIEW_PORT: String(port), SESORI_REVIEW_HOME: fixture,
+    env: { ...process.env, APP_REPO: "", SESORI_REVIEW_PORT: "0", SESORI_REVIEW_HOME: fixture,
       SESORI_REVIEW_MAX_TURNS: "4", SESORI_REVIEW_MAX_BUDGET_USD: "0.10" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stderr.on("data", chunk => { bridgeOutput += String(chunk); });
   return new Promise((resolve, reject) => {
-    child.stdout.on("data", chunk => { bridgeOutput += String(chunk); if (bridgeOutput.includes(`listening on ws://127.0.0.1:${port}`)) resolve(); });
+    child.stdout.on("data", chunk => {
+      bridgeOutput += String(chunk);
+      const match = bridgeOutput.match(/listening on ws:\/\/127\.0\.0\.1:(\d+)/);
+      if (match) { port = Number(match[1]); port === 3055 ? reject(new Error("OS assigned protected bridge port 3055")) : resolve(); }
+    });
     child.once("error", reject);
     child.once("exit", code => { if (!finished && phase !== "restarting") fail(`bridge exited ${code}: ${bridgeOutput.slice(-1000)}`); });
   });
@@ -61,17 +64,29 @@ function connect() {
     ws.addEventListener("message", onMessage);
   });
 }
-function cleanup(code) {
+async function cleanup(code) {
   clearTimeout(timeout);
   try { ws?.close(); } catch {}
-  child?.kill("SIGTERM");
+  if (child?.exitCode === null && child.signalCode === null) {
+    child.kill("SIGTERM");
+    await new Promise(resolve => child.once("exit", resolve));
+    console.log("owned bridge process cleanup ok");
+  }
+  let cleanupFailed = false;
+  const transcript = ref?.sessionId ? join(nativeProject, `${ref.sessionId}.jsonl`) : undefined;
+  if (transcript && existsSync(transcript)) {
+    rmSync(nativeProject, { recursive: true, force: true });
+    console.log("owned native artifact cleanup ok");
+  }
+  else if (existsSync(nativeProject)) { cleanupFailed = true; console.log("owned native cleanup unproven; project retained"); }
   rmSync(fixture, { recursive: true, force: true });
-  process.exitCode = code;
+  if (existsSync(nativeProject) && !nativeProjectExisted) cleanupFailed = true;
+  process.exitCode = code || cleanupFailed ? 1 : 0;
 }
 function fail(reason) {
   if (finished) return; finished = true;
   console.log(`\n${reason}`); for (const item of seen) console.log(" ", item);
-  cleanup(1);
+  void cleanup(1);
 }
 function pass() {
   if (finished) return; finished = true;
@@ -83,7 +98,7 @@ function pass() {
   console.log(`\n${ok ? "ok" : "failed persisted resume accounting"}`);
   seen.push(`resume turns=${record?.turns} cost=${record?.costUsd} usage=${usage}`);
   for (const item of seen) console.log(" ", item);
-  cleanup(ok ? 0 : 1);
+  void cleanup(ok ? 0 : 1);
 }
 
 async function restartAndResume() {
@@ -114,6 +129,7 @@ function onMessage(event) {
   if (message.kind === "history" && phase === "resume") {
     const hasPriorTool = message.messages.some(item => item.role === "tool" && item.name.endsWith("focus"));
     if (!hasPriorTool) return fail("native history missing pre-restart focus tool");
+    text.clear();
     send({ kind: "start", intentId: "resume", fileId: "smoke", fileName: "Smoke", pageId: "0:1", pageName: "Page",
       anchor: message.session.anchor, resume: ref, selection: [], text: "Reply with the single word RESUMED." });
   }

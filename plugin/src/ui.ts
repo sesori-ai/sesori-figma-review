@@ -50,9 +50,8 @@ const selText = () => ctx.selection.length ? ctx.selection.map(n => `${n.name} (
 const clearChat = (preserveCards = false) => {
   const cards = preserveCards ? Array.from(chat.querySelectorAll<HTMLElement>(".actionable")) : [];
   items.clear(); chat.innerHTML = "";
-  for (const card of cards) chat.append(card);
   if (!preserveCards) pendingAsk = undefined;
-  opened = undefined;
+  opened = undefined; return cards;
 };
 const notifyCancelled = (count: number) => {
   if (count) toMain({ kind: "notify", text: `${count} queued message${count === 1 ? " was" : "s were"} cancelled.` });
@@ -135,12 +134,15 @@ function onDown(m: DownMsg) {
       notifyCancelled(reconciled.cancelled.length);
       if (reconciled.cancelledStart) bubble("error", "The pending start was cancelled before the bridge accepted it. Send it again if needed.");
       if (m.session?.sessionId) renderCost(m.session);
-      for (const queued of reconciled.queued) send({ kind: "user", ...queued });
       renderBusy(m.busy); setStatus("connected to bridge", "warn");
       const attachedChanged = m.session?.sessionId && (!previous || previous.provider !== m.session.provider || previous.sessionId !== m.session.sessionId);
       if (reconciled.historyRetry) send({ kind: "open", intentId: reconciled.historyRetry.intentId, fileId: ctx.fileId, fileName: ctx.fileName, session: reconciled.historyRetry.session });
-      else if (attachedChanged) requestHistory(m.session!, true, m.activeText);
-      else if (!m.session && !m.intentId && previous?.sessionId) requestHistory(previous, true, m.activeText);
+      else if (reconciled.restoreHistory && m.session) requestHistory(m.session, true, m.activeText, reconciled.queued);
+      else {
+        for (const queued of reconciled.queued) send({ kind: "user", ...queued });
+        if (attachedChanged) requestHistory(m.session!, true, m.activeText);
+        else if (!m.session && !m.intentId && previous?.sessionId) requestHistory(previous, true, m.activeText);
+      }
       return;
     }
     case "health": return renderHealth(m.health);
@@ -160,7 +162,14 @@ function onDown(m: DownMsg) {
     case "cancel_request": view.cancelCard({ id: m.id, reason: m.reason }); return;
     case "event": return onEvent(m.event);
     case "busy": renderBusy(m.busy); return;
-    case "error": if (view.starting) notifyCancelled(view.leave({ reason: "Start failed" }).length); bubble("error", m.message); return;
+    case "error": {
+      if (m.intentId) {
+        const failed = view.failHistory(m.intentId);
+        if (!failed) return;
+        notifyCancelled(failed.inputs.length); opened = failed.resume ? failed.session : undefined; renderCost(failed.session);
+      } else if (view.starting) notifyCancelled(view.leave({ reason: "Start failed" }).length);
+      bubble("error", m.message); return;
+    }
   }
 }
 
@@ -256,9 +265,9 @@ function permissionCard(id: string, tool: string, input: Record<string, unknown>
   card.append(ctl);
 }
 
-function requestHistory(session: SessionRef, retainSession = false, activeText: Extract<DownMsg, { kind: "connection" }>["activeText"] = []) {
+function requestHistory(session: SessionRecord, retainSession = false, activeText: Extract<DownMsg, { kind: "connection" }>["activeText"] = [], inputs: { text: string; selection: NodeRef[] }[] = []) {
   const intentId = `history-${Date.now().toString(36)}-${++intentCounter}`;
-  view.beginHistory({ intentId, session, retainSession, activeText });
+  view.beginHistory({ intentId, session, retainSession, activeText, inputs });
   send({ kind: "open", intentId, fileId: ctx.fileId, fileName: ctx.fileName, session });
 }
 
@@ -305,7 +314,7 @@ function start(anchor: Anchor, text: string, resume?: SessionRef) {
 function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
   const confirmed = view.confirmHistory({ intentId: m.intentId, session: m.session });
   if (!confirmed) return;
-  clearChat(true);
+  const cards = clearChat(true);
   renderCost(confirmed.session);
   opened = m.attached ? undefined : confirmed.session;
   const historyIds = new Set<string>();
@@ -323,7 +332,9 @@ function showHistory(m: Extract<DownMsg, { kind: "history" }>) {
     items.set(snapshot.itemId, { element: assistant(md(snapshot.text)), markdown: snapshot.text });
   }
   for (const event of confirmed.events) if (!historyIds.has(event.itemId)) onEvent(event);
+  for (const card of cards) chat.append(card);
   if (busy) chat.append(working);
+  for (const queued of confirmed.inputs) send({ kind: "user", ...queued });
   chat.scrollTop = chat.scrollHeight;
 }
 function submit() {

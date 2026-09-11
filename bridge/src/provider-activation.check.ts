@@ -41,6 +41,7 @@ class FakeSession implements ReviewSession {
   readonly output = new OutputQueue();
   readonly sendCalls = new ObservedCalls();
   readonly interruptCalls = new ObservedCalls();
+  readonly interruptSuccesses = new ObservedCalls();
   readonly settingCalls = new ObservedCalls();
   readonly closeCalls = new ObservedCalls();
   sent: string[] = [];
@@ -48,10 +49,11 @@ class FakeSession implements ReviewSession {
   settings: ProviderSettings[] = [];
   closed = 0;
   throwOnSend = false;
+  interruptGate?: Promise<void>;
   settingGate?: { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void };
   constructor(readonly provider: "claude" | "codex") {}
   send(args: { text: string }) { if (this.throwOnSend) throw new Error("dispatch rejected"); this.sent.push(args.text); this.sendCalls.hit(); }
-  async interrupt() { this.interrupted++; this.interruptCalls.hit(); }
+  async interrupt() { this.interrupted++; this.interruptCalls.hit(); await this.interruptGate; this.interruptSuccesses.hit(); }
   async applySettings(args: { settings: ProviderSettings }) {
     this.settings.push(args.settings); this.settingCalls.hit();
     await this.settingGate?.promise;
@@ -67,17 +69,19 @@ class FakeProvider implements ReviewProvider {
   prepareCount = 0;
   readonly startCalls = new ObservedCalls();
   disposeCount = 0;
+  throwOnPrepare = false;
+  throwOnHistory = false;
   starts: { deferred: ReturnType<typeof deferred<ReviewSession>>; boundary: ProviderRequestBoundary }[] = [];
   history: HistoryItem[] = [{ role: "assistant", text: "native history" }];
   constructor(readonly id: "claude" | "codex") {}
   health(args: { settings: ProviderSettings }): ProviderHealth {
     return { provider: this.id, status: "ready", model: args.settings.model, models: [] };
   }
-  prepare() { this.prepareCount++; }
+  prepare() { this.prepareCount++; if (this.throwOnPrepare) throw new Error("prepare rejected"); }
   start(args: { boundary: ProviderRequestBoundary }) {
     const pending = deferred<ReviewSession>(); this.starts.push({ deferred: pending, boundary: args.boundary }); this.startCalls.hit(); return pending.promise;
   }
-  readHistory() { return this.history; }
+  readHistory() { if (this.throwOnHistory) throw new Error("history rejected"); return this.history; }
   dispose() { this.disposeCount++; }
 }
 type Message<K extends DownMsg["kind"]> = Extract<DownMsg, { kind: K }>;
@@ -127,18 +131,22 @@ const usage = (input: number, cost: number, status: "reported" | "estimated", tu
 });
 
 const claude = new FakeProvider("claude"), codex = new FakeProvider("codex");
-const logs: string[] = [], staleErrorLogged = deferred<void>();
+const logs: string[] = [], staleSessionLogs = new ObservedCalls(), staleInterruptLogs = new ObservedCalls();
+let mcpStatus = 503;
 const app = createReviewBridge({
   version: "test", port: 0, log: (...values) => {
     const line = values.map(String).join(" "); logs.push(line);
-    if (line.includes("stale session error")) staleErrorLogged.resolve();
+    if (line.includes("stale session error")) staleSessionLogs.hit();
+    if (line.includes("stale interrupt failed")) staleInterruptLogs.hit();
   },
-  createProviders: () => ({ claude, codex }), probeFigmaMcp: async () => "down",
+  createProviders: () => ({ claude, codex }), fetchMcp: async () => new Response(null, { status: mcpStatus }),
 });
 const port = await app.listening;
 const valid = await new Client(port).opened();
 valid.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 await valid.next(message => message.kind === "connection");
+assert.equal((await valid.next(message => message.kind === "health")).health.figmaMcp, "down");
+mcpStatus = 204;
 
 for (const protocolVersion of [undefined, 1, 2, 4]) {
   const invalid = await new Client(port).opened();
@@ -146,7 +154,7 @@ for (const protocolVersion of [undefined, 1, 2, 4]) {
   assert.match((await invalid.next(message => message.kind === "error")).message, /protocol mismatch/);
 }
 valid.send({ kind: "health" });
-await valid.next(message => message.kind === "health");
+assert.equal((await valid.next(message => message.kind === "health")).health.figmaMcp, "up");
 assert.equal(claude.prepareCount, 1, "invalid handshakes do not evict or reprepare valid client");
 
 const prepareBeforeNoop = claude.prepareCount, disposeBeforeNoop = claude.disposeCount;
@@ -174,23 +182,36 @@ assert.deepEqual([stalePending.closed, stalePending.sent.length], [1, 0]);
 fresh.send(startMessage("old")); fresh.send(startMessage("current"));
 await claude.startCalls.waitFor({ count: 3 });
 const oldSession = new FakeSession("claude"), currentSession = new FakeSession("claude");
+claude.throwOnPrepare = true;
 claude.starts[1].deferred.resolve(oldSession); claude.starts[2].deferred.resolve(currentSession);
 await Promise.all([oldSession.closeCalls.waitFor({ count: 1 }), currentSession.sendCalls.waitFor({ count: 1 })]);
 assert.deepEqual([oldSession.closed, oldSession.sent.length, currentSession.sent.length], [1, 0, 1], "only current reservation sends initial prompt");
 currentSession.output.push(initialized("native-current"));
 await fresh.next(down({ kind: "started", where: message => message.intentId === "current" }));
+assert.ok(logs.some(line => line.includes("advisory preparation failed"))); claude.throwOnPrepare = false;
 const liveRef = { provider: "claude" as const, sessionId: "native-current" };
 currentSession.output.push({ kind: "event", event: { type: "text_start", session: liveRef, itemId: "live" } });
 currentSession.output.push({ kind: "event", event: { type: "text_delta", session: liveRef, itemId: "live", text: "prefix" } });
 await fresh.next(down({ kind: "event", where: message => message.event.type === "text_delta" }));
-fresh.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
+claude.throwOnPrepare = true; mcpStatus = 503; fresh.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 assert.deepEqual((await fresh.next(message => message.kind === "connection")).activeText, [{ session: liveRef, itemId: "live", text: "prefix" }]);
+await fresh.next(down({ kind: "health", where: message => message.health.figmaMcp === "down" }));
+claude.throwOnPrepare = false; mcpStatus = 204;
 fresh.send({ kind: "user", text: "steer", selection: [] });
 await fresh.next(down({ kind: "busy", where: message => message.busy }));
 fresh.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 assert.deepEqual((await fresh.next(message => message.kind === "connection")).activeText, [{ session: liveRef, itemId: "live", text: "prefix" }]);
-fresh.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 1 });
-assert.deepEqual([currentSession.sent, currentSession.interrupted], [["prompt-current", "steer"], 1]);
+assert.deepEqual(currentSession.sent, ["prompt-current", "steer"]);
+const heldTool = claude.starts[2].boundary.tool({ tool: "focus", args: { nodeId: "1:2" } });
+const heldCard = await fresh.next(message => message.kind === "tool");
+const rejectedStop = deferred<void>(); currentSession.interruptGate = rejectedStop.promise;
+fresh.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 1 }); rejectedStop.reject(new Error("interrupt rejected"));
+assert.match((await fresh.next(message => message.kind === "error")).message, /Stop failed: interrupt rejected/);
+assert.deepEqual(fresh.matching(message => message.kind === "cancel_request"), []);
+currentSession.interruptGate = undefined; fresh.send({ kind: "interrupt" });
+await currentSession.interruptSuccesses.waitFor({ count: 1 });
+assert.equal((await fresh.next(message => message.kind === "cancel_request")).id, heldCard.id);
+assert.equal((await heldTool).isError, true);
 
 currentSession.output.push(usage(10, 5, "estimated"));
 assert.deepEqual((await fresh.next(down({ kind: "session", where: message => message.session.usage.input === 10 && message.session.turns === 0 }))).session,
@@ -223,18 +244,30 @@ assert.deepEqual(readSettings().providers, {
 }, "awaited active update preserves unrelated provider commit");
 assert.deepEqual(currentSession.settings, [{ model: "sonnet", effort: "high" }]);
 assert.equal(claude.disposeCount, disposeBeforeNoop + 1);
+const reversionGate = deferred<void>(); currentSession.settingGate = reversionGate;
+fresh.send({ kind: "settings", requestId: "away", provider: "claude", settings: { model: "haiku", effort: "low" } });
+await currentSession.settingCalls.waitFor({ count: 2 });
+fresh.send({ kind: "settings", requestId: "back", provider: "claude", settings: { model: "sonnet", effort: "high" } });
+fresh.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 3 });
+assert.equal(currentSession.settingCalls.count, 2, "same-provider reversion waits behind the complete first transaction");
+reversionGate.resolve();
+await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "away" }));
+await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "back" }));
+assert.deepEqual(currentSession.settings.slice(-2), [{ model: "haiku", effort: "low" }, { model: "sonnet", effort: "high" }]);
+assert.deepEqual(readSettings().providers.claude, { model: "sonnet", effort: "high" });
 const rejectedGate = deferred<void>(); currentSession.settingGate = rejectedGate;
 fresh.send({ kind: "settings", requestId: "rejected", provider: "claude", settings: { model: "bad", effort: "high" } });
-await currentSession.settingCalls.waitFor({ count: 2 }); rejectedGate.reject(new Error("native rejected"));
+await currentSession.settingCalls.waitFor({ count: 4 }); rejectedGate.reject(new Error("native rejected"));
 const rejectedHealth = await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "rejected" }));
 assert.equal(rejectedHealth.health.settingsResult?.accepted, false);
-const rejectedPlain = await fresh.next(down({ kind: "health", where: message => !message.health.settingsResult }));
+const rejectedPlain = await fresh.next(down({ kind: "health", where: message => !message.health.settingsResult
+  && message.health.settings.providers.claude.model === "sonnet" }));
 assert.equal(rejectedPlain.health.settings.providers.claude.model, "sonnet");
 assert.deepEqual(readSettings().providers.claude, { model: "sonnet", effort: "high" }, "failed live setting rolls back persisted truth");
-currentSession.settingGate = undefined;
+currentSession.settingGate = undefined; codex.throwOnPrepare = true;
 fresh.send({ kind: "settings", requestId: "select-codex", provider: "codex", settings: { model: "image", effort: "medium" }, selectedProvider: "codex" });
 await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "select-codex" }));
-assert.ok(codex.prepareCount > 0, "actual selected-provider transition prepares its provider");
+assert.ok(codex.prepareCount > 0, "advisory preparation failure does not lose settings acknowledgment"); codex.throwOnPrepare = false;
 fresh.send({ kind: "settings", requestId: "select-claude", provider: "claude", settings: { model: "sonnet", effort: "high" }, selectedProvider: "claude" });
 await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "select-claude" }));
 claude.history = [{ role: "assistant", text: "prefix", itemId: "live" }];
@@ -260,6 +293,10 @@ attachedClient.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileN
 const snapshot = await attachedClient.next(message => message.kind === "connection");
 assert.equal(snapshot.session?.sessionId, "native-current");
 assert.deepEqual(snapshot.activeText, [{ session: liveRef, itemId: "second", text: "new turn" }]);
+claude.throwOnHistory = true;
+attachedClient.send({ kind: "open", intentId: "failed-history", fileId: "file-a", fileName: "File", session: liveRef });
+const historyError = await attachedClient.next(message => message.kind === "error");
+assert.deepEqual([historyError.intentId, historyError.message], ["failed-history", "history rejected"]); claude.throwOnHistory = false;
 attachedClient.send({ kind: "open", intentId: "attach-history", fileId: "file-a", fileName: "File", session: { provider: "claude", sessionId: "native-current" } });
 assert.deepEqual((await attachedClient.next(message => message.kind === "history")).messages,
   [{ role: "assistant", text: "prefix", itemId: "live" }]);
@@ -271,17 +308,23 @@ other.send({ kind: "close", reason: "other file" });
 other.send({ kind: "health" }); await other.next(message => message.kind === "health");
 assert.equal(currentSession.closed, 0, "file-scoped close cannot end another file conversation");
 
-attachedClient.send(startMessage("replacement"));
+const staleStop = deferred<void>(); currentSession.interruptGate = staleStop.promise;
+attachedClient.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 4 });
+attachedClient.send(startMessage("replacement")); await claude.startCalls.waitFor({ count: 4 });
 attachedClient.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 assert.equal((await attachedClient.next(message => message.kind === "connection")).intentId, "replacement");
-currentSession.output.reject(new Error("late old failure"));
-await staleErrorLogged.promise;
-assert.deepEqual(attachedClient.matching(message => message.kind === "error"), [], "stale pump failure is not published to replacement view");
 const replacementSession = new FakeSession("claude"); claude.starts[3].deferred.resolve(replacementSession);
 await replacementSession.sendCalls.waitFor({ count: 1 });
+const replacementTool = claude.starts[3].boundary.tool({ tool: "focus", args: { nodeId: "2:3" } });
+const replacementCard = await attachedClient.next(message => message.kind === "tool");
+currentSession.output.reject(new Error("late old failure")); await staleSessionLogs.waitFor({ count: 1 });
+staleStop.reject(new Error("late interrupt rejection")); await staleInterruptLogs.waitFor({ count: 1 });
+assert.deepEqual(attachedClient.matching(message => message.kind === "error"), [], "predecessor errors are not published to replacement view");
+assert.equal(attachedClient.matching(message => message.kind === "cancel_request").some(message => message.id === replacementCard.id), false);
 assert.ok(logs.some(line => line.includes("stale session error")), "late old rejection is logged but not published");
 
-attachedClient.send(startMessage("dispatch-failure"));
+attachedClient.send(startMessage("dispatch-failure")); await claude.startCalls.waitFor({ count: 5 });
+assert.equal((await replacementTool).isError, true);
 attachedClient.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 assert.equal((await attachedClient.next(message => message.kind === "connection")).intentId, "dispatch-failure");
 replacementSession.output.push(usage(99, 99, "estimated"));

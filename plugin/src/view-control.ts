@@ -2,7 +2,7 @@ import type { NodeRef, ReviewEvent, SessionRecord, SessionRef, TextSnapshot } fr
 
 export type QueuedInput = { text: string; selection: NodeRef[] };
 type StartIntent = { kind: "start"; id: string; inputs: QueuedInput[]; adopted: boolean };
-type HistoryIntent = { kind: "history"; id: string; session: SessionRef; events: ReviewEvent[]; activeText: TextSnapshot[]; latest?: SessionRecord };
+type HistoryIntent = { kind: "history"; id: string; session: SessionRecord; events: ReviewEvent[]; activeText: TextSnapshot[]; inputs: QueuedInput[]; retainSession: boolean; latest?: SessionRecord };
 type ViewIntent = StartIntent | HistoryIntent;
 const sameSession = (left: SessionRef, right: SessionRef) =>
   left.provider === right.provider && left.sessionId === right.sessionId;
@@ -11,6 +11,7 @@ const sameSession = (left: SessionRef, right: SessionRef) =>
 export class ConversationView {
   private intent?: ViewIntent;
   private current?: SessionRecord;
+  private restoreOnConnect = false;
   private readonly cards = new Map<string, (reason: string) => void>();
 
   get session(): SessionRecord | undefined { return this.current; }
@@ -22,8 +23,9 @@ export class ConversationView {
     this.intent = { kind: "start", id: args.intentId, inputs: [], adopted: false };
     if (!args.retainSession) this.current = undefined;
   }
-  beginHistory(args: { intentId: string; session: SessionRef; retainSession?: boolean; activeText?: TextSnapshot[] }) {
-    this.intent = { kind: "history", id: args.intentId, session: args.session, events: [], activeText: args.activeText ?? [] };
+  beginHistory(args: { intentId: string; session: SessionRecord; retainSession?: boolean; activeText?: TextSnapshot[]; inputs?: QueuedInput[] }) {
+    this.restoreOnConnect = false;
+    this.intent = { kind: "history", id: args.intentId, session: args.session, events: [], activeText: args.activeText ?? [], inputs: args.inputs ?? [], retainSession: !!args.retainSession };
     if (!args.retainSession) this.current = undefined;
   }
   queue(input: QueuedInput) { if (this.intent?.kind === "start") this.intent.inputs.push(input); }
@@ -34,9 +36,9 @@ export class ConversationView {
     this.current = args.session;
     return result;
   }
-  confirmHistory(args: { intentId: string; session: SessionRecord }): { events: ReviewEvent[]; activeText: TextSnapshot[]; session: SessionRecord } | undefined {
+  confirmHistory(args: { intentId: string; session: SessionRecord }): { events: ReviewEvent[]; activeText: TextSnapshot[]; inputs: QueuedInput[]; session: SessionRecord } | undefined {
     if (this.intent?.kind !== "history" || this.intent.id !== args.intentId) return;
-    const result = { events: this.intent.events, activeText: this.intent.activeText, session: this.intent.latest ?? args.session };
+    const result = { events: this.intent.events, activeText: this.intent.activeText, inputs: this.intent.inputs, session: this.intent.latest ?? args.session };
     this.intent = undefined;
     this.current = result.session;
     return result;
@@ -54,16 +56,18 @@ export class ConversationView {
     adoptedStart: boolean;
     cancelledStart: boolean;
     historyRetry?: { intentId: string; session: SessionRef };
+    restoreHistory: boolean;
   } {
     const result: {
       queued: QueuedInput[]; cancelled: QueuedInput[]; adoptedStart: boolean; cancelledStart: boolean;
-      historyRetry?: { intentId: string; session: SessionRef };
-    } = { queued: [], cancelled: [], adoptedStart: false, cancelledStart: false };
+      historyRetry?: { intentId: string; session: SessionRef }; restoreHistory: boolean;
+    } = { queued: [], cancelled: [], adoptedStart: false, cancelledStart: false, restoreHistory: false };
     if (this.intent?.kind === "start") {
       if (args.intentId === this.intent.id) {
         if (!args.session?.sessionId) return result;
         const confirmed = this.confirm({ intentId: this.intent.id, session: args.session });
         result.queued = confirmed?.inputs ?? [];
+        result.restoreHistory = true;
         return result;
       }
       result.cancelled.push(...this.intent.inputs);
@@ -81,10 +85,13 @@ export class ConversationView {
         this.current = snapshotSession; this.intent.latest = snapshotSession;
       }
       result.historyRetry = { intentId: this.intent.id, session: this.intent.session };
+      this.restoreOnConnect = false;
       return result;
     }
-    if (args.session?.sessionId) this.current = args.session;
-    else if (args.intentId) {
+    if (args.session?.sessionId) {
+      result.restoreHistory = this.restoreOnConnect && !!this.current && sameSession(this.current, args.session);
+      this.current = args.session; this.restoreOnConnect = false;
+    } else if (args.intentId) {
       this.current = undefined;
       this.intent = { kind: "start", id: args.intentId, inputs: [], adopted: true };
       result.adoptedStart = true;
@@ -97,7 +104,12 @@ export class ConversationView {
     if (this.intent?.kind === "history") this.intent.latest = session;
     return true;
   }
-  disconnect(args: { reason: string }) { this.cancelCards(args); }
+  disconnect(args: { reason: string }) { this.restoreOnConnect ||= !!this.current; this.cancelCards(args); }
+  failHistory(intentId: string): { session: SessionRecord; inputs: QueuedInput[]; resume: boolean } | undefined {
+    if (this.intent?.kind !== "history" || this.intent.id !== intentId) return;
+    const result = { session: this.intent.latest ?? this.intent.session, inputs: this.intent.inputs, resume: !this.intent.retainSession };
+    this.intent = undefined; this.current = result.session; return result;
+  }
   addCard(args: { id: string; cancel: (reason: string) => void }) { this.cards.set(args.id, args.cancel); }
   finishCard(id: string) { this.cards.delete(id); }
   cancelCard(args: { id: string; reason: string }) { this.cards.get(args.id)?.(args.reason); this.cards.delete(args.id); }

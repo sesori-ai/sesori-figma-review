@@ -37,7 +37,10 @@ const record = {
 };
 saveSession(dir, record);
 saveSession(dir, { ...record, provider: "codex", costStatus: "estimated" });
-assert.deepEqual(readSessions(dir).map(item => [item.provider, item.sessionId]), [["claude", "same-native-id"], ["codex", "same-native-id"]]);
+saveSession(dir, { ...record, title: "Updated Claude", turns: 2 });
+assert.deepEqual(readSessions(dir).map(item => [item.provider, item.sessionId, item.title, item.turns]), [
+  ["codex", "same-native-id", "Review", 1], ["claude", "same-native-id", "Updated Claude", 2],
+]);
 const legacy = { ...record, provider: undefined, costStatus: undefined, sessionId: "legacy" };
 writeFileSync(join(dir, "sessions.json"), JSON.stringify([legacy]));
 assert.deepEqual(readSessions(dir).map(item => [item.provider, item.sessionId, item.costStatus]), [["claude", "legacy", "reported"]]);

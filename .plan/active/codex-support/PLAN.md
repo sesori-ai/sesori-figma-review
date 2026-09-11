@@ -251,8 +251,8 @@ installers, and Windows support is out of scope. Preserve the existing automatic
 ## Implementation series
 
 Soft cap: 1,500 changed lines per PR including tests, moves, generated files and docs. These are estimates, not a
-reason to compress code or skip parity. Parent approved a Step-3-only ceiling of 2,400 because atomic activation
-requires restored boundary proof and bundled-entrypoint settings/reconnect/history/card/replay ownership repairs;
+reason to compress code or skip parity. Parent grant `09ed2974-d15a-4d3c-8dea-d7734e875966` approved a Step-3-only
+ceiling of 2,750 for external-review settings/Stop/reconnect/wire-validation/smoke-ownership repairs and proof;
 this exception does not apply to later steps. If a slice grows beyond its coherent boundary, update the fixed series
 before opening it. No bulk vendoring of the 847-file generated protocol: use a focused validated projection and
 reproducible inspection against the qualified schema. No hand edits to generated files.

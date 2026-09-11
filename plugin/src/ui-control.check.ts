@@ -27,6 +27,7 @@ class ElementStub {
   get innerHTML() { return this.inner; }
   set innerHTML(value: string) { this.inner = value; if (!value) this.replaceChildren(); }
   get lastElementChild() { return this.children[this.children.length - 1]; }
+  get parentNode() { return this.parent; }
   get classList() {
     return {
       add: (...names: string[]) => { this.className = [...new Set([...this.className.split(" "), ...names])].filter(Boolean).join(" "); },
@@ -177,6 +178,36 @@ assert.doesNotMatch(text(rows.get("chat")), /stale row/);
 rows.deliver({ kind: "history", intentId: rowSecond.intentId, session, attached: false, messages: [{ role: "assistant", text: "current row" }] });
 assert.match(text(rows.get("chat")), /current row/);
 
+// Same-session reconnect restores History; recovered queued-start input waits for that reconstruction.
+const restored = new Harness(); restored.connect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: false });
+let restoreOpen = restored.sent("open").slice(-1)[0] as { intentId: string };
+restored.deliver({ kind: "history", intentId: restoreOpen.intentId, session, attached: true, messages: [{ role: "assistant", text: "before reconnect" }] });
+restored.socket.close(); restored.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: false });
+restoreOpen = restored.sent("open").slice(-1)[0] as { intentId: string };
+restored.deliver({ kind: "history", intentId: restoreOpen.intentId, session, attached: true, messages: [{ role: "assistant", text: "after reconnect" }] });
+assert.match(text(restored.get("chat")), /after reconnect/);
+const queued = new Harness(); queued.connect();
+queued.get("input").value = "start"; queued.get("send").onclick?.();
+const queuedStart = queued.sent("start")[0] as { intentId: string };
+queued.get("input").value = "queued"; queued.get("send").onclick?.(); queued.socket.close();
+queued.reconnect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, intentId: queuedStart.intentId, session, busy: true });
+const queuedOpen = queued.sent("open").slice(-1)[0] as { intentId: string };
+assert.equal(queued.sent("user").length, 0);
+queued.deliver({ kind: "history", intentId: queuedOpen.intentId, session, attached: true, messages: [] });
+assert.equal(queued.sent("user").length, 1);
+
+// Correlated History failure restores known resume context; stale intent failure cannot release a newer read.
+const failedHistory = new Harness(); failedHistory.connect();
+failedHistory.deliver({ kind: "sessions", sessions: [session] }); failedHistory.get("btn-history").onclick?.();
+failedHistory.get("sessions").querySelectorAll("button")[0]!.onclick?.();
+const failedOpen = failedHistory.sent("open").slice(-1)[0] as { intentId: string };
+failedHistory.deliver({ kind: "error", intentId: "stale-history", message: "stale" });
+failedHistory.get("input").value = "retry"; failedHistory.get("send").onclick?.(); assert.equal(failedHistory.get("input").value, "retry");
+failedHistory.deliver({ kind: "error", intentId: failedOpen.intentId, message: "native history failed" });
+failedHistory.get("send").onclick?.();
+const resumed = failedHistory.sent("start").slice(-1)[0] as { resume?: { provider: string; sessionId: string } };
+assert.deepEqual(resumed.resume, { provider: "claude", sessionId: session.sessionId });
+
 // Retry adopts a newer identity snapshot boundary; completed native identity also rejects delayed SDK overlap.
 const history = new Harness();
 const connection: Extract<DownMsg, { kind: "connection" }> = { kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: true,
@@ -194,6 +225,9 @@ history.deliver({ kind: "history", intentId: firstOpen.intentId, session, attach
 let rendered = text(history.get("chat"));
 assert.match(rendered, /AB/); assert.equal(count(rendered, "Complete"), 1); assert.match(rendered, /Continue/); assert.match(rendered, /annotate/);
 assert.equal(history.footer.hidden, true);
+const order = history.get("chat").children.map(child => child.className);
+assert.ok(order.findIndex(cls => cls === "msg assistant") < order.findIndex(cls => cls.includes("actionable")));
+assert.ok(order.findIndex(cls => cls.includes("actionable")) < order.findIndex(cls => cls === "typing"));
 history.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "partial", text: "C" } });
 history.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "done", text: "Complete" } });
 rendered = text(history.get("chat")); assert.match(rendered, /ABC/); assert.equal(count(rendered, "Complete"), 1);
@@ -234,6 +268,28 @@ assert.equal(decodeBridgeMessage({ kind: "health", health: { bridge: "legacy" } 
 for (const protocolVersion of [undefined, 1, 2, 4]) assert.equal(decodeBridgeMessage({ kind: "connection", protocolVersion, busy: false }), undefined);
 assert.deepEqual(decodeBridgeMessage({ kind: "connection", protocolVersion: 3, busy: false }), { kind: "connection", protocolVersion: 3, busy: false });
 assert.equal(decodeBridgeMessage({ kind: "connection", protocolVersion: 3, busy: false, activeText: [{ itemId: 1 }] }), undefined);
+assert.ok(decodeBridgeMessage({ kind: "connection", protocolVersion: 3, intentId: "pending", busy: true }));
+const validEvents: ReviewEvent[] = [
+  { type: "text_start", session, itemId: "start" }, { type: "text_end", session, itemId: "end" },
+  { type: "text_delta", session, itemId: "delta", text: "x" }, { type: "status", session, itemId: "status", text: "working" },
+  { type: "tool", session, itemId: "tool", name: "focus", input: {} }, { type: "error", session, itemId: "error", message: "failed" },
+  { type: "turn_end", session, itemId: "turn", outcome: "completed" },
+];
+for (const event of validEvents) assert.ok(decodeBridgeMessage({ kind: "event", event }));
+assert.ok(decodeBridgeMessage({ kind: "history", intentId: "history", session, attached: false, messages: [
+  { role: "user", text: "question" }, { role: "answer", text: "answer" }, { role: "assistant", text: "reply", itemId: "a" },
+  { role: "tool", name: "focus", input: {}, itemId: "t" },
+] }));
+for (const malformed of [
+  { kind: "connection", protocolVersion: 3, busy: false, session: { provider: "claude", sessionId: "ref-only" } },
+  { kind: "sessions", sessions: [{ provider: "claude", sessionId: "ref-only" }] },
+  { kind: "history", intentId: "h", session, attached: false, messages: [{ role: "tool", name: "focus", input: [] }] },
+  { kind: "event", event: { type: "text_delta", session, itemId: "x" } },
+  { kind: "event", event: { type: "turn_end", session, itemId: "x", outcome: "unknown" } },
+  { kind: "health", health: { ...health(), providers: [{ provider: "claude", status: "ready", models: [{ value: "x" }] }] } },
+  { kind: "health", health: { ...health(), servers: [{ name: "mcp", status: 500 }] } },
+  { kind: "health", health: { ...health(), settingsResult: { requestId: "x", accepted: "yes" } } },
+]) assert.equal(decodeBridgeMessage(malformed), undefined);
 const delta: ReviewEvent = { type: "text_delta", session, itemId: "item", text: "text" };
 assert.equal(eventBelongsToSession({ event: delta, session }), true);
 assert.equal(eventBelongsToSession({ event: { ...delta, session: { provider: "codex", sessionId: session.sessionId } }, session }), false);

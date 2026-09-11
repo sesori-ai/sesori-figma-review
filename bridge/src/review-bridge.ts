@@ -61,6 +61,7 @@ export function createReviewBridge(args: {
   log: (...values: unknown[]) => void;
   createProviders: (args: { onChanged: () => void }) => ProviderMap;
   probeFigmaMcp?: () => Promise<Health["figmaMcp"]>;
+  fetchMcp?: typeof fetch;
 }): ReviewBridge {
   const clients = new Map<string, WebSocket>();
   const pending = new Map<string, Pending>();
@@ -69,6 +70,7 @@ export function createReviewBridge(args: {
   let conv: Conversation | undefined;
   let starting: { fileId: string; intentId: string } | undefined;
   let stopped = false;
+  let claudeSettings = Promise.resolve(), codexSettings = Promise.resolve();
 
   const send = (fileId: string, message: DownMsg) => {
     const ws = clients.get(fileId);
@@ -135,7 +137,8 @@ export function createReviewBridge(args: {
     cancelRequests(owner);
   }
   function prepareProvider(provider: ReviewProvider, fileId: string, dir: string) {
-    provider.prepare({ fileId, dir, settings: readSettings().providers[provider.id], boundary: dormantBoundary });
+    try { provider.prepare({ fileId, dir, settings: readSettings().providers[provider.id], boundary: dormantBoundary }); }
+    catch (error) { args.log(`${provider.id} advisory preparation failed`, error); }
   }
   function freshRecord(message: Extract<UpMsg, { kind: "start" }>, provider: ProviderId): SessionRecord {
     return {
@@ -273,13 +276,13 @@ export function createReviewBridge(args: {
   async function probeFigmaMcp(): Promise<Health["figmaMcp"]> {
     if (args.probeFigmaMcp) return args.probeFigmaMcp();
     try {
-      await fetch(FIGMA_MCP_URL, {
+      const response = await (args.fetchMcp ?? fetch)(FIGMA_MCP_URL, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "sesori-review", version: args.version } } }),
         signal: AbortSignal.timeout(1500),
       });
-      return "up";
+      return response.ok ? "up" : "down";
     } catch { return "down"; }
   }
   async function sendHealth(fileId: string) {
@@ -330,6 +333,14 @@ export function createReviewBridge(args: {
     sendSettingsResult(ws, { requestId: message.requestId, accepted: true });
   }
 
+  function serializeSettings(ws: Socket, message: Extract<UpMsg, { kind: "settings" }>) {
+    const previous = message.provider === "claude" ? claudeSettings : codexSettings;
+    const update = previous.then(() => updateSettings(ws, message));
+    const settled = update.catch(error => args.log(`${message.provider} settings update failed`, error));
+    if (message.provider === "claude") claudeSettings = settled; else codexSettings = settled;
+    return update;
+  }
+
   async function onUp(ws: Socket, message: UpMsg) {
     if (message.kind !== "hello" && !ws.protocolOk) return;
     switch (message.kind) {
@@ -364,13 +375,17 @@ export function createReviewBridge(args: {
       }
       case "start": return startConversation(message);
       case "open": {
-        const dir = workspaceFor(message.fileId, message.fileName);
-        const session = readSessions(dir).find(item => item.provider === message.session.provider && item.sessionId === message.session.sessionId);
-        if (!session) return send(message.fileId, { kind: "error", message: "Unknown provider-qualified session" });
-        const attached = conv?.record.provider === message.session.provider && conv.record.sessionId === message.session.sessionId;
-        const provider = providers[session.provider];
-        if (!provider) return send(message.fileId, { kind: "error", message: `${session.provider} is unavailable; cannot read its native history.` });
-        return send(message.fileId, { kind: "history", intentId: message.intentId, session: attached ? conv!.record : session, messages: provider.readHistory({ dir, sessionId: session.sessionId }), attached });
+        try {
+          const dir = workspaceFor(message.fileId, message.fileName);
+          const session = readSessions(dir).find(item => item.provider === message.session.provider && item.sessionId === message.session.sessionId);
+          if (!session) throw new Error("Unknown provider-qualified session");
+          const attached = conv?.record.provider === message.session.provider && conv.record.sessionId === message.session.sessionId;
+          const provider = providers[session.provider];
+          if (!provider) throw new Error(`${session.provider} is unavailable; cannot read its native history.`);
+          return send(message.fileId, { kind: "history", intentId: message.intentId, session: attached ? conv!.record : session, messages: provider.readHistory({ dir, sessionId: session.sessionId }), attached });
+        } catch (error) {
+          return send(message.fileId, { kind: "error", intentId: message.intentId, message: error instanceof Error ? error.message : String(error) });
+        }
       }
       case "user":
         if (!conv || conv.fileId !== ws.fileId) return send(ws.fileId!, { kind: "error", message: "No active session for this file. Start one or open one from History." });
@@ -386,18 +401,24 @@ export function createReviewBridge(args: {
         request.resolve(message.result);
         return;
       }
-      case "interrupt":
-        if (conv && conv.fileId === ws.fileId) {
-          cancelRequests({ owner: conv.owner, reason: "Turn stopped" });
-          await conv.session.interrupt();
+      case "interrupt": {
+        const target = conv;
+        if (!target || target.fileId !== ws.fileId) return;
+        try { await target.session.interrupt(); }
+        catch (error) {
+          if (conv === target) send(target.fileId, { kind: "error", message: `Stop failed: ${error instanceof Error ? error.message : String(error)}` });
+          else args.log("stale interrupt failed", error);
+          return;
         }
+        cancelRequests({ owner: target.owner, reason: "Turn stopped" });
         return;
+      }
       case "close":
         if (!ws.fileId || clients.get(ws.fileId) !== ws) return;
         if (starting?.fileId === ws.fileId) starting = undefined;
         if (conv?.fileId === ws.fileId) endConversation(message.reason);
         return;
-      case "settings": return updateSettings(ws, message);
+      case "settings": return serializeSettings(ws, message);
       case "health": return sendHealth(ws.fileId!);
     }
   }

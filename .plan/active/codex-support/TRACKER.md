@@ -11,7 +11,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
-| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Implementation reviews rejected two checkpoints; parent-qualified fixes implemented locally; fresh independent review required |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | External review fixes implemented locally; fresh independent review required before parent publication |
 | 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
@@ -36,17 +36,17 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   byte-identical to master, with catalog/history reuse adapter-only.
 - Step 3 retains all ownership, protocol, view, close, settings, accounting, smoke and qualification obligations below,
   plus exact legacy catalog/history adoption, legacy SDK removal and the UUID integration assertion.
-- Step 3 live activation smoke used Claude Haiku/low, isolated home/free port and four-turn/$0.10 process limits.
-  It proved busy steering through a question card, Stop cancellation, idle reconnect, native history, and nonzero
-  cumulative usage/cost after resume through a recreated bridge/query process.
+- Current Step 3 live activation smoke used Claude Haiku/low, owned home, OS-assigned non-3055 ports and
+  four-turn/$0.10-per-process limits. It proved busy steering, acknowledged Stop/card cancellation, idle reconnect,
+  native history, resumed-turn-only output, three cumulative turns/$0.0248175, and owned process/native cleanup.
 - First Step 3 review disposition: accepted provider-change derivation, handshake admission, and production-seam
   evidence findings. Qualified the settings finding: actual Claude disposal broadcasts health, so no outage was
   proven, but bridge-owned settled publication must not rely on that adapter callback. Parent also required pending-start/fresh
   attachment history and terminal ownership fixes. Deterministic tests now use ordinary dependency injection through
   the production receive/onUp/pump paths. Actual bundled-UI admission/history/settings/card/replay fixes and explicit
   bridge-owned settled-settings publication are now covered; fresh independent review remains pending.
-- Parent approved a Step-3-only 2,400-line ceiling after review exposed additional UI lifecycle/replay failures;
-  restored boundary and bundled-`ui.ts` proof cover them. The exception does not apply to later steps.
+- Parent grant `09ed2974-d15a-4d3c-8dea-d7734e875966` approved a Step-3-only 2,750-line ceiling for accepted
+  external-review settings/Stop/reconnect/wire/smoke ownership repairs and proof; later-step budgets are unchanged.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
 

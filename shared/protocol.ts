@@ -121,4 +121,4 @@ export type DownMsg =
   | { kind: "cancel_request"; id: string; reason: string }
   | { kind: "event"; event: ReviewEvent }
   | { kind: "busy"; busy: boolean }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; intentId?: string };
