@@ -2,7 +2,8 @@
 // The workspace is the agent's cwd: CLAUDE.md, .mcp.json and the review-flow skill are loaded from here,
 // and notes/ is the only place it may write files. CLAUDE.md, settings and .mcp.json are written once and
 // never overwritten, so teammates can edit them per file; the skill is ours and is refreshed on every start.
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,9 +81,20 @@ export function readSettings(): Settings {
     },
   };
 }
-export function saveSettings(settings: Settings) {
+export type SettingsIo = {
+  write: (path: string, content: string) => void;
+  rename: (source: string, destination: string) => void;
+  remove: (path: string) => void;
+};
+export function saveSettings(args: { settings: Settings; io?: SettingsIo }) {
   mkdirSync(HOME, { recursive: true });
-  writeFileSync(settingsPath(), JSON.stringify(settings, null, 2) + "\n");
+  const path = settingsPath(), temporary = `${path}.${randomUUID()}.tmp`;
+  const io = args.io ?? { write: writeFileSync, rename: renameSync, remove: path => rmSync(path, { force: true }) };
+  try { io.write(temporary, JSON.stringify(args.settings, null, 2) + "\n"); io.rename(temporary, path); }
+  catch (error) {
+    try { io.remove(temporary); } catch (cleanupError) { console.error("Failed to remove settings temporary file", cleanupError); }
+    throw error;
+  }
 }
 
 function decodeSession(value: unknown): SessionRecord | undefined {

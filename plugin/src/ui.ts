@@ -151,8 +151,8 @@ function onDown(m: DownMsg) {
       const confirmed = view.confirm({ intentId: m.intentId, session: m.session });
       if (!confirmed) return;
       renderCost(m.session);
-      for (const queued of confirmed.inputs) send({ kind: "user", ...queued });
-      if (confirmed.adopted) requestHistory({ session: m.session, attached: true, retainSession: true });
+      if (confirmed.adopted) requestHistory({ session: m.session, attached: true, retainSession: true, inputs: confirmed.inputs });
+      else for (const queued of confirmed.inputs) send({ kind: "user", ...queued });
       return;
     }
     case "session": if (view.update(m.session)) renderCost(m.session); return;
@@ -164,6 +164,11 @@ function onDown(m: DownMsg) {
     case "busy": renderBusy(m.busy); return;
     case "error": {
       if (m.intentId) {
+        const failedStart = view.failStart(m.intentId);
+        if (failedStart) {
+          notifyCancelled(failedStart.inputs.length); opened = failedStart.session;
+          bubble("error", m.message); return;
+        }
         const failed = view.failHistory(m.intentId);
         if (!failed) return;
         notifyCancelled(failed.inputs.length); opened = failed.attached ? undefined : failed.session; renderCost(failed.session);

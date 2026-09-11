@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DownMsg, HistoryItem, ProviderHealth, ProviderSessionRecord, ProviderSettings } from "../../shared/protocol.ts";
@@ -51,12 +51,15 @@ class FakeSession implements ReviewSession {
   throwOnSend = false;
   interruptGate?: Promise<void>;
   settingGate?: { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void };
+  readonly settingGates = new Map<number, Promise<void>>();
+  readonly throwSettingCalls = new Set<number>();
   constructor(readonly provider: "claude" | "codex") {}
   send(args: { text: string }) { if (this.throwOnSend) throw new Error("dispatch rejected"); this.sent.push(args.text); this.sendCalls.hit(); }
   async interrupt() { this.interrupted++; this.interruptCalls.hit(); await this.interruptGate; this.interruptSuccesses.hit(); }
   async applySettings(args: { settings: ProviderSettings }) {
     this.settings.push(args.settings); this.settingCalls.hit();
-    await this.settingGate?.promise;
+    await (this.settingGates.get(this.settingCalls.count) ?? this.settingGate?.promise);
+    if (this.throwSettingCalls.has(this.settingCalls.count)) throw new Error("rollback rejected");
   }
   close() { this.closed++; this.closeCalls.hit(); }
 }
@@ -132,7 +135,7 @@ const usage = (input: number, cost: number, status: "reported" | "estimated", tu
 
 const claude = new FakeProvider("claude"), codex = new FakeProvider("codex");
 const logs: string[] = [], staleSessionLogs = new ObservedCalls(), staleInterruptLogs = new ObservedCalls();
-let mcpStatus = 503;
+let mcpStatus = 503, rejectSettingsRename = false, temporarySettingsPath = "";
 const app = createReviewBridge({
   version: "test", port: 0, log: (...values) => {
     const line = values.map(String).join(" "); logs.push(line);
@@ -140,6 +143,11 @@ const app = createReviewBridge({
     if (line.includes("stale interrupt failed")) staleInterruptLogs.hit();
   },
   createProviders: () => ({ claude, codex }), fetchMcp: async () => new Response(null, { status: mcpStatus }),
+  settingsIo: {
+    write: (path, content) => { temporarySettingsPath = path; writeFileSync(path, content); },
+    rename: (source, destination) => { if (rejectSettingsRename) throw new Error("rename rejected"); renameSync(source, destination); },
+    remove: path => rmSync(path, { force: true }),
+  },
 });
 const port = await app.listening;
 const valid = await new Client(port).opened();
@@ -179,13 +187,26 @@ const stalePending = new FakeSession("claude"); claude.starts[0].deferred.resolv
 await stalePending.closeCalls.waitFor({ count: 1 });
 assert.deepEqual([stalePending.closed, stalePending.sent.length], [1, 0]);
 
-fresh.send(startMessage("old")); fresh.send(startMessage("current"));
-await claude.startCalls.waitFor({ count: 3 });
-const oldSession = new FakeSession("claude"), currentSession = new FakeSession("claude");
-claude.throwOnPrepare = true;
-claude.starts[1].deferred.resolve(oldSession); claude.starts[2].deferred.resolve(currentSession);
-await Promise.all([oldSession.closeCalls.waitFor({ count: 1 }), currentSession.sendCalls.waitFor({ count: 1 })]);
-assert.deepEqual([oldSession.closed, oldSession.sent.length, currentSession.sent.length], [1, 0, 1], "only current reservation sends initial prompt");
+const supersededClient = await new Client(port).opened();
+supersededClient.send({ kind: "hello", protocolVersion: 3, fileId: "file-b", fileName: "Other" });
+await supersededClient.next(message => message.kind === "connection");
+supersededClient.send(startMessage("old", "file-b")); await claude.startCalls.waitFor({ count: 2 });
+fresh.send({ kind: "settings", requestId: "during-old", provider: "claude", settings: { model: "haiku", effort: "low" } });
+await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "during-old" }));
+const oldSession = new FakeSession("claude"), oldReconcile = deferred<void>(); oldSession.settingGate = oldReconcile;
+claude.starts[1].deferred.resolve(oldSession); await oldSession.settingCalls.waitFor({ count: 1 });
+fresh.send(startMessage("current")); await claude.startCalls.waitFor({ count: 3 });
+const supersededError = await supersededClient.next(message => message.kind === "error");
+assert.deepEqual([supersededError.intentId, oldSession.sent.length], ["old", 0]);
+oldReconcile.resolve(); await oldSession.closeCalls.waitFor({ count: 1 });
+fresh.send({ kind: "settings", requestId: "during-current", provider: "claude", settings: { model: "sonnet", effort: "medium" } });
+await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "during-current" }));
+const currentSession = new FakeSession("claude"), currentReconcile = deferred<void>(); currentSession.settingGate = currentReconcile;
+claude.throwOnPrepare = true; claude.starts[2].deferred.resolve(currentSession);
+await currentSession.settingCalls.waitFor({ count: 1 }); assert.equal(currentSession.sent.length, 0);
+currentReconcile.resolve(); await currentSession.sendCalls.waitFor({ count: 1 }); currentSession.settingGate = undefined;
+assert.deepEqual([oldSession.closed, oldSession.sent.length, currentSession.sent, currentSession.settings[0]],
+  [1, 0, ["prompt-current"], { model: "sonnet", effort: "medium" }]);
 currentSession.output.push(initialized("native-current"));
 await fresh.next(down({ kind: "started", where: message => message.intentId === "current" }));
 assert.ok(logs.some(line => line.includes("advisory preparation failed"))); claude.throwOnPrepare = false;
@@ -223,10 +244,10 @@ const replacement = await fresh.next(down({ kind: "session", where: message => m
 assert.deepEqual([replacement.session.usage.input, replacement.session.costUsd, replacement.session.costStatus], [3, 2, "reported"],
   "authoritative usage/cost snapshots replace rather than sum and may validly decrease");
 
-const beforeLiveSettings = readSettings().providers.claude;
+const beforeLiveSettings = readSettings().providers.claude, disposeBeforeLive = claude.disposeCount;
 const gate = deferred<void>(); currentSession.settingGate = gate;
 fresh.send({ kind: "settings", requestId: "claude-live", provider: "claude", settings: { model: "sonnet", effort: "high" } });
-await currentSession.settingCalls.waitFor({ count: 1 });
+await currentSession.settingCalls.waitFor({ count: 2 });
 fresh.send({ kind: "settings", requestId: "codex-race", provider: "codex", settings: { model: "image", effort: "medium" } });
 await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "codex-race" }));
 const settingsOrigin = fresh, settingsReplacement = await new Client(port).opened();
@@ -242,14 +263,14 @@ fresh = settingsReplacement;
 assert.deepEqual(readSettings().providers, {
   claude: { model: "sonnet", effort: "high" }, codex: { model: "image", effort: "medium" },
 }, "awaited active update preserves unrelated provider commit");
-assert.deepEqual(currentSession.settings, [{ model: "sonnet", effort: "high" }]);
-assert.equal(claude.disposeCount, disposeBeforeNoop + 1);
+assert.deepEqual(currentSession.settings.at(-1), { model: "sonnet", effort: "high" });
+assert.equal(claude.disposeCount, disposeBeforeLive + 1);
 const reversionGate = deferred<void>(); currentSession.settingGate = reversionGate;
 fresh.send({ kind: "settings", requestId: "away", provider: "claude", settings: { model: "haiku", effort: "low" } });
-await currentSession.settingCalls.waitFor({ count: 2 });
+await currentSession.settingCalls.waitFor({ count: 3 });
 fresh.send({ kind: "settings", requestId: "back", provider: "claude", settings: { model: "sonnet", effort: "high" } });
 fresh.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 3 });
-assert.equal(currentSession.settingCalls.count, 2, "same-provider reversion waits behind the complete first transaction");
+assert.equal(currentSession.settingCalls.count, 3, "same-provider reversion waits behind the complete first transaction");
 reversionGate.resolve();
 await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "away" }));
 await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "back" }));
@@ -257,14 +278,24 @@ assert.deepEqual(currentSession.settings.slice(-2), [{ model: "haiku", effort: "
 assert.deepEqual(readSettings().providers.claude, { model: "sonnet", effort: "high" });
 const rejectedGate = deferred<void>(); currentSession.settingGate = rejectedGate;
 fresh.send({ kind: "settings", requestId: "rejected", provider: "claude", settings: { model: "bad", effort: "high" } });
-await currentSession.settingCalls.waitFor({ count: 4 }); rejectedGate.reject(new Error("native rejected"));
+await currentSession.settingCalls.waitFor({ count: 5 }); rejectedGate.reject(new Error("native rejected"));
 const rejectedHealth = await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "rejected" }));
 assert.equal(rejectedHealth.health.settingsResult?.accepted, false);
 const rejectedPlain = await fresh.next(down({ kind: "health", where: message => !message.health.settingsResult
   && message.health.settings.providers.claude.model === "sonnet" }));
 assert.equal(rejectedPlain.health.settings.providers.claude.model, "sonnet");
 assert.deepEqual(readSettings().providers.claude, { model: "sonnet", effort: "high" }, "failed live setting rolls back persisted truth");
-currentSession.settingGate = undefined; codex.throwOnPrepare = true;
+currentSession.settingGate = undefined;
+const committedSettingsPath = join(process.env.SESORI_REVIEW_HOME, "settings.json");
+const committedSettings = readFileSync(committedSettingsPath, "utf8"); rejectSettingsRename = true;
+fresh.send({ kind: "settings", requestId: "persist-rejected", provider: "claude", settings: { model: "haiku", effort: "low" } });
+const persistenceRejected = await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "persist-rejected" }));
+rejectSettingsRename = false;
+assert.equal(persistenceRejected.health.settingsResult?.accepted, false);
+assert.match(persistenceRejected.health.settingsResult?.error ?? "", /Settings were not saved: rename rejected/);
+assert.deepEqual(currentSession.settings.slice(-2), [{ model: "haiku", effort: "low" }, { model: "sonnet", effort: "high" }]);
+assert.deepEqual([currentSession.closed, readFileSync(committedSettingsPath, "utf8"), existsSync(temporarySettingsPath)], [0, committedSettings, false]);
+codex.throwOnPrepare = true;
 fresh.send({ kind: "settings", requestId: "select-codex", provider: "codex", settings: { model: "image", effort: "medium" }, selectedProvider: "codex" });
 await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "select-codex" }));
 assert.ok(codex.prepareCount > 0, "advisory preparation failure does not lose settings acknowledgment"); codex.throwOnPrepare = false;
@@ -308,9 +339,16 @@ other.send({ kind: "close", reason: "other file" });
 other.send({ kind: "health" }); await other.next(message => message.kind === "health");
 assert.equal(currentSession.closed, 0, "file-scoped close cannot end another file conversation");
 
+const staleRollback = deferred<void>(), rollbackCall = currentSession.settingCalls.count + 2;
+currentSession.settingGates.set(rollbackCall, staleRollback.promise); rejectSettingsRename = true;
+attachedClient.send({ kind: "settings", requestId: "persist-stale", provider: "claude", settings: { model: "haiku", effort: "medium" } });
+await currentSession.settingCalls.waitFor({ count: rollbackCall });
 const staleStop = deferred<void>(); currentSession.interruptGate = staleStop.promise;
 attachedClient.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 4 });
 attachedClient.send(startMessage("replacement")); await claude.startCalls.waitFor({ count: 4 });
+staleRollback.resolve();
+const stalePersistence = await attachedClient.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "persist-stale" }));
+rejectSettingsRename = false; assert.equal(stalePersistence.health.settingsResult?.accepted, false); assert.equal(currentSession.closed, 1);
 attachedClient.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 assert.equal((await attachedClient.next(message => message.kind === "connection")).intentId, "replacement");
 const replacementSession = new FakeSession("claude"); claude.starts[3].deferred.resolve(replacementSession);
@@ -322,9 +360,14 @@ staleStop.reject(new Error("late interrupt rejection")); await staleInterruptLog
 assert.deepEqual(attachedClient.matching(message => message.kind === "error"), [], "predecessor errors are not published to replacement view");
 assert.equal(attachedClient.matching(message => message.kind === "cancel_request").some(message => message.id === replacementCard.id), false);
 assert.ok(logs.some(line => line.includes("stale session error")), "late old rejection is logged but not published");
+replacementSession.throwSettingCalls.add(2); rejectSettingsRename = true;
+attachedClient.send({ kind: "settings", requestId: "persist-fail-closed", provider: "claude", settings: { model: "haiku", effort: "high" } });
+const failClosed = await attachedClient.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "persist-fail-closed" }));
+rejectSettingsRename = false;
+assert.match(failClosed.health.settingsResult?.error ?? "", /native rollback failed and session was closed/);
+assert.deepEqual([replacementSession.closed, (await replacementTool).isError], [1, true]);
 
 attachedClient.send(startMessage("dispatch-failure")); await claude.startCalls.waitFor({ count: 5 });
-assert.equal((await replacementTool).isError, true);
 attachedClient.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 assert.equal((await attachedClient.next(message => message.kind === "connection")).intentId, "dispatch-failure");
 replacementSession.output.push(usage(99, 99, "estimated"));
@@ -336,8 +379,15 @@ assert.match((await attachedClient.next(message => message.kind === "error")).me
 assert.equal(failingSession.closed, 1);
 attachedClient.send({ kind: "user", text: "after failure", selection: [] });
 assert.match((await attachedClient.next(message => message.kind === "error")).message, /No active session/);
+attachedClient.send(startMessage("reconcile-failure")); await claude.startCalls.waitFor({ count: 6 });
+attachedClient.send({ kind: "settings", requestId: "latest-before-failure", provider: "claude", settings: { model: "haiku", effort: "low" } });
+await attachedClient.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "latest-before-failure" }));
+const reconcileFailure = new FakeSession("claude"); reconcileFailure.throwSettingCalls.add(1); claude.starts[5].deferred.resolve(reconcileFailure);
+await reconcileFailure.closeCalls.waitFor({ count: 1 });
+const reconciliationError = await attachedClient.next(message => message.kind === "error");
+assert.deepEqual([reconciliationError.intentId, reconcileFailure.sent.length], ["reconcile-failure", 0]);
 
-valid.close(); settingsOrigin.close(); fresh.close(); attachedClient.close(); other.close();
+valid.close(); settingsOrigin.close(); fresh.close(); attachedClient.close(); other.close(); supersededClient.close();
 await app.shutdown();
 const transportApp = createReviewBridge({ version: "test", port: 0, log: () => {},
   createProviders: () => ({ claude: undefined, codex: undefined }) });

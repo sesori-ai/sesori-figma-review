@@ -139,6 +139,35 @@ admission.get("model").value = "sonnet"; admission.get("model").onchange?.();
 assert.equal(admission.get("model").value, "haiku"); assert.equal(admission.sent("settings").length, 0);
 assert.match(JSON.stringify(admission.posted), /Settings were not changed/);
 
+// Intent-qualified start cancellation releases only its queue; adopted queues wait for authoritative History disposition.
+const cancelledStart = new Harness(); cancelledStart.connect(); cancelledStart.get("input").value = "start"; cancelledStart.get("send").onclick?.();
+const cancelledIntent = (cancelledStart.sent("start")[0] as { intentId: string }).intentId;
+cancelledStart.get("input").value = "queued"; cancelledStart.get("send").onclick?.();
+cancelledStart.deliver({ kind: "error", intentId: cancelledIntent, message: "superseded" });
+const cancellationNotice = JSON.stringify(cancelledStart.posted); assert.equal(count(cancellationNotice, "queued message was cancelled"), 1);
+cancelledStart.deliver({ kind: "error", intentId: cancelledIntent, message: "duplicate" });
+assert.equal(count(JSON.stringify(cancelledStart.posted), "queued message was cancelled"), 1);
+const cancelledResume = new Harness(); cancelledResume.connect(); cancelledResume.deliver({ kind: "sessions", sessions: [session] });
+cancelledResume.get("btn-history").onclick?.(); cancelledResume.get("sessions").querySelectorAll("button")[0]!.onclick?.();
+const resumeHistory = cancelledResume.sent("open")[0] as { intentId: string };
+cancelledResume.deliver({ kind: "history", intentId: resumeHistory.intentId, session, attached: false, messages: [] });
+cancelledResume.get("input").value = "resume"; cancelledResume.get("send").onclick?.();
+const resumeStart = cancelledResume.sent("start").slice(-1)[0] as { intentId: string };
+cancelledResume.get("input").value = "queued"; cancelledResume.get("send").onclick?.();
+cancelledResume.deliver({ kind: "error", intentId: resumeStart.intentId, message: "superseded" });
+cancelledResume.get("input").value = "retry"; cancelledResume.get("send").onclick?.();
+assert.deepEqual((cancelledResume.sent("start").slice(-1)[0] as { resume?: unknown }).resume, { provider: "claude", sessionId: session.sessionId });
+for (const attached of [true, false]) {
+  const adopted = new Harness(); adopted.connect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, intentId: `adopted-${attached}`, busy: true });
+  adopted.get("input").value = `queued-${attached}`; adopted.get("send").onclick?.();
+  adopted.deliver({ kind: "started", intentId: `adopted-${attached}`, session });
+  const adoptedOpen = adopted.sent("open").slice(-1)[0] as { intentId: string }; assert.equal(adopted.sent("user").length, 0);
+  adopted.deliver({ kind: "history", intentId: adoptedOpen.intentId, session, attached, messages: [{ role: "assistant", text: "context" }] });
+  assert.equal(adopted.sent("user").length, attached ? 1 : 0);
+  if (attached) { const visible = text(adopted.get("chat")); assert.equal(count(visible, `queued-${attached}`), 1); assert.ok(visible.indexOf("context") < visible.indexOf(`queued-${attached}`)); }
+  else assert.match(JSON.stringify(adopted.posted), /queued message was cancelled/);
+}
+
 // Rapid edits survive an older result; current accepted/rejected results settle intent. Reconnect health separately resolves lost results.
 const settings = new Harness();
 assert.equal(settings.get("model").disabled, true); settings.connect();

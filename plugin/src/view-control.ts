@@ -106,6 +106,11 @@ export class ConversationView {
     return true;
   }
   disconnect(args: { reason: string }) { this.restoreOnConnect ||= !!this.current; this.cancelCards(args); }
+  failStart(intentId: string): { session?: SessionRecord; inputs: QueuedInput[] } | undefined {
+    if (this.intent?.kind !== "start" || this.intent.id !== intentId) return;
+    const result = { session: this.current, inputs: this.intent.inputs };
+    this.intent = undefined; return result;
+  }
   failHistory(intentId: string): { session: SessionRecord; inputs: QueuedInput[]; attached: boolean } | undefined {
     if (this.intent?.kind !== "history" || this.intent.id !== intentId) return;
     const result = { session: this.intent.latest ?? this.intent.session, inputs: this.intent.inputs, attached: this.intent.attached };

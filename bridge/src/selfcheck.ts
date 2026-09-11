@@ -17,11 +17,11 @@ const defaults = { provider: "claude" as const, providers: { claude: { model: ""
 assert.deepEqual(readSettings(), defaults);
 writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ model: "opus", effort: "low" }));
 assert.deepEqual(readSettings(), { ...defaults, providers: { ...defaults.providers, claude: { model: "opus", effort: "low" } } });
-saveSettings({ ...defaults, providers: { ...defaults.providers, claude: { model: "haiku", effort: "low" } } });
+saveSettings({ settings: { ...defaults, providers: { ...defaults.providers, claude: { model: "haiku", effort: "low" } } } });
 assert.equal(readSettings().providers.claude.model, "haiku");
 writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ ...defaults, provider: "future" }));
 assert.throws(readSettings, /Unsupported provider "future"/);
-saveSettings(defaults);
+saveSettings({ settings: defaults });
 
 const dir = workspaceFor("file1", "Checkout redesign");
 assert.ok(readFileSync(join(dir, "CLAUDE.md"), "utf8").includes("Checkout redesign"));

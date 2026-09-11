@@ -16,7 +16,7 @@ import {
 } from "../../shared/protocol.ts";
 import { activateProvider } from "./provider-activation.ts";
 import type { ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
-import { readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage } from "./workspace.ts";
+import { readSessions, readSettings, saveSession, saveSettings, workspaceFor, zeroUsage, type SettingsIo } from "./workspace.ts";
 
 type ProviderMap = Record<ProviderId, ReviewProvider | undefined>;
 type Socket = WebSocket & { fileId?: string; protocolOk?: boolean };
@@ -62,13 +62,14 @@ export function createReviewBridge(args: {
   createProviders: (args: { onChanged: () => void }) => ProviderMap;
   probeFigmaMcp?: () => Promise<Health["figmaMcp"]>;
   fetchMcp?: typeof fetch;
+  settingsIo?: SettingsIo;
 }): ReviewBridge {
   const clients = new Map<string, WebSocket>();
   const pending = new Map<string, Pending>();
   const activeOwners = new Set<string>();
   let figmaMcp: Health["figmaMcp"] = "down";
   let conv: Conversation | undefined;
-  let starting: { fileId: string; intentId: string } | undefined;
+  let starting: { fileId: string; intentId: string; owner: string } | undefined;
   let stopped = false;
   let claudeSettings = Promise.resolve(), codexSettings = Promise.resolve();
 
@@ -158,8 +159,13 @@ export function createReviewBridge(args: {
   }
 
   async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
-    const reservation = { fileId: message.fileId, intentId: message.intentId };
+    const reservation = { fileId: message.fileId, intentId: message.intentId, owner: randomUUID() };
+    const superseded = starting;
     starting = reservation;
+    if (superseded) {
+      deactivate({ owner: superseded.owner, reason: "Pending start superseded" });
+      send(superseded.fileId, { kind: "error", intentId: superseded.intentId, message: "Pending start was superseded by another file." });
+    }
     endConversation("Started another session");
     const dir = workspaceFor(message.fileId, message.fileName);
     const settings = readSettings();
@@ -167,19 +173,22 @@ export function createReviewBridge(args: {
     const provider = providers[providerId];
     if (!provider) {
       if (starting === reservation) starting = undefined;
-      return send(message.fileId, { kind: "error", message: `${providerId === "codex" ? "Codex" : providerId} is not available in this build.` });
+      deactivate({ owner: reservation.owner, reason: "Provider unavailable" });
+      return send(message.fileId, { kind: "error", intentId: reservation.intentId, message: `${providerId === "codex" ? "Codex" : providerId} is not available in this build.` });
     }
     const previous = message.resume
       ? readSessions(dir).find(item => item.provider === message.resume!.provider && item.sessionId === message.resume!.sessionId)
       : undefined;
     if (message.resume && !previous) {
       if (starting === reservation) starting = undefined;
-      return send(message.fileId, { kind: "error", message: "Unknown provider-qualified session" });
+      deactivate({ owner: reservation.owner, reason: "Unknown resume session" });
+      return send(message.fileId, { kind: "error", intentId: reservation.intentId, message: "Unknown provider-qualified session" });
     }
     const record = previous ?? freshRecord(message, providerId);
-    const owner = randomUUID();
+    const owner = reservation.owner;
     activeOwners.add(owner);
     let dispatchFailed = false;
+    let appliedSettings = settings.providers[providerId];
     try {
       const activated = await activateProvider({
         provider,
@@ -192,6 +201,15 @@ export function createReviewBridge(args: {
           baseRecord: record,
         },
         isCurrent: () => starting === reservation,
+        reconcile: async session => {
+          while (starting === reservation) {
+            const latest = readSettings().providers[providerId];
+            if (samePreference(appliedSettings, latest)) return;
+            await session.applySettings({ settings: latest });
+            if (starting !== reservation) return;
+            appliedSettings = latest;
+          }
+        },
         accept: session => {
           const current: Conversation = { owner, intentId: message.intentId, fileId: message.fileId, dir, record, session, busy: true, textItems: new Map() };
           starting = undefined;
@@ -204,7 +222,8 @@ export function createReviewBridge(args: {
               conv = undefined;
               deactivate({ owner, reason: "Initial message failed" });
               session.close();
-              send(message.fileId, { kind: "error", message: `Session failed to accept the initial message: ${error instanceof Error ? error.message : String(error)}` });
+              send(message.fileId, { kind: "error", intentId: reservation.intentId,
+                message: `Session failed to accept the initial message: ${error instanceof Error ? error.message : String(error)}` });
             } else args.log("stale initial message failure", error);
             throw error;
           }
@@ -217,8 +236,11 @@ export function createReviewBridge(args: {
     } catch (error) {
       deactivate({ owner, reason: "Session failed to start" });
       if (dispatchFailed) return;
-      if (starting === reservation) { starting = undefined; throw error; }
-      args.log("stale provider start failed", error);
+      if (starting === reservation) {
+        starting = undefined;
+        send(message.fileId, { kind: "error", intentId: reservation.intentId,
+          message: `Session failed before the first message: ${error instanceof Error ? error.message : String(error)}` });
+      } else args.log("stale provider start failed", error);
     }
   }
 
@@ -302,8 +324,9 @@ export function createReviewBridge(args: {
     const selected = message.selectedProvider ?? before.provider;
     const selectedChanged = selected !== before.provider;
     const target = conv;
+    let nativeChanged = false;
     if (target?.record.provider === message.provider && preferenceChanged) {
-      try { await target.session.applySettings({ settings: message.settings }); }
+      try { await target.session.applySettings({ settings: message.settings }); nativeChanged = true; }
       catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         publishSettledSettings(ws);
@@ -315,14 +338,27 @@ export function createReviewBridge(args: {
         sendSettingsResult(ws, { requestId: message.requestId, accepted: false, error: "Session changed before settings were committed." });
         return;
       }
-      if (target.health) target.health = { ...target.health, model: message.settings.model || target.health.model };
     }
     const latest = readSettings();
     const next: Settings = {
       provider: selectedChanged ? selected : latest.provider,
       providers: { ...latest.providers, [message.provider]: preferenceChanged ? message.settings : latest.providers[message.provider] },
     };
-    if (preferenceChanged || selectedChanged) saveSettings(next);
+    try { if (preferenceChanged || selectedChanged) saveSettings({ settings: next, io: args.settingsIo }); }
+    catch (error) {
+      let reason = `Settings were not saved: ${error instanceof Error ? error.message : String(error)}`;
+      if (nativeChanged && target && conv === target) {
+        try { await target.session.applySettings({ settings: before.providers[message.provider] }); }
+        catch (rollbackError) {
+          if (conv === target) { endConversation("Settings rollback failed"); reason += `; native rollback failed and session was closed: ${String(rollbackError)}`; }
+          else args.log("stale settings rollback failed", rollbackError);
+        }
+      }
+      publishSettledSettings(ws);
+      sendSettingsResult(ws, { requestId: message.requestId, accepted: false, error: reason });
+      return;
+    }
+    if (nativeChanged && target?.health) target.health = { ...target.health, model: message.settings.model || target.health.model };
     if (preferenceChanged) providers[message.provider]?.dispose();
     if (selectedChanged && (!preferenceChanged || before.provider !== message.provider)) providers[before.provider]?.dispose();
     if (ws.fileId && (selectedChanged || (preferenceChanged && next.provider === message.provider))) {
@@ -415,7 +451,10 @@ export function createReviewBridge(args: {
       }
       case "close":
         if (!ws.fileId || clients.get(ws.fileId) !== ws) return;
-        if (starting?.fileId === ws.fileId) starting = undefined;
+        if (starting?.fileId === ws.fileId) {
+          const abandoned = starting; starting = undefined;
+          deactivate({ owner: abandoned.owner, reason: message.reason });
+        }
         if (conv?.fileId === ws.fileId) endConversation(message.reason);
         return;
       case "settings": return serializeSettings(ws, message);
@@ -464,6 +503,7 @@ export function createReviewBridge(args: {
     shutdown: async () => {
       if (stopped) return;
       stopped = true;
+      if (starting) deactivate({ owner: starting.owner, reason: "Bridge shutting down" });
       starting = undefined;
       endConversation("Bridge shutting down");
       for (const provider of Object.values(providers)) provider?.dispose();

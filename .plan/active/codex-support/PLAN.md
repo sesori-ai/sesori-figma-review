@@ -251,9 +251,9 @@ installers, and Windows support is out of scope. Preserve the existing automatic
 ## Implementation series
 
 Soft cap: 1,500 changed lines per PR including tests, moves, generated files and docs. These are estimates, not a
-reason to compress code or skip parity. Parent grant `09ed2974-d15a-4d3c-8dea-d7734e875966` approved a Step-3-only
-ceiling of 2,750 for external-review settings/Stop/reconnect/wire-validation/smoke-ownership repairs and proof;
-this exception does not apply to later steps. If a slice grows beyond its coherent boundary, update the fixed series
+reason to compress code or skip parity. Parent grant `c24ec6fb-d7df-4e86-8334-cbe7fd8b43ba` approved a Step-3-only
+ceiling of 2,950, targeting <=2,920, for start/settings/History ownership repairs and full regression proof;
+this supersedes prior Step 3 grants only and does not apply to later steps. If a slice grows beyond its coherent boundary, update the fixed series
 before opening it. No bulk vendoring of the 847-file generated protocol: use a focused validated projection and
 reproducible inspection against the qualified schema. No hand edits to generated files.
 
