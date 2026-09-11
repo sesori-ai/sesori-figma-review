@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,17 +19,14 @@ import {
 } from "./codex-execution.ts";
 
 class FakeChild extends EventEmitter implements CodexChild {
-  readonly stdin: PassThrough;
+  readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly sent: Record<string, unknown>[] = [];
   killed = false;
   private input = "";
-  constructor(
-    readonly onMessage?: (message: Record<string, unknown>, child: FakeChild) => void,
-    stdin = new PassThrough(),
-  ) {
-    super(); this.stdin = stdin;
+  constructor(readonly onMessage?: (message: Record<string, unknown>, child: FakeChild) => void) {
+    super();
     this.stdin.on("data", chunk => {
       this.input += String(chunk);
       for (;;) {
@@ -121,6 +119,17 @@ mkdirSync(join(unsafeSeed, "notes"), { recursive: true }); writeFileSync(outside
 symlinkSync(outsideSeed, join(unsafeSeed, "CLAUDE.md"));
 assert.throws(() => provisionCodexWorkspace({ dir: unsafeSeed }), /unsafe Codex seed file/);
 assert.equal(readFileSync(outsideSeed, "utf8"), "outside-secret");
+const fifoRoot = join(root, "fifo-seed"), fifoSeed = join(fifoRoot, "CLAUDE.md");
+mkdirSync(join(fifoRoot, "notes"), { recursive: true }); execFileSync("mkfifo", [fifoSeed]);
+const workspaceUrl = JSON.stringify(new URL("../workspace.ts", import.meta.url).href);
+const fifoScript = [
+  `import { provisionCodexWorkspace as p } from ${workspaceUrl};`,
+  `p({ dir: ${JSON.stringify(fifoRoot)} });`,
+].join("");
+const fifoResult = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", fifoScript],
+  { encoding: "utf8", timeout: 2_000 });
+assert.equal(fifoResult.error, undefined); assert.notEqual(fifoResult.status, 0);
+assert.match(fifoResult.stderr, /unsafe Codex seed file/);
 const hardlinkRoot = join(root, "hardlink-skill"), outsideSkill = join(root, "outside-skill");
 mkdirSync(join(hardlinkRoot, "notes"), { recursive: true }); writeFileSync(join(hardlinkRoot, "CLAUDE.md"), "seed");
 provisionCodexWorkspace({ dir: hardlinkRoot }); writeFileSync(outsideSkill, "outside-skill");
@@ -201,6 +210,24 @@ assert.deepEqual(unsupportedChild.sent.at(-1), {
 });
 unsupported.dispose();
 
+const retiredNotifications: string[] = [], retiredRequests: string[] = [];
+const retirementChild = new FakeChild((message, server) => {
+  if (message.method === "initialize") server.send({ id: message.id,
+    result: { userAgent: "codex/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "linux" } });
+});
+let retirementClient: CodexClient;
+retirementClient = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => retirementChild,
+  onNotification: message => {
+    retiredNotifications.push(message.method); if (message.method === "retire") retirementClient.dispose();
+  }, onRequest: async request => { retiredRequests.push(request.method); return {}; } });
+await retirementClient.connect();
+retirementChild.stdout.write([
+  { method: "retire", params: {} }, { method: "after-retirement", params: {} },
+  { id: "late-server", method: "after-retirement/request", params: {} },
+].map(message => JSON.stringify(message)).join("\n") + "\n");
+await wait();
+assert.deepEqual(retiredNotifications, ["retire"]); assert.deepEqual(retiredRequests, []);
+
 async function connectedFixture(args?: { maxLineBytes?: number; maxOutputBytes?: number }) {
   const fixture = new FakeChild();
   const fixtureClient = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => fixture,
@@ -218,7 +245,10 @@ await wait();
 const fragmentedResponse = { id: fragmented.fixture.sent.at(-1)?.id, result: "héllo" };
 const fragmentedLine = Buffer.from(`${JSON.stringify(fragmentedResponse)}\r\n`);
 for (const byte of fragmentedLine) fragmented.fixture.stdout.write(Buffer.from([byte]));
-assert.equal(await fragmentedPending, "héllo"); fragmented.fixtureClient.dispose();
+assert.equal(await fragmentedPending, "héllo");
+const buffered = Reflect.get(fragmented.fixtureClient, "stdoutBuffer");
+assert.ok(buffered && typeof buffered === "object"); assert.deepEqual(Reflect.get(buffered, "newlines"), []);
+fragmented.fixtureClient.dispose();
 const malformed = await connectedFixture();
 const malformedPending = malformed.fixtureClient.request({ method: "pending", params: {}, parse: String });
 await wait();

@@ -56,7 +56,7 @@ const replaceOwnedFile = (path: string, content: string) => {
 };
 const readSeedFile = (path: string) => {
   let fd: number;
-  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (error) { throw new Error(`Refusing unsafe Codex seed file: ${path}`, { cause: error }); }
   try {
     if (!fstatSync(fd).isFile()) throw new Error(`Refusing unsafe Codex seed file: ${path}`);

@@ -53,6 +53,7 @@ class LineAccumulator {
     const end = this.newlines[this.nextNewline];
     if (end === undefined) return;
     this.nextNewline++;
+    if (this.nextNewline === this.newlines.length) { this.newlines = []; this.nextNewline = 0; }
     const length = end - this.consumed;
     const parts = this.chunks.flatMap(chunk => {
       const from = Math.max(this.consumed - chunk.start, 0);
@@ -199,6 +200,7 @@ export class CodexClient {
     this.stdoutBuffer.push(bytes);
     const limit = this.args.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
     for (;;) {
+      if (this.terminalError) return;
       const frame = this.stdoutBuffer.takeLine();
       if (!frame) {
         if (this.stdoutBuffer.length > limit) this.terminate(new Error("Codex stdout line exceeds bounded line limit"));
