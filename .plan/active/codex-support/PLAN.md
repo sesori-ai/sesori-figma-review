@@ -1,9 +1,11 @@
 # Codex support — full user-facing parity
 
-Status: Steps 1 and 2 squash-merged as `232048a` and `ece1379d6768ecc032d6f030933034007d357910`. Older cutover
-checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not merged.
-Step 3's reviewed queue/history/transport/smoke lifetime, pending-native cancellation, retained attached-History,
-and final smoke-cleanup fixes are implemented locally; focused independent review remains required before publication.
+Status: Steps 1–3 squash-merged as `232048a`, `ece1379d6768ecc032d6f030933034007d357910`, and
+`b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4; reviewed head `80707c2`, merge tree verified identical).
+Older cutover checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not
+merged. Step 4 is implemented locally from the verified Step 3 receipt with deterministic boundary proof. Approved
+native qualification stopped at its first fail-closed boundary: the 0.154.0 candidate closed stdout before returning
+`initialize`; enforcement was therefore not run. Step 4 remains blocked on concrete native startup diagnosis.
 
 ## Goal and locked user direction
 
@@ -26,9 +28,10 @@ uses `sesori-plan-worker`. Borrow their planning, review, and regression-proof p
 Dart/Flutter workspace layout or mandatory monorepo layers.
 
 Execution authorization: for this series, the user's latest instruction overrides the previous human-only merge
-rule. Automatically squash-merge each PR when its current head is ready for human review, then continue to the next
-step until the plan is completed. Monitor every PR; keep checks, feedback and mergeability current and use the
-reviewed head when merging. Do not bypass protection or merge after a readiness regression. Keep at most one PR open
+rule. Use automatic GitHub reviews only; do not request manual reviews or add extra review-completion gates.
+Automatically squash-merge each PR when its current head is ready for human review, then continue to the next step
+until the plan is completed. Monitor every PR; keep checks, feedback and mergeability current and use the reviewed
+head when merging. Do not bypass protection or merge after a readiness regression. Keep at most one PR open
 and one local successor in progress. Full-parity, security and retirement gates remain mandatory; a genuine missing
 capability, unavailable test access or required user decision is a blocker, not permission to weaken those gates.
 Existing Claude/Codex sign-ins are authorized for bounded isolated tests without credential/config copying. Routine

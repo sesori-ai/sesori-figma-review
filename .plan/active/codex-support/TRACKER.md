@@ -1,8 +1,9 @@
 # Codex support tracker
 
 Plan: [PLAN.md](PLAN.md). Scope: full user-facing parity on Claude and Codex; Codex-native sandboxed file/command
-access approved. The user authorized executing the whole series: automatically squash-merge each PR once ready
-for human review and continue without waiting for manual merges. Full verification and parity gates still apply.
+access approved. The user authorized executing the whole series: use automatic GitHub reviews only, automatically squash-merge each
+PR once ready for human review, and continue without manual review requests or extra review-completion gates. Full
+verification and parity gates still apply.
 Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 ## Fixed PR series
@@ -11,8 +12,8 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
-| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Cancellation, attached-History and final smoke-cleanup fixes implemented locally; focused review required |
-| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4); reviewed head `80707c2`, merge tree identical |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Local implementation complete and deterministic proof passed; native 0.154.0 candidate closed stdout before `initialize`, so qualification is blocked and enforcement was not run |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
 | 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
@@ -27,6 +28,14 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 - Installed `codex-cli 0.154.0` experimental generated schema inspected, not hand-edited or committed.
 - No live Codex/Claude turn, native security test, paid smoke, Figma test, or account/config modification performed
   during Step 1 planning.
+
+## Step 3 receipt
+
+- PR #4 is squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c`; reviewed head `80707c2` and merge
+  trees were verified identical (`5bb1f96b317f1b68e73c5963a2f118077f0f4afc`). Step 4 started from that clean
+  fetched `origin/master` checkpoint.
+- Publication/review coordination uses automatic GitHub reviews only. Parent owns all GitHub actions and merges;
+  implementation checkpoints do not wait for manual review requests.
 
 ## Step 2 replacement foundation
 
@@ -49,6 +58,26 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   hard ceiling 2,975, preferred <=2,970, for attached-History/final smoke cleanup and proof; later budgets are unchanged.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
+
+## Step 4 local evidence
+
+- Added lazy owned stdio lifecycle, bounded NDJSON framing, correlated client/server RPC, validated 0.154.0 consumed
+  projections, and zero-turn readiness checks for exact version, supported auth, image/model efforts, profile presence,
+  and effective config isolation.
+- Bridge-built named policy grants workspace and optional `APP_REPO` reads, grants writes only to canonical `notes/`,
+  disables command networking and unrelated apps/plugins/MCP/hooks/subagents/web tools, and routes eligible approvals
+  to the user. Unsafe, merged, or unqualified configuration fails closed.
+- Codex workspace provisioning is explicit: create-once `AGENTS.md` seeded from existing instructions, bridge-owned
+  `.agents/skills/review-flow/SKILL.md` refresh, and symlink/path safety checks. Existing user files stay unchanged.
+- Deterministic fake-child/static fixtures cover split/coalesced frames, bidirectional RPC, typed malformed responses,
+  stderr, timeouts, exit/EOF/disposal, line bounds, unsupported requests, config leakage, and workspace preservation.
+  These fixtures do not prove native sandbox enforcement, real auth/model behavior, or Figma.
+- An exactly bounded native probe was approved and attempted once. The 0.154.0 App Server candidate closed stdout
+  before returning `initialize`; no account/model/profile/config result was consumed. Per fail-closed approval, the
+  worker did not retry or run Part 2 enforcement. The driver also reported `kill EPERM` while checking the detached
+  process group after stdout closure; an exact fixture-path process scan found no remaining match, but the owned
+  fixture was retained in the run artifact output because exit ownership was not observed strongly enough to authorize
+  deletion. `0.154.0` remains a schema/protocol candidate, not native support.
 
 ## Qualification gates before user-facing Codex exposure
 
