@@ -85,7 +85,7 @@ Per-file workspace (`~/.local/share/sesori-figma-review/files/<fileId>/`), the a
 <summary><b>Troubleshooting</b></summary>
 
 - **"bridge offline"** in the header: the panel shows the install and start commands. The plugin reconnects every 2 seconds and picks the conversation back up.
-- **Versions differ** notice: `npm install -g @sesori/figma-review@latest`, then update the plugin ([Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review) updates itself; a manifest-imported copy updates when the bridge restarts).
+- **Versions differ** notice: `npm install -g @sesori/figma-review@latest`, then update the plugin. The [Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review) copy updates itself; a manifest-imported one updates when the bridge restarts — except a copy imported before 0.3.1, whose manifest points at the old `~/.sesori-review/plugin/`, so re-import it from the path the bridge prints now.
 - **Claude failed to start**: run `claude` in a terminal to check auth. The bridge terminal shows the error.
 - **Figma MCP off**: enable the desktop MCP server in Dev Mode, or ignore it.
 - **Annotations fail**: free Figma plan, or a node type that cannot hold annotations (groups, some vectors).
