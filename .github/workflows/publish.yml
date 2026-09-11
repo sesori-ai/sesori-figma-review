@@ -40,8 +40,8 @@ jobs:
 
       - run: npm run check
 
-      # Both steps skip work that already exists, so re-running the job after a partial
-      # release finishes it instead of failing on the immutable npm version.
+      # Re-running the job after a partial release finishes it: the publish is skipped once
+      # that version is on the registry, and the release is created or its notes refreshed.
       - name: Publish to npm
         run: |
           version=${GITHUB_REF_NAME#v}
@@ -54,4 +54,4 @@ jobs:
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md || gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
