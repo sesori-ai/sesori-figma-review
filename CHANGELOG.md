@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `npm run bump <X.Y.Z>` writes the version into the three `package.json` files and the lockfile, then cuts the `[Unreleased]` section under that version.
+- `npm run bump <X.Y.Z>` writes the version into the three `package.json` files and the lockfile, then cuts the `[Unreleased]` section under that version. It refuses what cannot become a release: a version older than the current one, an empty `[Unreleased]`, and entries stranded there after that version was already cut.
 - Pushing a `vX.Y.Z` tag publishes the npm package: `.github/workflows/publish.yml` checks the tag against the manifests, runs `npm run check`, publishes with provenance through npm trusted publishing (OIDC, no token stored in the repo) and opens a GitHub Release carrying that version's changelog section.
 - `AGENTS.md` holds the repository conventions, including the rule that every PR updates this changelog; `CLAUDE.md` points at it.
 
