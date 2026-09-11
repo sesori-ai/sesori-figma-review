@@ -1,5 +1,6 @@
 {
   "name": "Sesori Review",
+  "id": "1680238164100658906",
   "api": "1.0.0",
   "main": "dist/code.js",
   "ui": "dist/ui.html",

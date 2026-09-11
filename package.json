@@ -1,6 +1,6 @@
 {
   "name": "@sesori/figma-review",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Claude reviews your Figma prototype from inside Figma: the flow, then every screen, asking at the right spot and writing Dev Mode annotations. `npm install -g @sesori/figma-review`, then `sesori-figma-review` starts the local bridge.",
   "license": "Apache-2.0",
   "author": "Sesori",
@@ -39,7 +39,8 @@
   "scripts": {
     "build": "npm run build -w plugin && npm run build -w bridge",
     "bridge": "npm run start -w bridge",
-    "check": "npm run check --workspaces",
+    "check": "npm run check --workspaces && node scripts/bump.check.mjs",
+    "bump": "node scripts/bump.mjs",
     "prepack": "npm run build"
   },
   "dependencies": {

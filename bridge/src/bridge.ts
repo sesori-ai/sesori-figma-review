@@ -26,6 +26,6 @@ process.once("SIGTERM", () => { void app.shutdown(); });
 
 const manifest = installPlugin();
 console.log(manifest
-  ? `\nSesori Review is running. Keep this terminal open.\n\nFirst time? Add the plugin to Figma desktop once:\n  Plugins → Development → Import plugin from manifest… → ${manifest}\nThen run it from Plugins → Development → Sesori Review.\n`
+  ? `\nSesori Review is running. Keep this terminal open.\n\nFirst time? Install the plugin once from the Figma Community:\n  https://www.figma.com/community/plugin/1680238164100658906/sesori-review\nThen run it in Figma desktop from Plugins → Sesori Review.\n\nRunning from source instead? Plugins → Development → Import plugin from manifest… → ${manifest}\n`
   : "\nPlugin build not found (run `npm run build`); the bridge is up but there is nothing to import into Figma.\n");
 if (!hasClaudeAuth()) console.log("No Claude credentials found: run `claude` once to sign in, or export ANTHROPIC_API_KEY. The plugin will show \"Claude failed to start\" until then.\n");
