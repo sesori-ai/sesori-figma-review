@@ -10,8 +10,8 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | Step | Exact title | State |
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
-| 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | PR #3 feedback fixed/verified locally; pending parent push and current-head review |
-| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Not started; coordinated activation from preserved checkpoint obligations |
+| 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Cancellation, attached-History and final smoke-cleanup fixes implemented locally; focused review required |
 | 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
@@ -30,12 +30,23 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 
 ## Step 2 replacement foundation
 
-- Full implementation stays at `origin/codex-support-step-2` (`f7265eb`); superseded PR #2 was not merged.
+- Predecessor receipt confirmed: PR #3 squash-merged as `ece1379d6768ecc032d6f030933034007d357910`; Step 3 started from fetched `origin/master` at that commit.
+- Full older cutover reference stays at `origin/codex-support-step-2` (`f7265eb`); superseded PR #2 was not merged.
 - Dormant foundation adds normalized contracts, neutral tools and Claude tests; released bridge/workspace/selfcheck stay
   byte-identical to master, with catalog/history reuse adapter-only.
 - Step 3 retains all ownership, protocol, view, close, settings, accounting, smoke and qualification obligations below,
   plus exact legacy catalog/history adoption, legacy SDK removal and the UUID integration assertion.
-- Historical smokes used Claude Haiku/low, isolated homes/free ports and four-turn/$0.10 limits.
+- The `9bf1067` Step 3 live smoke used Claude Haiku/low, owned home, OS-assigned non-3055 ports and four-turn/$0.10
+  limits. It proved steering, Stop/cards, reconnect/history, resumed-only output, 3 turns/$0.0248175 and cleanup.
+  Follow-up queue/history/transport/smoke-lifetime fixes use deterministic proof only; no second paid smoke was run.
+- First Step 3 review disposition: accepted provider-change derivation, handshake admission, and production-seam
+  evidence findings. Qualified the settings finding: actual Claude disposal broadcasts health, so no outage was
+  proven, but bridge-owned settled publication must not rely on that adapter callback. Parent also required pending-start/fresh
+  attachment history and terminal ownership fixes. Deterministic tests now use ordinary dependency injection through
+  the production receive/onUp/pump paths. Actual bundled-UI admission/history/settings/card/replay fixes and explicit
+  bridge-owned settled-settings publication are now covered; fresh independent review remains pending.
+- Recovery addendum authority supersedes historical grant `c24ec6fb-d7df-4e86-8334-cbe7fd8b43ba` for Step 3 only:
+  hard ceiling 2,975, preferred <=2,970, for attached-History/final smoke cleanup and proof; later budgets are unchanged.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
 

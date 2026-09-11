@@ -700,14 +700,14 @@ writeFileSync(join(transcriptDir, `${nativeSession}.jsonl`), [
   ] } },
   { type: "assistant", message: { content: [{ type: "thinking", thinking: "hidden" }, { type: "image", source: { data: "hidden" } }, { type: "tool_use", id: "q", name: "mcp__figma__ask_user", input: { question: "Next?" } }] } },
   { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "q", content: "Next\n[Current selection: none]" }] } },
-  { type: "assistant", message: { content: [{ type: "text", text: "Done" }] } },
+  { type: "assistant", message: { id: "message-1", content: [{ type: "text", text: "Done" }] } },
 ].map(value => JSON.stringify(value)).join("\n"));
 assert.deepEqual(readClaudeTranscript({ dir, sessionId: nativeSession }), [
   { role: "user", text: "Review." },
   { role: "user", text: "Array text." },
-  { role: "tool", name: "mcp__figma__ask_user", input: { question: "Next?" } },
+  { role: "tool", name: "mcp__figma__ask_user", input: { question: "Next?" }, itemId: "q" },
   { role: "answer", text: "Next" },
-  { role: "assistant", text: "Done" },
+  { role: "assistant", text: "Done", itemId: `${nativeSession}:message-1:0` },
 ]);
 assert.deepEqual(readClaudeTranscript({ dir, sessionId: "33333333-3333-4333-8333-333333333333" }), []);
 assert.throws(() => readClaudeTranscript({ dir, sessionId: "../../outside" }), /Invalid Claude native session id/);
