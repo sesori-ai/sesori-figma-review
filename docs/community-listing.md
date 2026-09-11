@@ -1,5 +1,7 @@
 # Figma Community listing
 
+Live at <https://www.figma.com/community/plugin/1680238164100658906/sesori-review> (plugin `id` in `plugin/manifest.json`).
+
 Copy for the Community page. Figma's description field is rich text: headings, bold, bullet lists and links paste from this file.
 
 ## Name

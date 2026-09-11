@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 — 2026-09-11
+
+- The plugin is on the [Figma Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review). Installing it no longer needs the manifest import; the bridge start banner points at the listing and keeps the manifest path for running from source.
+- `plugin/manifest.json` carries the Community plugin `id`, so updates publish from this repo.
+
 ## 0.3.0 — 2026-09-10
 
 - Published as **`@sesori/figma-review`**: `npm install -g @sesori/figma-review` then `sesori-figma-review` (or `npx -y @sesori/figma-review`) starts the bridge, copies the plugin to `~/.sesori-review/plugin/` and prints the manifest path to import into Figma.

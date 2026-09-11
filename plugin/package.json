@@ -1,7 +1,7 @@
 {
   "name": "sesori-review-plugin",
-  "version": "0.3.0",
-  "description": "Sesori Review \u2014 Figma plugin (sandbox + UI)",
+  "version": "0.3.1",
+  "description": "Sesori Review — Figma plugin (sandbox + UI)",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",

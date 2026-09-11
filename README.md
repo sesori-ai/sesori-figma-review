@@ -3,6 +3,8 @@
 <p align="center"><b>Claude reviews your Figma prototype with you, inside Figma.</b><br>
 It walks the canvas screen by screen, asks before it assumes, and leaves Dev Mode annotations your developers can build from.</p>
 
+<p align="center"><a href="https://www.figma.com/community/plugin/1680238164100658906/sesori-review"><b>Get it on the Figma Community →</b></a></p>
+
 <p align="center"><img src="https://raw.githubusercontent.com/sesori-ai/sesori-figma-review/master/docs/screenshot.png" alt="The plugin panel: empty state, a question about the selected screen with Claude focusing and reading it, and a selection review with findings"></p>
 
 ## Why you'd want this
@@ -24,11 +26,11 @@ npm install -g @sesori/figma-review   # once
 sesori-figma-review                   # every time you review
 ```
 
-It prints the path of a plugin manifest, something like `~/.sesori-review/plugin/manifest.json`. (No install? `npx -y @sesori/figma-review` does both in one go.)
+(No install? `npx -y @sesori/figma-review` does both in one go.)
 
-**2. Add the plugin to Figma** (once): **Plugins → Development → Import plugin from manifest…** and pick that file.
+**2. Add the plugin to Figma** (once): install [**Sesori Review** from the Figma Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review). Running from source instead? The bridge prints a manifest path (`~/.sesori-review/plugin/manifest.json`) for **Plugins → Development → Import plugin from manifest…**.
 
-**3. Review**: open a file, run **Plugins → Development → Sesori Review**, click **Review flow**. The header dot turns green when the bridge and Claude are ready.
+**3. Review**: open a file, run **Plugins → Sesori Review**, click **Review flow**. The header dot turns green when the bridge and Claude are ready.
 
 Next time you only need step 1 and step 3.
 
@@ -83,7 +85,7 @@ Per-file workspace (`~/.sesori-review/files/<fileId>/`), the agent's working dir
 <summary><b>Troubleshooting</b></summary>
 
 - **"bridge offline"** in the header: the panel shows the install and start commands. The plugin reconnects every 2 seconds and picks the conversation back up.
-- **Versions differ** notice: `npm install -g @sesori/figma-review@latest`, then update the plugin from Figma (Community) or by restarting the bridge (manifest import).
+- **Versions differ** notice: `npm install -g @sesori/figma-review@latest`, then update the plugin ([Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review) updates itself; a manifest-imported copy updates when the bridge restarts).
 - **Claude failed to start**: run `claude` in a terminal to check auth. The bridge terminal shows the error.
 - **Figma MCP off**: enable the desktop MCP server in Dev Mode, or ignore it.
 - **Annotations fail**: free Figma plan, or a node type that cannot hold annotations (groups, some vectors).
@@ -105,7 +107,7 @@ npm run smoke -w bridge   # fake plugin, one real turn through the bridge, no Fi
 
 Layout: `plugin/` (Figma sandbox + UI iframe, bundled by `plugin/build.mjs`), `bridge/` (WebSocket server + Agent SDK session manager), `shared/protocol.ts` (the wire protocol). Decisions in [PLAN.md](PLAN.md).
 
-**Releasing**: bump `version` in the three `package.json` files, add a [CHANGELOG.md](CHANGELOG.md) entry, then `npm publish --access public` from the repo root (`prepack` builds everything). For the Figma Community listing use `plugin/assets/` (icon, cover); Figma assigns the plugin `id` on first publish.
+**Releasing**: `npm version <v> --workspaces --include-workspace-root --no-git-tag-version`, add a [CHANGELOG.md](CHANGELOG.md) entry, then `npm publish --access public` from the repo root (`prepack` builds everything). The Figma plugin ships separately: import `plugin/manifest.json` in the desktop app and **Publish new version** — its `id` is the [Community listing](https://www.figma.com/community/plugin/1680238164100658906/sesori-review), listing copy is in [docs/community-listing.md](docs/community-listing.md) and its art in `plugin/assets/`.
 </details>
 
 ## License
