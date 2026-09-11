@@ -286,8 +286,11 @@ function renderSessions() {
     title.append(el("b", "", s.title), el("span", "", `${provider} · ${s.pageName} · ${s.updatedAt.slice(0, 16).replace("T", " ")} · ${sessionCostLabel({ session: s, precision: 2 })} · ${s.turns} turn${s.turns === 1 ? "" : "s"}`));
     row.append(title, btn("Open", () => {
       if (!admit("History was not opened because the bridge is not connected.")) return;
-      leaveView("Opened a History session");
-      requestHistory({ session: s, attached: false }); sessionsEl.hidden = true;
+      const disposition = view.historyRow({ session: s });
+      if (disposition === "retain") { sessionsEl.hidden = true; return; }
+      const attached = !opened && disposition === "attached";
+      if (!attached) leaveView("Opened a History session");
+      requestHistory({ session: s, attached, retainSession: attached }); sessionsEl.hidden = true;
     }));
     sessionsEl.append(row);
   }

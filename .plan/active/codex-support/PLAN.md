@@ -2,8 +2,8 @@
 
 Status: Steps 1 and 2 squash-merged as `232048a` and `ece1379d6768ecc032d6f030933034007d357910`. Older cutover
 checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not merged.
-Step 3's reviewed queue/history/transport/smoke-lifetime and pending-native cancellation fixes are implemented
-locally; another focused independent review remains required before publication.
+Step 3's reviewed queue/history/transport/smoke lifetime, pending-native cancellation, retained attached-History,
+and final smoke-cleanup fixes are implemented locally; focused independent review remains required before publication.
 
 ## Goal and locked user direction
 
@@ -251,9 +251,9 @@ installers, and Windows support is out of scope. Preserve the existing automatic
 ## Implementation series
 
 Soft cap: 1,500 changed lines per PR including tests, moves, generated files and docs. These are estimates, not a
-reason to compress code or skip parity. Parent grant `c24ec6fb-d7df-4e86-8334-cbe7fd8b43ba` approved a Step-3-only
-ceiling of 2,950, targeting <=2,920, for start/settings/History ownership repairs and full regression proof;
-this supersedes prior Step 3 grants only and does not apply to later steps. If a slice grows beyond its coherent boundary, update the fixed series
+reason to compress code or skip parity. The recovery addendum grant supersedes historical grant
+`c24ec6fb-d7df-4e86-8334-cbe7fd8b43ba` for Step 3 only: hard ceiling 2,975, preferred target <=2,970, covering
+attached-History and final smoke-cleanup repairs with readable proof. Later-step budgets are unchanged. If a slice grows beyond its coherent boundary, update the fixed series
 before opening it. No bulk vendoring of the 847-file generated protocol: use a focused validated projection and
 reproducible inspection against the qualified schema. No hand edits to generated files.
 

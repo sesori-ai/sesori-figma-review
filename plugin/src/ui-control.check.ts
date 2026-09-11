@@ -162,6 +162,8 @@ for (const attached of [true, false]) {
   adopted.get("input").value = `queued-${attached}`; adopted.get("send").onclick?.();
   adopted.deliver({ kind: "started", intentId: `adopted-${attached}`, session });
   const adoptedOpen = adopted.sent("open").slice(-1)[0] as { intentId: string }; assert.equal(adopted.sent("user").length, 0);
+  if (attached) { adopted.deliver({ kind: "sessions", sessions: [session] }); adopted.get("btn-history").onclick?.();
+    adopted.button(adopted.get("sessions"), "Open").onclick?.(); assert.equal(adopted.sent("open").length, 1); }
   adopted.deliver({ kind: "history", intentId: adoptedOpen.intentId, session, attached, messages: [{ role: "assistant", text: "context" }] });
   assert.equal(adopted.sent("user").length, attached ? 1 : 0);
   if (attached) { const visible = text(adopted.get("chat")); assert.equal(count(visible, `queued-${attached}`), 1); assert.ok(visible.indexOf("context") < visible.indexOf(`queued-${attached}`)); }
@@ -196,6 +198,7 @@ const rows = new Harness(), otherSession = { ...session, sessionId: "22222222-22
 rows.connect(); rows.deliver({ kind: "sessions", sessions: [session, otherSession] }); rows.get("btn-history").onclick?.();
 rows.get("sessions").querySelectorAll("button")[0]!.onclick?.();
 const rowFirst = rows.sent("open").slice(-1)[0] as { intentId: string };
+rows.get("btn-history").onclick?.(); rows.get("sessions").querySelectorAll("button")[0]!.onclick?.(); assert.equal(rows.sent("open").length, 1);
 rows.get("input").value = "click"; rows.get("send").onclick?.(); assert.equal(rows.get("input").value, "click");
 rows.get("input").onkeydown?.({ key: "Enter", shiftKey: false, preventDefault() {} }); assert.equal(rows.get("input").value, "click");
 assert.equal(rows.sent("user").length + rows.sent("start").length, 0);
@@ -206,6 +209,34 @@ rows.deliver({ kind: "history", intentId: rowFirst.intentId, session: otherSessi
 assert.doesNotMatch(text(rows.get("chat")), /stale row/);
 rows.deliver({ kind: "history", intentId: rowSecond.intentId, session, attached: false, messages: [{ role: "assistant", text: "current row" }] });
 assert.match(text(rows.get("chat")), /current row/);
+
+// Opening the actually attached row retains its native turn, cards and buffered text; qualified foreign rows still replace it.
+for (const currentBusy of [false, true]) {
+  const retained = new Harness(); retained.connect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: currentBusy });
+  const initial = retained.sent("open").slice(-1)[0] as { intentId: string };
+  retained.deliver({ kind: "history", intentId: initial.intentId, session, attached: true, messages: [] });
+  if (currentBusy) retained.deliver({ kind: "tool", id: "retained-card", tool: "ask_user", args: { question: "Still here?", options: ["Yes"] } });
+  retained.deliver({ kind: "sessions", sessions: [session] }); retained.get("btn-history").onclick?.(); retained.button(retained.get("sessions"), "Open").onclick?.();
+  assert.equal(retained.sent("close").length, 0); assert.equal(retained.sent("open").length, 2);
+  retained.get("btn-history").onclick?.(); retained.button(retained.get("sessions"), "Open").onclick?.(); assert.equal(retained.sent("open").length, 2);
+  if (currentBusy) retained.deliver({ kind: "event", event: { type: "text_start", session, itemId: "ongoing" } });
+  if (currentBusy) retained.deliver({ kind: "event", event: { type: "text_delta", session, itemId: "ongoing", text: "ongoing text" } });
+  const reopened = retained.sent("open").slice(-1)[0] as { intentId: string };
+  retained.deliver({ kind: "history", intentId: reopened.intentId, session, attached: true, messages: [] });
+  if (currentBusy) { assert.match(text(retained.get("chat")), /Still here/); assert.match(text(retained.get("chat")), /ongoing text/); }
+  retained.get("input").value = "continue"; retained.get("send").onclick?.(); assert.deepEqual([retained.sent("user").length, retained.sent("start").length], [1, 0]);
+}
+for (const target of [otherSession, { ...session, provider: "codex" as const }]) {
+  const replaced = new Harness(); replaced.connect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: false });
+  const initial = replaced.sent("open").slice(-1)[0] as { intentId: string }; replaced.deliver({ kind: "history", intentId: initial.intentId, session, attached: true, messages: [] });
+  replaced.deliver({ kind: "sessions", sessions: [target] }); replaced.get("btn-history").onclick?.(); replaced.button(replaced.get("sessions"), "Open").onclick?.();
+  assert.equal(replaced.sent("close").length, 1); assert.deepEqual((replaced.sent("open").slice(-1)[0] as { session: unknown }).session, target);
+}
+const pendingRow = new Harness(); pendingRow.connect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: false });
+const pendingInitial = pendingRow.sent("open").slice(-1)[0] as { intentId: string }; pendingRow.deliver({ kind: "history", intentId: pendingInitial.intentId, session, attached: false, messages: [] });
+pendingRow.get("input").value = "resume"; pendingRow.get("send").onclick?.(); pendingRow.get("input").value = "queued"; pendingRow.get("send").onclick?.();
+pendingRow.deliver({ kind: "sessions", sessions: [session] }); pendingRow.get("btn-history").onclick?.(); pendingRow.button(pendingRow.get("sessions"), "Open").onclick?.();
+assert.equal(pendingRow.sent("close").length, 1); assert.match(JSON.stringify(pendingRow.posted), /queued message was cancelled/);
 
 // Same-session reconnect restores History; recovered queued-start input waits for that reconstruction.
 const restored = new Harness(); restored.connect({ kind: "connection", protocolVersion: PROTOCOL_VERSION, session, busy: false });
@@ -350,7 +381,9 @@ assert.ok(stale.confirm({ intentId: "current", session }));
 assert.equal(stale.update({ ...session, sessionId: "wrong" }), false);
 assert.equal(stale.update({ ...session, provider: "codex" }), false);
 const abandonedHistory = new ConversationView(); abandonedHistory.beginHistory({ intentId: "abandoned", session, attached: true, inputs: [{ text: "owned", selection: [] }] });
-assert.equal(abandonedHistory.leave({ reason: "New or another History row" }).length, 1);
+assert.equal(abandonedHistory.historyRow({ session }), "retain"); assert.equal(abandonedHistory.leave({ reason: "New or another History row" }).length, 1);
+const retainedStart = new ConversationView(); retainedStart.reconcile({ session }); retainedStart.begin({ intentId: "retained", retainSession: true });
+assert.equal(retainedStart.historyRow({ session }), "replace");
 let cancellations = 0; stale.addCard({ id: "card", cancel: () => cancellations++ });
 stale.disconnect({ reason: "offline" }); stale.disconnect({ reason: "offline again" }); assert.equal(cancellations, 1);
 console.log("bundled ui lifecycle check ok");

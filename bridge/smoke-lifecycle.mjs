@@ -34,6 +34,22 @@ export async function cleanupSmoke(args) {
 }
 export function deliverSmokeCallback(args) { if (args.finished()) return false; args.deliver(); return true; }
 
+export async function completeSmoke(args) {
+  if (args.finished()) return false;
+  args.finish();
+  let outcome;
+  try {
+    const records = JSON.parse(args.read());
+    const record = records.find(item => item.provider === args.provider && item.sessionId === args.sessionId);
+    const usage = record ? Object.values(record.usage).reduce((sum, value) => sum + value, 0) : 0;
+    const ok = record?.turns === 3 && record.costStatus === "reported" && record.costUsd > args.firstCost
+      && usage > args.firstUsage && args.observed;
+    outcome = { ok, record, usage }; args.report(outcome);
+  } catch (error) { args.reportError(error); }
+  finally { await args.cleanup(outcome?.ok ? 0 : 1); }
+  return true;
+}
+
 export function cleanupOwnedArtifacts(args) {
   if (!args.terminated) return { nativeRemoved: false, cleanupFailed: true };
   let nativeRemoved = false;

@@ -11,7 +11,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | --- | --- | --- |
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
-| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Pending-native cancellation fix implemented locally; focused independent review required |
+| 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Cancellation, attached-History and final smoke-cleanup fixes implemented locally; focused review required |
 | 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Not started |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
@@ -45,8 +45,8 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   attachment history and terminal ownership fixes. Deterministic tests now use ordinary dependency injection through
   the production receive/onUp/pump paths. Actual bundled-UI admission/history/settings/card/replay fixes and explicit
   bridge-owned settled-settings publication are now covered; fresh independent review remains pending.
-- Parent grant `c24ec6fb-d7df-4e86-8334-cbe7fd8b43ba` supersedes prior Step 3 grants with a 2,950-line ceiling,
-  targeting <=2,920, for start/settings/History ownership repairs and proof; later-step budgets are unchanged.
+- Recovery addendum authority supersedes historical grant `c24ec6fb-d7df-4e86-8334-cbe7fd8b43ba` for Step 3 only:
+  hard ceiling 2,975, preferred <=2,970, for attached-History/final smoke cleanup and proof; later budgets are unchanged.
 - **Historical `cfe0ec8`:** 1,532 lines, checks passing. Parent accepts up to 1,650 total lines only for existing
   foundation lifecycle/accounting/safety fixes and proof, never Step 3 scope; no paid/native fix turn was run.
 

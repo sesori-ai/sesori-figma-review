@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanupOwnedArtifacts, cleanupSmoke, deliverSmokeCallback, restartSmoke, stopOwnedProcess, withTimeout } from "./smoke-lifecycle.mjs";
+import { cleanupOwnedArtifacts, cleanupSmoke, completeSmoke, deliverSmokeCallback, restartSmoke, stopOwnedProcess, withTimeout } from "./smoke-lifecycle.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bridgePath = join(here, "dist", "bridge.mjs");
@@ -93,16 +93,19 @@ function fail(reason) {
   void cleanup(1);
 }
 function pass() {
-  if (finished) return; finished = true;
-  const records = JSON.parse(readFileSync(join(fixture, "files", "smoke", "sessions.json"), "utf8"));
-  const record = records.find(item => item.provider === "claude" && item.sessionId === ref.sessionId);
-  const usage = record ? Object.values(record.usage).reduce((sum, value) => sum + value, 0) : 0;
-  const ok = record?.turns === 3 && record.costStatus === "reported" && record.costUsd > firstProcessCost
-    && usage > firstProcessUsage && sawSteeredFocus && sawCancelledCard && reconnectChecked && restartCount === 1;
-  console.log(`\n${ok ? "ok" : "failed persisted resume accounting"}`);
-  seen.push(`resume turns=${record?.turns} cost=${record?.costUsd} usage=${usage}`);
-  for (const item of seen) console.log(" ", item);
-  void cleanup(ok ? 0 : 1);
+  void completeSmoke({
+    finished: () => finished, finish: () => { finished = true; },
+    read: () => readFileSync(join(fixture, "files", "smoke", "sessions.json"), "utf8"), provider: "claude", sessionId: ref.sessionId,
+    firstCost: firstProcessCost, firstUsage: firstProcessUsage,
+    observed: sawSteeredFocus && sawCancelledCard && reconnectChecked && restartCount === 1,
+    report: ({ ok, record, usage }) => {
+      console.log(`\n${ok ? "ok" : "failed persisted resume accounting"}`);
+      seen.push(`resume turns=${record?.turns} cost=${record?.costUsd} usage=${usage}`);
+      for (const item of seen) console.log(" ", item);
+    },
+    reportError: error => { console.log(`\nfailed final smoke assertion: ${String(error)}`); for (const item of seen) console.log(" ", item); },
+    cleanup,
+  });
 }
 
 async function restartAndResume() {

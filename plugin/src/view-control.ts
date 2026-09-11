@@ -17,6 +17,10 @@ export class ConversationView {
   get session(): SessionRecord | undefined { return this.current; }
   get starting(): boolean { return this.intent?.kind === "start"; }
   get readingHistory(): boolean { return this.intent?.kind === "history"; }
+  historyRow(args: { session: SessionRef }): "retain" | "attached" | "replace" {
+    if (this.intent?.kind === "history" && sameSession(this.intent.session, args.session)) return "retain";
+    return !this.intent && !!this.current && sameSession(this.current, args.session) ? "attached" : "replace";
+  }
 
   begin(args: { intentId: string; retainSession: boolean }) {
     this.cancelCards({ reason: "Session replaced" });
