@@ -52,9 +52,9 @@ for (const read of [
   () => { throw new Error("missing persisted file"); }, () => "not-json", () => "{}",
   () => valid.replace('"costUsd":2', '"costUsd":0'), () => valid,
 ]) {
-  let completion, capturedArgs;
+  let completion;
   const context = {
-    completeSmoke: args => { capturedArgs = args; completion = completeSmoke(args); return completion; },
+    completeSmoke: args => { completion = completeSmoke(args); return completion; },
     finished: false, readFileSync: () => read(), join, fixture: "controlled-fixture", ref: { sessionId: "owned" },
     firstProcessCost: 1, firstProcessUsage: 1, sawSteeredFocus: true, sawCancelledCard: true,
     reconnectChecked: true, restartCount: 1, seen: [],
@@ -64,10 +64,10 @@ for (const read of [
   const pass = runInNewContext(`(${passSource})`, context);
   pass();
   assert.ok(completion, "pass delegates to completeSmoke");
-  assert.equal(await completion, true); assert.equal(await completeSmoke(capturedArgs), false);
+  assert.equal(await completion, true); pass(); assert.equal(await completion, false);
 }
 assert.deepEqual(finalCodes, [1, 1, 1, 1, 0]);
-assert.ok(finalDiagnostics.filter(line => line.includes("failed final smoke assertion")).length >= 3);
+assert.equal(finalDiagnostics.filter(line => line.includes("failed final smoke assertion")).length, 3);
 assert.equal(finalDiagnostics.filter(line => line.includes("failed persisted resume accounting")).length, 1);
 assert.equal(finalDiagnostics.filter(line => line.trim() === "ok").length, 1);
 let finalDeleted = 0, finalFinished = false; const finalChild = {}; let releaseFinal;
