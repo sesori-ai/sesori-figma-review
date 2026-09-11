@@ -1,4 +1,4 @@
-// Per-Figma-file workspace under ~/.sesori-review/files/<fileId>/ plus the sessions index kept in it.
+// Per-Figma-file workspace under ~/.local/share/sesori-figma-review/files/<fileId>/ plus the sessions index kept in it.
 // The workspace is the agent's cwd: CLAUDE.md, .mcp.json and the review-flow skill are loaded from here,
 // and notes/ is the only place it may write files. CLAUDE.md, settings and .mcp.json are written once and
 // never overwritten, so teammates can edit them per file; the skill is ours and is refreshed on every start.
@@ -12,7 +12,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FIGMA_MCP_URL, type ProviderId, type SessionRecord, type Settings, type Usage } from "../../shared/protocol.ts";
 
-export const HOME = process.env.SESORI_REVIEW_HOME ?? join(homedir(), ".sesori-review");
+const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+export const HOME = process.env.SESORI_REVIEW_HOME || join(dataHome, "sesori-figma-review");
 
 /** Tools that run without an Allow/Deny card. Per-file override: edit permissions.json in the workspace.
  *  (Not .claude/settings.json: the CLI ignores project permissions until the folder is trusted interactively.) */

@@ -29,19 +29,19 @@ plugin/src/code.ts          sandbox: file id, context events, tool executor (+ s
 plugin/src/flow.ts          pure prototype-flow walker
 plugin/src/ui.html, ui.ts   UI iframe; build.mjs inlines the bundled ui.ts into dist/ui.html
 bridge/src/bridge.ts        WebSocket server, SDK session manager, health, cost accounting; bundled by esbuild to bridge/dist/bridge.mjs (the npm `bin`)
-bridge/src/workspace.ts     ~/.sesori-review/ provisioning: plugin/ copy for Figma to import, files/<fileId>/ workspaces, settings.json, sessions index, transcript reader, usage math (+ selfcheck.ts)
+bridge/src/workspace.ts     ~/.local/share/sesori-figma-review/ provisioning: plugin/ copy for Figma to import, files/<fileId>/ workspaces, settings.json, sessions index, transcript reader, usage math (+ selfcheck.ts)
 bridge/smoke.mjs            fake plugin for an end-to-end run without Figma
 ```
 
 Distribution: one npm package, `@sesori/figma-review`, root `package.json` owns the runtime dependencies and ships `bridge/dist`,
 `plugin/dist` and `plugin/manifest.json`. The `sesori-figma-review` bin (global install or npx) runs the bridge, which copies
-the plugin to `~/.sesori-review/plugin/` (a stable path, unlike npm's global or npx directories) and prints the manifest path to
+the plugin to `~/.local/share/sesori-figma-review/plugin/` (a stable path, unlike npm's global or npx directories) and prints the manifest path to
 import into Figma.
 
 ## Per-file workspace (agent cwd)
 
 ```
-~/.sesori-review/files/<fileId>/
+~/.local/share/sesori-figma-review/files/<fileId>/
 ├── CLAUDE.md                        review conventions; "tool-steering" section between BEGIN/END markers is removable
 ├── .mcp.json                        figma-desktop → http://127.0.0.1:3845/mcp (for CLI use; the bridge passes the same config)
 ├── .claude/skills/review-flow/SKILL.md
@@ -66,7 +66,7 @@ import into Figma.
 | `disallowedTools` | `AskUserQuestion` | replaced by `ask_user`, which focuses the canvas first |
 | `includePartialMessages` | true | text streams into the chat as it is generated |
 | `resume` | session id | first message after History → Open |
-| `model`, `effort` | `~/.sesori-review/settings.json` | picked in the plugin's settings panel; `""` = Claude Code default |
+| `model`, `effort` | `~/.local/share/sesori-figma-review/settings.json` | picked in the plugin's settings panel; `""` = Claude Code default |
 
 A fresh session for the connected file is pre-warmed with `startup()` as soon as the plugin says hello, and again
 after every start, so "Review flow" does not pay the CLI boot.
