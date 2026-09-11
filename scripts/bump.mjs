@@ -39,6 +39,10 @@ const sources = manifests.map((name) => {
   if (!versionField.test(text)) throw new Error(`${name}: no version field found`);
   return [name, text];
 });
+// Releases only move forward; the same version again is the interrupted-run repair.
+const current = JSON.parse(sources[0][1]).version;
+const [wanted, have] = [version, current].map((v) => v.split(".").map(Number));
+if ((wanted[0] - have[0] || wanted[1] - have[1] || wanted[2] - have[2]) < 0) throw new Error(`${version} is older than the current ${current}`);
 // The lockfile repeats the version in four places. npm writes it as 2-space JSON, so a
 // parse/stringify round-trip leaves every other byte of the file untouched.
 const lock = JSON.parse(readFileSync(file("package-lock.json"), "utf8"));

@@ -7,20 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1]
+
 ### Added
 
-- `npm run bump <X.Y.Z>` writes the version into the three `package.json` files and the lockfile, then cuts the `[Unreleased]` section under that version.
+- The plugin is on the [Figma Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review). Installing it no longer needs the manifest import; the bridge start banner points at the listing and keeps the manifest path for running from source.
+- `plugin/manifest.json` carries the Community plugin `id`, so updates publish from this repo.
+- `npm run bump <X.Y.Z>` writes the version into the three `package.json` files and the lockfile, then cuts the `[Unreleased]` section under that version. It refuses what cannot become a release: a version older than the current one, an empty `[Unreleased]`, and entries stranded there after that version was already cut.
 - Pushing a `vX.Y.Z` tag publishes the npm package: `.github/workflows/publish.yml` checks the tag against the manifests, runs `npm run check`, publishes with provenance through npm trusted publishing (OIDC, no token stored in the repo) and opens a GitHub Release carrying that version's changelog section.
 - `AGENTS.md` holds the repository conventions, including the rule that every PR updates this changelog; `CLAUDE.md` points at it.
 
 ### Changed
 
-- The plugin copy, settings and per-file workspaces live under `$XDG_DATA_HOME/sesori-figma-review` (default `~/.local/share/sesori-figma-review`, and the default is also used when `XDG_DATA_HOME` is relative, which the XDG spec calls invalid) instead of `~/.sesori-review`. `SESORI_REVIEW_HOME` still overrides it; there is no migration of an existing `~/.sesori-review`.
-
-## [0.3.1]
-
-- The plugin is on the [Figma Community](https://www.figma.com/community/plugin/1680238164100658906/sesori-review). Installing it no longer needs the manifest import; the bridge start banner points at the listing and keeps the manifest path for running from source.
-- `plugin/manifest.json` carries the Community plugin `id`, so updates publish from this repo.
+- The plugin copy, settings and per-file workspaces live under `$XDG_DATA_HOME/sesori-figma-review` (default `~/.local/share/sesori-figma-review`, and the default is also used when `XDG_DATA_HOME` is relative, which the XDG spec calls invalid) instead of `~/.sesori-review`. `SESORI_REVIEW_HOME` still overrides it; there is no migration of an existing `~/.sesori-review`, and a plugin imported from the old path has to be re-imported from the new one (or installed from the Community).
 
 ## [0.3.0]
 
