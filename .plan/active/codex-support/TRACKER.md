@@ -13,7 +13,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
 | 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4); reviewed head `80707c2`, merge tree identical |
-| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Local correction/deterministic proof complete; native startup passes version/account/model/profile gates, but source shows discovery may run plugin startup tasks and thread creation can race config reload before eager MCP startup, so qualification remains blocked and enforcement was not run |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Transient isolation implemented; discovery passed, isolated native run reached final config validation, then exposed one harmless serialized filesystem default; corrected rerun/enforcement require approval |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
 | 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
@@ -105,10 +105,22 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   quoted keys inside one inline TOML value. The policy now explicitly sets stable `features.plugins=false`, validates
   it, and requires the Figma MCP entry to contain exactly `enabled=true` plus the owned loopback `url`, rejecting
   inherited same-name command/header/auth transport fields.
-- A remaining API race prevents final proof: `config/read` reloads effective layers, while `thread/start` independently
-  reloads them without an expected config version and immediately installs an eager MCP runtime before returning.
-  Thread `config` overrides deep-merge as well. A new direct/project/managed entry between validation and thread load
-  can therefore start before the client detects it. No native invocation followed this static analysis.
+- `config/read` reloads effective layers, while `thread/start` independently reloads them without an expected config
+  version and installs an eager MCP runtime. The user accepted the operational limitation instead of an isolated home:
+  reuse the existing login, keep relevant user/project/managed config unchanged from discovery through the complete
+  review lifetime, and stop/restart the review around config changes. Managed settings forcing plugins/apps/other
+  capabilities on remain unsupported. This is not an atomic snapshot, watcher, lock, or concurrent-change guarantee.
+- Discovery now projects only transient direct MCP/plugin/app names. Final launch encodes arbitrary punctuation as
+  quoted keys inside atomic TOML values, disables every discovered unrelated entry, rejects a `figma-desktop` name
+  collision, and validates final active state. Figma transport validation rejects inherited command/auth/header/tool
+  extras while accepting schema serialization defaults (`environment_id=local`, absent/null tool timeout).
+- Frozen-config native discovery passed with privacy-safe counts (three direct MCP entries, thirteen plugin entries,
+  zero app entries), 53,449 bounded bytes, and certain stable-identity cleanup. Isolated startup then passed far enough
+  to return the large final config response (60,945 bounded bytes) and failed permission-profile validation. Source
+  inspection identifies `FilesystemPermissionsToml.glob_scan_max_depth: Option<usize>` as serialized null despite
+  being absent from the input profile; exact filesystem comparison had treated that schema default as a path entry.
+  Validation now ignores only absent/null `glob_scan_max_depth`, with deterministic coverage. Both App Server children
+  exited by owned `SIGTERM`; stable start identities were no longer live. No thread/model call or enforcement ran.
 - Separate process note: accidental unapproved `codex sandbox macos --help` was parsed as a sandbox invocation, not
   static inspection. It failed before requested executable `macos` launched with exact error
   `sandbox-exec: execvp() of 'macos' failed: No such file or directory` and exit `71`. No side effects were observed;

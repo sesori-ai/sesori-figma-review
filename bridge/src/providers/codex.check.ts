@@ -7,11 +7,13 @@ import { PassThrough } from "node:stream";
 import { z } from "zod";
 import { CodexClient, CodexRpcError, type CodexChild } from "./codex-client.ts";
 import { parseAccountResult, parseModelListResult } from "./codex-protocol.ts";
-import { qualifyCodexRuntime } from "./codex-qualification.ts";
+import { discoverCodexRuntime, qualifyCodexRuntime } from "./codex-qualification.ts";
 import {
   CODEX_PERMISSION_PROFILE,
   assertCodexConfigIsolated,
+  createCodexDiscoveryPolicy,
   createCodexExecutionPolicy,
+  discoverCodexIsolation,
   type CodexExecutionPolicy,
 } from "./codex-execution.ts";
 
@@ -49,7 +51,8 @@ const root = mkdtempSync(join(tmpdir(), "codex-step4-"));
 const dir = join(root, "workspace"), appRepo = join(root, "app");
 mkdirSync(join(dir, "notes"), { recursive: true }); mkdirSync(appRepo);
 writeFileSync(join(dir, "CLAUDE.md"), "user review instructions\n");
-const policy = createCodexExecutionPolicy({ dir, appRepo, command: "/qualified/codex" });
+const emptyIsolation = { mcpServerNames: [], pluginNames: [], appNames: [] };
+const policy = createCodexExecutionPolicy({ dir, appRepo, command: "/qualified/codex", isolation: emptyIsolation });
 assert.deepEqual(
   [policy.command, policy.args.slice(0, 3), policy.thread.runtimeWorkspaceRoots, policy.thread.permissions],
   ["/qualified/codex", ["app-server", "--stdio", "--strict-config"], [policy.notesDir], CODEX_PERMISSION_PROFILE],
@@ -66,10 +69,13 @@ assert.equal(
 );
 assert.ok(policy.args.includes("features.plugins=false"));
 assert.ok(policy.args.includes("features.multi_agent=false"));
-assert.ok(policy.args.includes("apps._default.enabled=false"));
+assert.ok(policy.args.some(value => value.startsWith("apps=") && value.includes('"_default" = { enabled = false }')));
 mkdirSync(join(dir, "source"));
-assert.throws(() => createCodexExecutionPolicy({ dir, appRepo: join(dir, "source") }), /must not overlap/);
-assert.throws(() => createCodexExecutionPolicy({ dir: "relative" }), /must be absolute/);
+assert.throws(
+  () => createCodexExecutionPolicy({ dir, appRepo: join(dir, "source"), isolation: emptyIsolation }),
+  /must not overlap/,
+);
+assert.throws(() => createCodexDiscoveryPolicy({ dir: "relative" }), /must be absolute/);
 assert.throws(() => parseAccountResult({ requiresOpenaiAuth: "yes", account: null }));
 assert.throws(() => parseModelListResult({ data: [{ model: "partial" }] }));
 
@@ -244,6 +250,28 @@ const configFor = (selected: CodexExecutionPolicy): Record<string, unknown> => (
     network: { enabled: false },
   } },
 });
+const discoveryConfig = configFor(policy);
+discoveryConfig.mcp_servers = { "owner.with.dot": { enabled: true }, 'owner"quote': { enabled: true } };
+discoveryConfig.plugins = { "plugin.with.dot": { enabled: true } };
+discoveryConfig.apps = { _default: { enabled: false }, 'app"quote': { enabled: true } };
+const inventory = discoverCodexIsolation({ config: discoveryConfig, origins: {} });
+assert.deepEqual(inventory, {
+  mcpServerNames: ['owner"quote', "owner.with.dot"], pluginNames: ["plugin.with.dot"], appNames: ['app"quote'],
+});
+const isolatedPolicy = createCodexExecutionPolicy({ dir, appRepo, isolation: inventory });
+const mcpOverride = isolatedPolicy.args.find(value => value.startsWith("mcp_servers="));
+assert.ok(mcpOverride?.includes('"owner.with.dot" = { enabled = false }'));
+assert.ok(mcpOverride?.includes('"owner\\\"quote" = { enabled = false }'));
+assert.ok(isolatedPolicy.args.some(value => value.startsWith("plugins=")
+  && value.includes('"plugin.with.dot" = { enabled = false }')));
+assert.ok(isolatedPolicy.args.some(value => value.startsWith("apps=")
+  && value.includes('"app\\\"quote" = { enabled = false }')));
+assert.throws(
+  () => createCodexExecutionPolicy({
+    dir, appRepo, isolation: { ...emptyIsolation, mcpServerNames: ["figma-desktop"] },
+  }),
+  /collides/,
+);
 const unsafeConfig = configFor(policy);
 const unsafeProfile = (unsafeConfig.permissions as Record<string, Record<string, Record<string, unknown>>>)[
   CODEX_PERMISSION_PROFILE
@@ -253,6 +281,15 @@ assert.throws(
   () => assertCodexConfigIsolated({ result: { config: unsafeConfig, origins: {} }, policy }),
   /differs from bridge-owned/,
 );
+const defaultedConfig = configFor(policy);
+const defaultedMcp = (defaultedConfig.mcp_servers as Record<string, Record<string, unknown>>)["figma-desktop"];
+defaultedMcp.environment_id = "local";
+defaultedMcp.tool_timeout_sec = null;
+const defaultedProfile = (defaultedConfig.permissions as Record<string, Record<string, Record<string, unknown>>>)[
+  CODEX_PERMISSION_PROFILE
+];
+defaultedProfile.filesystem.glob_scan_max_depth = null;
+assert.doesNotThrow(() => assertCodexConfigIsolated({ result: { config: defaultedConfig, origins: {} }, policy }));
 const collidingConfig = configFor(policy);
 const collidingMcp = (collidingConfig.mcp_servers as Record<string, Record<string, unknown>>)["figma-desktop"];
 collidingMcp.command = "inherited-command";
@@ -260,6 +297,23 @@ assert.throws(
   () => assertCodexConfigIsolated({ result: { config: collidingConfig, origins: {} }, policy }),
   /transport is not isolated/,
 );
+const discoveryPolicy = createCodexDiscoveryPolicy({ dir, appRepo, command: "/qualified/codex" });
+const discoveryChild = new FakeChild((message, server) => {
+  if (message.method === "initialize") server.send({
+    id: message.id,
+    result: { userAgent: "codex/0.154.0", codexHome: "/real", platformFamily: "unix", platformOs: "macos" },
+  });
+  if (message.method === "config/read") server.send({
+    id: message.id, result: { config: discoveryConfig, origins: {}, layers: [] },
+  });
+});
+assert.deepEqual(await discoverCodexRuntime({
+  policy: discoveryPolicy,
+  client: new CodexClient({
+    policy: discoveryPolicy, clientVersion: "test", log: () => {}, childFactory: () => discoveryChild,
+  }),
+}), inventory);
+assert.deepEqual(discoveryChild.sent.map(message => message.method), ["initialize", "initialized", "config/read"]);
 const qualificationChild = new FakeChild((message, server) => {
   const id = message.id, method = message.method;
   if (method === "initialize") server.send({

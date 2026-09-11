@@ -9,9 +9,12 @@ filesystem permission overrides as semantically invalid: Codex splits CLI overri
 paths cannot safely occupy dotted-key segments. Step 4 now emits the complete profile as one inline TOML table;
 a correction-confirmation startup passed initialize, exact version, account, model, and profile gates. Effective
 config validation then rejected non-isolated MCP state. Source follow-up confirmed discovered direct entries can be
-atomically disabled by name, but also found two pre-thread safety gaps: production App Server can start plugin tasks
-before `initialize`/`config/read`, and `thread/start` reloads config without an expected-version guard before eagerly
-starting MCP. Enforcement was therefore not run. Step 4 remains blocked on safe discovery and atomic validation.
+atomically disabled by name and identified pre-thread startup/config-reload gaps. The user accepted the weaker
+**reuse login, freeze configuration** contract: relevant user/project/managed config remains unchanged from discovery
+through review lifetime, and managed settings must not force capabilities on. Transient per-name isolation is now
+implemented under that contract. Native discovery passed and isolated qualification reached final config validation,
+then rejected the serialized permission filesystem default. Source/tests now accept only its harmless null scan-depth
+default, but authorization permits no retry after failure. Enforcement did not run; Step 4 awaits one corrected rerun.
 
 ## Goal and locked user direction
 
@@ -40,8 +43,12 @@ until the plan is completed. Monitor every PR; keep checks, feedback and mergeab
 head when merging. Do not bypass protection or merge after a readiness regression. Keep at most one PR open
 and one local successor in progress. Full-parity, security and retirement gates remain mandatory; a genuine missing
 capability, unavailable test access or required user decision is a blocker, not permission to weaken those gates.
-Existing Claude/Codex sign-ins are authorized for bounded isolated tests without credential/config copying. Routine
-Claude tests use Haiku/low; Codex uses the cheapest suitable catalog-reported image/tool-capable model at low effort.
+Existing Claude/Codex sign-ins are authorized for bounded isolated tests without credential/config copying. Codex
+reuses the existing login only while relevant configuration remains frozen from discovery through review lifetime;
+stop the review before changing Codex user/project/managed config, then restart it afterward. Managed settings that
+force plugins, apps, or other capabilities on are unsupported. Routine Claude tests use Haiku/low; Codex uses the
+cheapest suitable catalog-reported image/tool-capable model at low effort. Setup limitation:
+[`docs/codex-configuration.md`](../../../docs/codex-configuration.md).
 Ask before premium/high-effort exceptions; keep explicit turn/output/$0.10 limits where supported.
 
 ## Current implementation and evidence
