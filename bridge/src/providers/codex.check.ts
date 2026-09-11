@@ -55,10 +55,15 @@ assert.deepEqual(
   ["/qualified/codex", ["app-server", "--stdio", "--strict-config"], [policy.notesDir], CODEX_PERMISSION_PROFILE],
 );
 assert.equal("sandbox" in policy.thread, false);
-assert.ok(policy.args.includes(
-  `permissions.${CODEX_PERMISSION_PROFILE}.filesystem.${JSON.stringify(policy.appRepo)}="read"`,
-));
-assert.ok(policy.args.includes(`permissions.${CODEX_PERMISSION_PROFILE}.network.enabled=false`));
+const profileOverride = policy.args.find(value => value.startsWith(`permissions.${CODEX_PERMISSION_PROFILE}=`));
+assert.ok(profileOverride?.includes(`${JSON.stringify(policy.appRepo)} = "read"`));
+assert.ok(profileOverride?.includes(`${JSON.stringify(policy.notesDir)} = "write"`));
+assert.ok(profileOverride?.includes("network = { enabled = false }"));
+assert.equal(
+  policy.args.some(value => value.startsWith(`permissions.${CODEX_PERMISSION_PROFILE}.filesystem.`)),
+  false,
+  "filesystem paths must stay TOML keys instead of becoming CLI dotted-path segments",
+);
 assert.ok(policy.args.includes("features.multi_agent=false"));
 assert.ok(policy.args.includes("apps._default.enabled=false"));
 mkdirSync(join(dir, "source"));

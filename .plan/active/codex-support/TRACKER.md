@@ -13,7 +13,7 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
 | 1 | 🌱 [codex-support] Record full-parity design and acceptance matrix [step 1/8] | Squash-merged as `232048a` (PR #1); initial plan architecture review approved |
 | 2 | ⚙️ [codex-support] Stage provider contracts and Claude adapter [step 2/8] | Squash-merged as `ece1379d6768ecc032d6f030933034007d357910` (PR #3) |
 | 3 | 🚧 [codex-support] Activate normalized review workflows [step 3/8] | Squash-merged as `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4); reviewed head `80707c2`, merge tree identical |
-| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Local implementation/deterministic proof complete; native diagnosis found exit 1 from an unidentified invalid config value before `initialize`, so qualification remains blocked and enforcement was not run |
+| 4 | 🚧 [codex-support] Add qualified Codex transport and execution policy [step 4/8] | Local correction/deterministic proof complete; native startup passes version/account/model/profile gates, but effective config rejects non-isolated inherited MCP state, so qualification remains blocked and enforcement was not run |
 | 5 | 🚧 [codex-support] Implement Codex review sessions and native replay [step 5/8] | Not started |
 | 6 | ⚙️ [codex-support] Expose both providers with complete plugin workflows [step 6/8] | Not started |
 | 7 | 🌿 [codex-support] Reconcile provider documentation and regression contracts [step 7/8] | Not started |
@@ -82,8 +82,18 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   zero stdout bytes, 98 bounded stderr bytes, natural exit `1` with no signal, no response/`initialized`, and no child
   descendants. Sanitization classified a semantic invalid config value but found no safe matching policy key or CLI
   flag. The unique diagnostic fixture was deleted only after observing child exit; no retry or enforcement ran.
-- Static follow-up proved every generated `-c` assignment is syntactically valid TOML. It did not prove Codex schema
-  acceptance or identify whether the rejected semantic value comes from session overrides or inherited owner config.
+- Schema-backed follow-up identified the semantic defect in bridge-owned overrides. Codex 0.154.0 applies CLI keys
+  by splitting every `.`; quoted dynamic filesystem paths therefore became nested path segments, while the schema
+  requires flattened filesystem path keys. The bridge now supplies the complete named profile as one inline TOML
+  table, keeping dynamic paths inside the value. Deterministic regression proof rejects filesystem dotted-key args.
+- Correction-confirmation start 2 passed initialize, exact 0.154.0 version, supported account, bounded image-model,
+  and named-profile gates, then failed closed during effective `config/read` isolation because active MCP state was
+  not limited to the bridge-owned Figma server. Raw account/config data was not retained. Codex deep-merges config
+  tables and exposes no schema-backed global MCP disable/replace switch; safely clearing arbitrary inherited server
+  names through known per-process settings is therefore unavailable. No third start or Part 2 enforcement ran.
+- Start 2 ended by observed App Server `SIGTERM`; its diagnostic counted six previously observed descendants and
+  conservatively marked cleanup uncertain even though the post-run fixture-path scan found no match. Per approval,
+  fixture `.tmp/codex-step4-config-4859cc40-c2c5-4389-9a9d-11a30f4977eb` remains in its original location.
 - Separate process note: accidental unapproved `codex sandbox macos --help` was parsed as a sandbox invocation, not
   static inspection. It failed before requested executable `macos` launched with exact error
   `sandbox-exec: execvp() of 'macos' failed: No such file or directory` and exit `71`. No side effects were observed;

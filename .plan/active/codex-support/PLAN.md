@@ -4,9 +4,12 @@ Status: Steps 1–3 squash-merged as `232048a`, `ece1379d6768ecc032d6f0309330340
 `b2b81e7d06b50f19141f4ab46b75628e402b557c` (PR #4; reviewed head `80707c2`, merge tree verified identical).
 Older cutover checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not
 merged. Step 4 is implemented locally from the verified Step 3 receipt with deterministic boundary proof. Approved
-native qualification stopped at its first fail-closed boundary. One approved diagnostic startup then established
-that the 0.154.0 candidate exits `1` before `initialize` with a semantic invalid-config-value error, but exposed no
-safe config-key/flag identifier. Enforcement was therefore not run. Step 4 remains blocked on identifying that field.
+native qualification stopped at its first fail-closed boundary. A bounded diagnostic identified the bridge's
+filesystem permission overrides as semantically invalid: Codex splits CLI override keys on every `.`, so dynamic
+paths cannot safely occupy dotted-key segments. Step 4 now emits the complete profile as one inline TOML table;
+a correction-confirmation startup passed initialize, exact version, account, model, and profile gates. Effective
+config validation then rejected non-isolated MCP state, which per-process deep-merge semantics cannot clear without
+knowing inherited server names. Enforcement was therefore not run. Step 4 remains blocked on environment isolation.
 
 ## Goal and locked user direction
 

@@ -35,7 +35,8 @@ export type CodexExecutionPolicy = {
 
 const tomlString = (value: string) => JSON.stringify(value);
 const config = (key: string, value: string) => ["-c", `${key}=${value}`];
-const pathKey = (path: string) => tomlString(path);
+const tomlInlineTable = (entries: [string, string][]) =>
+  `{ ${entries.map(([key, value]) => `${tomlString(key)} = ${value}`).join(", ")} }`;
 const containedBy = (parent: string, child: string) => {
   const path = relative(parent, child);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
@@ -58,22 +59,19 @@ export function createCodexExecutionPolicy(args: {
   if (appRepo && (containedBy(appRepo, dir) || containedBy(dir, appRepo))) {
     throw new Error("APP_REPO must not overlap the Codex workspace or its writable notes directory");
   }
-  const filesystem = [
-    ...config(`permissions.${CODEX_PERMISSION_PROFILE}.filesystem.":minimal"`, tomlString("read")),
-    ...config(`permissions.${CODEX_PERMISSION_PROFILE}.filesystem.${pathKey(dir)}`, tomlString("read")),
-    ...config(`permissions.${CODEX_PERMISSION_PROFILE}.filesystem.${pathKey(notesDir)}`, tomlString("write")),
-    ...(appRepo
-      ? config(`permissions.${CODEX_PERMISSION_PROFILE}.filesystem.${pathKey(appRepo)}`, tomlString("read"))
-      : []),
-  ];
+  const filesystem = tomlInlineTable([
+    [":minimal", tomlString("read")],
+    [dir, tomlString("read")],
+    [notesDir, tomlString("write")],
+    ...(appRepo ? [[appRepo, tomlString("read")] as [string, string]] : []),
+  ]);
+  const permissionProfile = [
+    `{ description = ${tomlString("Sesori Review: workspace read-only, notes write-only")},`,
+    `filesystem = ${filesystem}, network = { enabled = false } }`,
+  ].join(" ");
   const overrides = [
     ...config("default_permissions", tomlString(CODEX_PERMISSION_PROFILE)),
-    ...config(
-      `permissions.${CODEX_PERMISSION_PROFILE}.description`,
-      tomlString("Sesori Review: workspace read-only, notes write-only"),
-    ),
-    ...filesystem,
-    ...config(`permissions.${CODEX_PERMISSION_PROFILE}.network.enabled`, "false"),
+    ...config(`permissions.${CODEX_PERMISSION_PROFILE}`, permissionProfile),
     ...config("approval_policy", [
       "{ granular = { sandbox_approval = true, rules = true,",
       "mcp_elicitations = false, request_permissions = true, skill_approval = false } }",
