@@ -120,7 +120,9 @@ symlinkSync(outsideSeed, join(unsafeSeed, "CLAUDE.md"));
 assert.throws(() => provisionCodexWorkspace({ dir: unsafeSeed }), /unsafe Codex seed file/);
 assert.equal(readFileSync(outsideSeed, "utf8"), "outside-secret");
 const fifoRoot = join(root, "fifo-seed"), fifoSeed = join(fifoRoot, "CLAUDE.md");
-mkdirSync(join(fifoRoot, "notes"), { recursive: true }); execFileSync("mkfifo", [fifoSeed]);
+mkdirSync(join(fifoRoot, "notes"), { recursive: true });
+// Windows has no mkfifo; retain non-regular-source coverage there with a directory.
+if (process.platform === "win32") mkdirSync(fifoSeed); else execFileSync("mkfifo", [fifoSeed]);
 const workspaceUrl = JSON.stringify(new URL("../workspace.ts", import.meta.url).href);
 const fifoScript = [
   `import { provisionCodexWorkspace as p } from ${workspaceUrl};`,
