@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { FIGMA_MCP_URL } from "../../../shared/protocol.ts";
 import type { CodexConfigReadResult } from "./codex-protocol.ts";
@@ -64,7 +64,12 @@ type PolicyArgs = {
 /** Build discovery or isolated per-process overrides. Final state is validated before any thread can start. */
 function createPolicy(args: PolicyArgs): CodexExecutionPolicy {
   const dir = canonicalAbsolute(args.dir, "Codex workspace");
-  const notesDir = canonicalAbsolute(join(dir, "notes"), "Codex notes directory");
+  const notesPath = join(dir, "notes"), notesEntry = lstatSync(notesPath);
+  if (notesEntry.isSymbolicLink() || !notesEntry.isDirectory()) {
+    throw new Error("Codex notes directory must be a real directory inside its workspace");
+  }
+  const notesDir = canonicalAbsolute(notesPath, "Codex notes directory");
+  if (!containedBy(dir, notesDir)) throw new Error("Codex notes directory escapes its workspace");
   const appRepo = args.appRepo ? canonicalAbsolute(args.appRepo, "APP_REPO") : undefined;
   if (appRepo && (containedBy(appRepo, dir) || containedBy(dir, appRepo))) {
     throw new Error("APP_REPO must not overlap the Codex workspace or its writable notes directory");
@@ -200,6 +205,12 @@ export function assertCodexConfigIsolated(args: { result: CodexConfigReadResult;
     throw new Error("Codex named permission profile is not effective");
   }
   if (effective.approvals_reviewer !== "user") throw new Error("Codex approvals are not routed to the user");
+  const approval = object(effective.approval_policy), granular = object(approval?.granular);
+  const expectedApproval = args.policy.thread.approvalPolicy.granular;
+  const approvalMatches = approval && Object.keys(approval).length === 1 && granular
+    && Object.keys(granular).length === Object.keys(expectedApproval).length
+    && Object.entries(expectedApproval).every(([key, enabled]) => granular[key] === enabled);
+  if (!approvalMatches) throw new Error("Codex effective granular approval policy differs from bridge policy");
   if (effective.web_search !== "disabled") throw new Error("Codex web search is not disabled");
   assertCapabilitiesDisabled(effective);
   const activeMcp = enabledEntries(effective.mcp_servers);
@@ -223,7 +234,7 @@ export function assertCodexConfigIsolated(args: { result: CodexConfigReadResult;
   }
   const profiles = object(effective.permissions);
   const profile = object(profiles?.[CODEX_PERMISSION_PROFILE]);
-  const filesystem = object(profile?.filesystem);
+  const filesystem = object(profile?.filesystem), network = object(profile?.network);
   const expected: Record<string, unknown> = {
     ":minimal": "read",
     [args.policy.dir]: "read",
@@ -234,8 +245,18 @@ export function assertCodexConfigIsolated(args: { result: CodexConfigReadResult;
   const filesystemMatches = filesystem && filesystem.glob_scan_max_depth == null
     && filesystemEntries.length === Object.keys(expected).length
     && Object.entries(expected).every(([path, access]) => filesystem[path] === access);
-  if (profile?.network == null || object(profile.network)?.enabled !== false || profile.workspace_roots != null
-    || !filesystemMatches) {
+  const profileKeys = ["description", "extends", "workspace_roots", "filesystem", "network"];
+  const profileMatches = profile && Object.keys(profile).every(key => profileKeys.includes(key))
+    && profile.description === "Sesori Review: workspace read-only, notes write-only"
+    && profile.extends == null && profile.workspace_roots == null;
+  const networkKeys = [
+    "enabled", "proxy_url", "enable_socks5", "socks_url", "enable_socks5_udp", "allow_upstream_proxy",
+    "dangerously_allow_non_loopback_proxy", "dangerously_allow_all_unix_sockets", "mode", "domains", "unix_sockets",
+    "allow_local_binding", "mitm",
+  ];
+  const networkMatches = network?.enabled === false && Object.keys(network).every(key => networkKeys.includes(key))
+    && Object.entries(network).every(([key, value]) => key === "enabled" || value == null);
+  if (!profileMatches || !networkMatches || !filesystemMatches) {
     throw new Error("Codex effective permission profile differs from bridge-owned filesystem/network policy");
   }
 }

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { z } from "zod";
 import { CodexClient, CodexRpcError, type CodexChild } from "./codex-client.ts";
-import { parseAccountResult, parseModelListResult } from "./codex-protocol.ts";
+import { parseAccountResult, parseModelListResult, projectCodexModels } from "./codex-protocol.ts";
 import { discoverCodexRuntime, qualifyCodexRuntime } from "./codex-qualification.ts";
 import {
   CODEX_PERMISSION_PROFILE,
@@ -18,14 +18,17 @@ import {
 } from "./codex-execution.ts";
 
 class FakeChild extends EventEmitter implements CodexChild {
-  readonly stdin = new PassThrough();
+  readonly stdin: PassThrough;
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly sent: Record<string, unknown>[] = [];
   killed = false;
   private input = "";
-  constructor(readonly onMessage?: (message: Record<string, unknown>, child: FakeChild) => void) {
-    super();
+  constructor(
+    readonly onMessage?: (message: Record<string, unknown>, child: FakeChild) => void,
+    stdin = new PassThrough(),
+  ) {
+    super(); this.stdin = stdin;
     this.stdin.on("data", chunk => {
       this.input += String(chunk);
       for (;;) {
@@ -48,6 +51,7 @@ class FakeChild extends EventEmitter implements CodexChild {
 }
 
 const root = mkdtempSync(join(tmpdir(), "codex-step4-"));
+process.once("exit", () => rmSync(root, { recursive: true, force: true }));
 const dir = join(root, "workspace"), appRepo = join(root, "app");
 mkdirSync(join(dir, "notes"), { recursive: true }); mkdirSync(appRepo);
 writeFileSync(join(dir, "CLAUDE.md"), "user review instructions\n");
@@ -78,6 +82,10 @@ assert.throws(
 assert.throws(() => createCodexDiscoveryPolicy({ dir: "relative" }), /must be absolute/);
 assert.throws(() => parseAccountResult({ requiresOpenaiAuth: "yes", account: null }));
 assert.throws(() => parseModelListResult({ data: [{ model: "partial" }] }));
+assert.deepEqual(projectCodexModels(parseModelListResult({ data: [{
+  id: "empty", model: "empty", displayName: "Empty", hidden: false, isDefault: true,
+  inputModalities: ["text", "image"], supportedReasoningEfforts: [],
+}] })), []);
 
 const { provisionCodexWorkspace, readReviewFlowSkill } = await import("../workspace.ts");
 const provisioned = provisionCodexWorkspace({ dir });
@@ -87,6 +95,7 @@ assert.match(
 );
 writeFileSync(provisioned.instructionsPath, "user-owned Codex instructions\n");
 writeFileSync(provisioned.skillPath, "stale bridge skill\n");
+rmSync(join(dir, "CLAUDE.md"));
 provisionCodexWorkspace({ dir });
 assert.equal(readFileSync(provisioned.instructionsPath, "utf8"), "user-owned Codex instructions\n");
 assert.equal(readFileSync(provisioned.skillPath, "utf8"), readReviewFlowSkill());
@@ -99,11 +108,26 @@ const unsafeNotes = join(root, "unsafe-notes"), outsideNotes = join(root, "outsi
 mkdirSync(unsafeNotes); mkdirSync(outsideNotes); writeFileSync(join(unsafeNotes, "CLAUDE.md"), "instructions");
 symlinkSync(outsideNotes, join(unsafeNotes, "notes"));
 assert.throws(() => provisionCodexWorkspace({ dir: unsafeNotes }), /unsafe Codex notes directory/);
+assert.throws(() => createCodexDiscoveryPolicy({ dir: unsafeNotes }), /notes directory/);
+const fileNotes = join(root, "file-notes"); mkdirSync(fileNotes); writeFileSync(join(fileNotes, "notes"), "not-dir");
+assert.throws(() => createCodexDiscoveryPolicy({ dir: fileNotes }), /notes directory/);
 const unsafeInstructions = join(root, "unsafe-instructions");
 mkdirSync(join(unsafeInstructions, "notes"), { recursive: true });
 writeFileSync(join(unsafeInstructions, "CLAUDE.md"), "instructions");
 symlinkSync(join(root, "missing"), join(unsafeInstructions, "AGENTS.md"));
 assert.throws(() => provisionCodexWorkspace({ dir: unsafeInstructions }), /unsafe Codex instructions file/);
+const unsafeSeed = join(root, "unsafe-seed"), outsideSeed = join(root, "outside-seed");
+mkdirSync(join(unsafeSeed, "notes"), { recursive: true }); writeFileSync(outsideSeed, "outside-secret");
+symlinkSync(outsideSeed, join(unsafeSeed, "CLAUDE.md"));
+assert.throws(() => provisionCodexWorkspace({ dir: unsafeSeed }), /unsafe Codex seed file/);
+assert.equal(readFileSync(outsideSeed, "utf8"), "outside-secret");
+const hardlinkRoot = join(root, "hardlink-skill"), outsideSkill = join(root, "outside-skill");
+mkdirSync(join(hardlinkRoot, "notes"), { recursive: true }); writeFileSync(join(hardlinkRoot, "CLAUDE.md"), "seed");
+provisionCodexWorkspace({ dir: hardlinkRoot }); writeFileSync(outsideSkill, "outside-skill");
+rmSync(join(hardlinkRoot, ".agents", "skills", "review-flow", "SKILL.md"));
+linkSync(outsideSkill, join(hardlinkRoot, ".agents", "skills", "review-flow", "SKILL.md"));
+assert.throws(() => provisionCodexWorkspace({ dir: hardlinkRoot }), /unsafe Codex skill file/);
+assert.equal(readFileSync(outsideSkill, "utf8"), "outside-skill");
 
 const wait = async () => new Promise<void>(resolve => setImmediate(resolve));
 const logs: string[] = [], notifications: string[] = [], serverRequests: string[] = [];
@@ -188,6 +212,13 @@ async function connectedFixture(args?: { maxLineBytes?: number; maxOutputBytes?:
   });
   await promise; return { fixture, fixtureClient };
 }
+const fragmented = await connectedFixture();
+const fragmentedPending = fragmented.fixtureClient.request({ method: "fragmented", params: {}, parse: String });
+await wait();
+const fragmentedResponse = { id: fragmented.fixture.sent.at(-1)?.id, result: "héllo" };
+const fragmentedLine = Buffer.from(`${JSON.stringify(fragmentedResponse)}\r\n`);
+for (const byte of fragmentedLine) fragmented.fixture.stdout.write(Buffer.from([byte]));
+assert.equal(await fragmentedPending, "héllo"); fragmented.fixtureClient.dispose();
 const malformed = await connectedFixture();
 const malformedPending = malformed.fixtureClient.request({ method: "pending", params: {}, parse: String });
 await wait();
@@ -206,17 +237,20 @@ const exited = await connectedFixture();
 const exitPending = exited.fixtureClient.request({ method: "pending", params: {}, parse: String }); await wait();
 exited.fixture.emit("exit", 9, null);
 await assert.rejects(exitPending, /exited unexpectedly \(code 9\)/);
-const timeoutFixture = new FakeChild();
-const timedOut = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => timeoutFixture,
-  requestTimeoutMs: 5 });
-const timeoutConnect = timedOut.connect(); await wait();
-timeoutFixture.send({
-  id: 1,
-  result: { userAgent: "codex/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "linux" },
+const timeoutFixture = new FakeChild((message, server) => {
+  if (message.method === "initialize") server.send({
+    id: message.id,
+    result: { userAgent: "codex/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "linux" },
+  });
 });
-await timeoutConnect;
+const lateCallbacks: string[] = [];
+const timedOut = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => timeoutFixture,
+  requestTimeoutMs: 5, onNotification: message => lateCallbacks.push(message.method) });
+await timedOut.connect();
 await assert.rejects(timedOut.request({ method: "never/replies", params: {}, parse: String }), /timed out after 5ms/);
-timedOut.dispose();
+assert.equal(timeoutFixture.killed, true);
+await assert.rejects(timedOut.request({ method: "after-timeout", params: {}, parse: String }), /timed out/);
+timeoutFixture.send({ method: "late/event", params: {} }); assert.deepEqual(lateCallbacks, []);
 const outbound = await connectedFixture({ maxLineBytes: 256 });
 await assert.rejects(
   outbound.fixtureClient.request({ method: "too/large", params: { value: "x".repeat(300) }, parse: String }),
@@ -227,6 +261,19 @@ const bounded = await connectedFixture({ maxLineBytes: 256 });
 const boundPending = bounded.fixtureClient.request({ method: "pending", params: {}, parse: String }); await wait();
 bounded.fixture.stdout.write("x".repeat(257));
 await assert.rejects(boundPending, /bounded line limit/);
+const stdinChild = new FakeChild();
+const stdinClient = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => stdinChild });
+const stdinPending = stdinClient.connect(); await wait();
+setImmediate(() => stdinChild.stdin.emit("error", new Error("asynchronous EPIPE")));
+await assert.rejects(stdinPending, /stdin failed: asynchronous EPIPE/); assert.equal(stdinChild.killed, true);
+assert.doesNotThrow(() => stdinChild.stdin.emit("error", new Error("late EPIPE")));
+for (const stream of ["stdout", "stderr"] as const) {
+  const outputChild = new FakeChild();
+  const outputClient = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => outputChild,
+    onNativeOutput: () => { throw new Error(`${stream} observer failed`); } });
+  const pending = outputClient.connect(); await wait(); outputChild[stream].write("x");
+  await assert.rejects(pending, new RegExp(`${stream} observer failed`)); assert.equal(outputChild.killed, true);
+}
 const aggregate = await connectedFixture({ maxOutputBytes: 200 });
 const aggregatePending = aggregate.fixtureClient.request({ method: "pending", params: {}, parse: String });
 await wait(); aggregate.fixture.stderr.write("x".repeat(200));
@@ -235,6 +282,9 @@ await assert.rejects(aggregatePending, /bounded aggregate limit/);
 const configFor = (selected: CodexExecutionPolicy): Record<string, unknown> => ({
   default_permissions: CODEX_PERMISSION_PROFILE,
   approvals_reviewer: "user",
+  approval_policy: { granular: {
+    sandbox_approval: true, rules: true, mcp_elicitations: false, request_permissions: true, skill_approval: false,
+  } },
   web_search: "disabled",
   features: {
     apps: false, plugins: false, multi_agent: false, remote_plugin: false, hooks: false, goals: false, memories: false,
@@ -272,6 +322,12 @@ assert.throws(
   }),
   /collides/,
 );
+const unsafeApproval = configFor(policy);
+unsafeApproval.approval_policy = "never";
+assert.throws(
+  () => assertCodexConfigIsolated({ result: { config: unsafeApproval, origins: {} }, policy }),
+  /granular approval policy/,
+);
 const unsafeConfig = configFor(policy);
 const unsafeProfile = (unsafeConfig.permissions as Record<string, Record<string, Record<string, unknown>>>)[
   CODEX_PERMISSION_PROFILE
@@ -280,6 +336,24 @@ unsafeProfile.filesystem[policy.appRepo!] = "write";
 assert.throws(
   () => assertCodexConfigIsolated({ result: { config: unsafeConfig, origins: {} }, policy }),
   /differs from bridge-owned/,
+);
+const inheritedProfile = configFor(policy);
+const inheritedPermission = (inheritedProfile.permissions as Record<string, Record<string, unknown>>)[
+  CODEX_PERMISSION_PROFILE
+];
+inheritedPermission.extends = "full-access";
+assert.throws(
+  () => assertCodexConfigIsolated({ result: { config: inheritedProfile, origins: {} }, policy }),
+  /permission profile differs/,
+);
+const inheritedNetwork = configFor(policy);
+type TestPermission = Record<string, Record<string, unknown>>;
+const inheritedNetworkProfiles = inheritedNetwork.permissions as Record<string, TestPermission>;
+const inheritedNetworkProfile = inheritedNetworkProfiles[CODEX_PERMISSION_PROFILE];
+inheritedNetworkProfile.network.proxy_url = "http://proxy.invalid";
+assert.throws(
+  () => assertCodexConfigIsolated({ result: { config: inheritedNetwork, origins: {} }, policy }),
+  /permission profile differs/,
 );
 const defaultedConfig = configFor(policy);
 const defaultedMcp = (defaultedConfig.mcp_servers as Record<string, Record<string, unknown>>)["figma-desktop"];
@@ -329,6 +403,9 @@ const qualificationChild = new FakeChild((message, server) => {
   if (method === "model/list") server.send({ id, result: { data: [{
     id: "qualified", model: "qualified", displayName: "Qualified", hidden: false, isDefault: true,
     inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Low" }],
+  }, {
+    id: "no-effort", model: "no-effort", displayName: "No effort", hidden: false, isDefault: false,
+    inputModalities: ["text", "image"], supportedReasoningEfforts: [],
   }] } });
   if (method === "permissionProfile/list") server.send({
     id, result: { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] },
@@ -342,6 +419,19 @@ const qualification = await qualifyCodexRuntime({
 assert.deepEqual(qualification, {
   version: "0.154.0", auth: "chatgpt", models: [{ value: "qualified", label: "Qualified", efforts: ["low"] }],
 });
+const noEffortChild = new FakeChild((message, server) => {
+  if (message.method === "initialize") server.send({ id: message.id,
+    result: { userAgent: "codex/0.154.0", codexHome: "/real", platformFamily: "unix", platformOs: "linux" } });
+  if (message.method === "account/read") server.send({ id: message.id,
+    result: { requiresOpenaiAuth: true, account: { type: "apiKey" } } });
+  if (message.method === "model/list") server.send({ id: message.id, result: { data: [{
+    id: "empty", model: "empty", displayName: "Empty", hidden: false, isDefault: true,
+    inputModalities: ["text", "image"], supportedReasoningEfforts: [],
+  }] } });
+});
+await assert.rejects(qualifyCodexRuntime({ policy,
+  client: new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => noEffortChild }),
+}), /no qualified text\/image model/);
 const leakingChild = new FakeChild((message, server) => {
   const id = message.id, method = message.method;
   if (method === "initialize") server.send({

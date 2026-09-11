@@ -136,6 +136,10 @@ Plan PR: https://github.com/sesori-ai/sesori-figma-review/pull/1.
   static inspection. It failed before requested executable `macos` launched with exact error
   `sandbox-exec: execvp() of 'macos' failed: No such file or directory` and exit `71`. No side effects were observed;
   it provides no enforcement qualification. `0.154.0` remains a schema/protocol candidate, not native support.
+- PR #5 feedback batch 1 hardened asynchronous stdin/output/timeout terminal handling, replaced quadratic stdout
+  concatenation, validated exact approval/profile inheritance state, excluded models without efforts, and closed
+  Codex workspace symlink/hardlink paths with deterministic tests. User-agent prefix tightening was rejected:
+  0.154.0 constructs it from mutable process-global originator state, so only exact consumed version is stable.
 
 ## Qualification gates before user-facing Codex exposure
 

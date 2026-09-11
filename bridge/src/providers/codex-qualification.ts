@@ -59,7 +59,7 @@ export async function qualifyCodexRuntime(args: {
   });
   if (models.nextCursor) throw new Error("Codex model catalog exceeds the bounded qualification page");
   const projectedModels = projectCodexModels(models);
-  if (!projectedModels.length || projectedModels.some(model => !model.efforts.length)) {
+  if (!projectedModels.length) {
     throw new Error("Codex has no qualified text/image model with advertised reasoning efforts");
   }
   const profiles = await args.client.request({

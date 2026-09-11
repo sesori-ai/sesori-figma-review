@@ -3,7 +3,10 @@
 // and notes/ is the only place it may write files. CLAUDE.md, settings and .mcp.json are written once and
 // never overwritten, so teammates can edit them per file; the skill is ours and is refreshed on every start.
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync, constants, copyFileSync, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync,
+  readFileSync, renameSync, rmSync, writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +46,23 @@ const writeOwnedIfMissing = (path: string, content: string) => {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
 };
+const replaceOwnedFile = (path: string, content: string) => {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+  try {
+    const entry = fstatSync(fd);
+    if (!entry.isFile() || entry.nlink !== 1) throw new Error(`Refusing unsafe Codex owned file: ${path}`);
+    ftruncateSync(fd); writeFileSync(fd, content);
+  } finally { closeSync(fd); }
+};
+const readSeedFile = (path: string) => {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) { throw new Error(`Refusing unsafe Codex seed file: ${path}`, { cause: error }); }
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`Refusing unsafe Codex seed file: ${path}`);
+    return readFileSync(fd, "utf8");
+  } finally { closeSync(fd); }
+};
 const lstatIfPresent = (path: string) => {
   try { return lstatSync(path); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
@@ -71,12 +91,15 @@ export function provisionCodexWorkspace(args: { dir: string }) {
   if (instructions && (instructions.isSymbolicLink() || !instructions.isFile())) {
     throw new Error(`Refusing unsafe Codex instructions file: ${instructionsPath}`);
   }
-  writeOwnedIfMissing(instructionsPath, CODEX_INSTRUCTIONS_NOTE + readFileSync(join(args.dir, "CLAUDE.md"), "utf8"));
+  if (!instructions) {
+    const sourcePath = join(args.dir, "CLAUDE.md");
+    writeOwnedIfMissing(instructionsPath, CODEX_INSTRUCTIONS_NOTE + readSeedFile(sourcePath));
+  }
   const skill = lstatIfPresent(skillPath);
-  if (skill && (skill.isSymbolicLink() || !skill.isFile())) {
+  if (skill && (skill.isSymbolicLink() || !skill.isFile() || skill.nlink !== 1)) {
     throw new Error(`Refusing unsafe Codex skill file: ${skillPath}`);
   }
-  writeFileSync(skillPath, REVIEW_FLOW_SKILL);
+  replaceOwnedFile(skillPath, REVIEW_FLOW_SKILL);
   return { instructionsPath, skillPath };
 }
 export const readReviewFlowSkill = () => REVIEW_FLOW_SKILL;

@@ -14,7 +14,7 @@ const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
-type InputStream = Pick<Writable, "write" | "end">;
+type InputStream = Pick<Writable, "write" | "end" | "on">;
 type OutputStream = Pick<Readable, "on" | "off">;
 export type CodexChild = {
   stdin: InputStream;
@@ -34,6 +34,39 @@ const defaultChildFactory: CodexChildFactory = args => spawn(args.command, args.
   stdio: ["pipe", "pipe", "pipe"],
 });
 
+class LineAccumulator {
+  private chunks: { bytes: Buffer; start: number }[] = [];
+  private newlines: number[] = [];
+  private nextNewline = 0;
+  private consumed = 0;
+  private total = 0;
+  get length() { return this.total - this.consumed; }
+  push(bytes: Buffer) {
+    const start = this.total;
+    this.chunks.push({ bytes, start });
+    for (let offset = bytes.indexOf(0x0a); offset >= 0; offset = bytes.indexOf(0x0a, offset + 1)) {
+      this.newlines.push(start + offset);
+    }
+    this.total += bytes.length;
+  }
+  takeLine(): Buffer | undefined {
+    const end = this.newlines[this.nextNewline];
+    if (end === undefined) return;
+    this.nextNewline++;
+    const length = end - this.consumed;
+    const parts = this.chunks.flatMap(chunk => {
+      const from = Math.max(this.consumed - chunk.start, 0);
+      const to = Math.min(end - chunk.start, chunk.bytes.length);
+      return to > from ? [chunk.bytes.subarray(from, to)] : [];
+    });
+    this.consumed = end + 1;
+    this.chunks = this.chunks.filter(chunk => chunk.start + chunk.bytes.length > this.consumed);
+    return parts.length === 1 ? parts[0] : Buffer.concat(parts, length);
+  }
+  text() { return this.chunks.map(chunk => chunk.bytes.subarray(Math.max(this.consumed - chunk.start, 0)))
+    .join(""); }
+}
+
 type Pending = {
   method: string;
   parse: (value: unknown) => unknown;
@@ -52,7 +85,7 @@ export class CodexClient {
   private initialized?: CodexInitializeResult;
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, Pending>();
-  private stdoutBuffer = Buffer.alloc(0);
+  private readonly stdoutBuffer = new LineAccumulator();
   private stderrBuffer = Buffer.alloc(0);
   private terminalError?: Error;
   private nativeOutputBytes = 0;
@@ -95,6 +128,7 @@ export class CodexClient {
         cwd: this.args.policy.dir,
       });
       this.child = child;
+      child.stdin.on("error", this.onStdinError);
       child.stdout.on("data", this.onStdoutData);
       child.stdout.on("end", this.onStdoutEnd);
       child.stderr.on("data", this.onStderrData);
@@ -122,11 +156,10 @@ export class CodexClient {
     if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
+      const timeoutMs = this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        const timeoutMs = this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-        reject(new Error(`Codex ${args.method} timed out after ${timeoutMs}ms`));
-      }, this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+        this.terminate(new Error(`Codex ${args.method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
       this.pending.set(id, {
         method: args.method,
         parse: args.parse,
@@ -150,7 +183,8 @@ export class CodexClient {
 
   private acceptNativeBytes(bytes: number) {
     this.nativeOutputBytes += bytes;
-    this.args.onNativeOutput?.(bytes);
+    try { this.args.onNativeOutput?.(bytes); }
+    catch (error) { this.terminate(this.error(error)); return false; }
     if (this.nativeOutputBytes > (this.args.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES)) {
       this.terminate(new Error("Codex native output exceeds bounded aggregate limit"));
       return false;
@@ -162,17 +196,18 @@ export class CodexClient {
     if (this.terminalError) return;
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     if (!this.acceptNativeBytes(bytes.length)) return;
-    this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, bytes]);
+    this.stdoutBuffer.push(bytes);
     const limit = this.args.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
     for (;;) {
-      const newline = this.stdoutBuffer.indexOf(0x0a);
-      if (newline < 0) {
+      const frame = this.stdoutBuffer.takeLine();
+      if (!frame) {
         if (this.stdoutBuffer.length > limit) this.terminate(new Error("Codex stdout line exceeds bounded line limit"));
         return;
       }
-      if (newline + 1 > limit) { this.terminate(new Error("Codex stdout line exceeds bounded line limit")); return; }
-      const line = this.stdoutBuffer.subarray(0, newline).toString("utf8").replace(/\r$/, "");
-      this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
+      if (frame.length + 1 > limit) {
+        this.terminate(new Error("Codex stdout line exceeds bounded line limit")); return;
+      }
+      const line = frame.toString("utf8").replace(/\r$/, "");
       if (!line.trim()) continue;
       try { this.receive(JSON.parse(line)); }
       catch (error) { this.terminate(new Error(`Malformed Codex RPC message: ${this.error(error).message}`)); return; }
@@ -224,11 +259,14 @@ export class CodexClient {
 
   private readonly onStdoutEnd = () => {
     if (this.terminalError) return;
-    if (this.stdoutBuffer.toString("utf8").trim()) {
+    if (this.stdoutBuffer.text().trim()) {
       this.terminate(new Error("Codex stdout ended with an incomplete RPC frame"));
     } else {
       this.terminate(new Error("Codex App Server stdout closed unexpectedly"));
     }
+  };
+  private readonly onStdinError = (error: Error) => {
+    if (!this.terminalError) this.terminate(new Error(`Codex App Server stdin failed: ${error.message}`));
   };
   private readonly onStderrData = (chunk: Buffer | string) => {
     if (this.terminalError) return;

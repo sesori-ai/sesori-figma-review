@@ -76,7 +76,8 @@ export type CodexConfigReadResult = z.infer<typeof configReadResult>;
 export const parseConfigReadResult = (value: unknown): CodexConfigReadResult => configReadResult.parse(value);
 
 export const projectCodexModels = (result: CodexModelListResult): ModelDescriptor[] => result.data
-  .filter(item => !item.hidden && item.inputModalities.includes("text") && item.inputModalities.includes("image"))
+  .filter(item => !item.hidden && item.inputModalities.includes("text") && item.inputModalities.includes("image")
+    && item.supportedReasoningEfforts.length > 0)
   .map(item => ({
     value: item.model,
     label: item.displayName,
