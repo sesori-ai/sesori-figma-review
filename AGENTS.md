@@ -14,8 +14,8 @@ what it does, [ARCHITECTURE.md](ARCHITECTURE.md) how the pieces fit, [PLAN.md](P
 
 - `npm run check` (type-check plus the sandbox, UI and bridge self-checks) passes before a PR goes up. `npm run build`
   produces `plugin/dist/` and `bridge/dist/bridge.mjs`; neither is committed.
-- Checks live next to the code they cover as `*.check.ts` and run from `npm run check`. Non-trivial logic gets one;
-  one-liners do not.
+- Checks live next to the code they cover (`*.check.ts`, or `*.check.mjs` where there is nothing to compile) and run
+  from `npm run check`. Non-trivial logic gets one; one-liners do not.
 - `ponytail:` comments mark deliberate shortcuts and name the upgrade path. Keep them accurate and keep
   ARCHITECTURE.md's "Known shortcuts" list in sync.
 - The bridge version comes from the root `package.json`, the plugin's from `plugin/package.json`, and the panel shows

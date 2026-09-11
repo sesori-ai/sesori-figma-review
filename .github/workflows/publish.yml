@@ -36,12 +36,22 @@ jobs:
       - name: Release notes from the CHANGELOG section
         run: |
           awk -v heading="## [${GITHUB_REF_NAME#v}]" '$0 == heading { found = 1; next } found && /^## \[/ { exit } found' CHANGELOG.md > notes.md
-          test -s notes.md || { echo "CHANGELOG.md has no section for $GITHUB_REF_NAME"; exit 1; }
+          grep -q '[^[:space:]]' notes.md || { echo "CHANGELOG.md has no section for $GITHUB_REF_NAME, or it is empty"; exit 1; }
 
       - run: npm run check
-      - run: npm publish --access public
+
+      # Both steps skip work that already exists, so re-running the job after a partial
+      # release finishes it instead of failing on the immutable npm version.
+      - name: Publish to npm
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          if npm view "@sesori/figma-review@$version" version > /dev/null 2>&1; then
+            echo "@sesori/figma-review@$version is already published; skipping"
+          else
+            npm publish --access public
+          fi
 
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+        run: gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
