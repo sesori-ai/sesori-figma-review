@@ -134,13 +134,14 @@ const usage = (input: number, cost: number, status: "reported" | "estimated", tu
 });
 
 const claude = new FakeProvider("claude"), codex = new FakeProvider("codex");
-const logs: string[] = [], staleSessionLogs = new ObservedCalls(), staleInterruptLogs = new ObservedCalls();
+const logs: string[] = [], staleSessionLogs = new ObservedCalls(), staleInterruptLogs = new ObservedCalls(), staleStartLogs = new ObservedCalls();
 let mcpStatus = 503, rejectSettingsRename = false, temporarySettingsPath = "";
 const app = createReviewBridge({
   version: "test", port: 0, log: (...values) => {
     const line = values.map(String).join(" "); logs.push(line);
     if (line.includes("stale session error")) staleSessionLogs.hit();
     if (line.includes("stale interrupt failed")) staleInterruptLogs.hit();
+    if (line.includes("stale provider start failed")) staleStartLogs.hit();
   },
   createProviders: () => ({ claude, codex }), fetchMcp: async () => new Response(null, { status: mcpStatus }),
   settingsIo: {
@@ -197,8 +198,9 @@ const oldSession = new FakeSession("claude"), oldReconcile = deferred<void>(); o
 claude.starts[1].deferred.resolve(oldSession); await oldSession.settingCalls.waitFor({ count: 1 });
 fresh.send(startMessage("current")); await claude.startCalls.waitFor({ count: 3 });
 const supersededError = await supersededClient.next(message => message.kind === "error");
-assert.deepEqual([supersededError.intentId, oldSession.sent.length], ["old", 0]);
-oldReconcile.resolve(); await oldSession.closeCalls.waitFor({ count: 1 });
+await oldSession.closeCalls.waitFor({ count: 1 });
+assert.deepEqual([supersededError.intentId, oldSession.sent.length, oldSession.closed], ["old", 0, 1]);
+oldReconcile.reject(new Error("late superseded reconciliation")); await staleStartLogs.waitFor({ count: 1 });
 fresh.send({ kind: "settings", requestId: "during-current", provider: "claude", settings: { model: "sonnet", effort: "medium" } });
 await fresh.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "during-current" }));
 const currentSession = new FakeSession("claude"), currentReconcile = deferred<void>(); currentSession.settingGate = currentReconcile;
@@ -207,6 +209,7 @@ await currentSession.settingCalls.waitFor({ count: 1 }); assert.equal(currentSes
 currentReconcile.resolve(); await currentSession.sendCalls.waitFor({ count: 1 }); currentSession.settingGate = undefined;
 assert.deepEqual([oldSession.closed, oldSession.sent.length, currentSession.sent, currentSession.settings[0]],
   [1, 0, ["prompt-current"], { model: "sonnet", effort: "medium" }]);
+assert.deepEqual(fresh.matching(message => message.kind === "error"), [], "late reconciliation cannot contaminate replacement");
 currentSession.output.push(initialized("native-current"));
 await fresh.next(down({ kind: "started", where: message => message.intentId === "current" }));
 assert.ok(logs.some(line => line.includes("advisory preparation failed"))); claude.throwOnPrepare = false;
@@ -386,9 +389,24 @@ const reconcileFailure = new FakeSession("claude"); reconcileFailure.throwSettin
 await reconcileFailure.closeCalls.waitFor({ count: 1 });
 const reconciliationError = await attachedClient.next(message => message.kind === "error");
 assert.deepEqual([reconciliationError.intentId, reconcileFailure.sent.length], ["reconcile-failure", 0]);
-
-valid.close(); settingsOrigin.close(); fresh.close(); attachedClient.close(); other.close(); supersededClient.close();
-await app.shutdown();
+attachedClient.send(startMessage("close-held")); await claude.startCalls.waitFor({ count: 7 });
+attachedClient.send({ kind: "settings", requestId: "close-latest", provider: "claude", settings: { model: "sonnet", effort: "low" } });
+await attachedClient.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "close-latest" }));
+const closeHeld = new FakeSession("claude"), closeGate = deferred<void>(); closeHeld.settingGate = closeGate;
+claude.starts[6].deferred.resolve(closeHeld); await closeHeld.settingCalls.waitFor({ count: 1 });
+other.send({ kind: "close", reason: "foreign file closed" }); other.send({ kind: "health" }); await other.next(message => message.kind === "health");
+assert.equal(closeHeld.closed, 0, "foreign-file close cannot retire pending native session");
+attachedClient.send({ kind: "close", reason: "owning file closed" }); await closeHeld.closeCalls.waitFor({ count: 1 });
+assert.equal(closeHeld.sent.length, 0, "owning-file close retires native session before reconciliation settles"); closeGate.resolve();
+attachedClient.send(startMessage("shutdown-held")); await claude.startCalls.waitFor({ count: 8 });
+attachedClient.send({ kind: "settings", requestId: "shutdown-latest", provider: "claude", settings: { model: "haiku", effort: "medium" } });
+await attachedClient.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "shutdown-latest" }));
+const shutdownHeld = new FakeSession("claude"), shutdownGate = deferred<void>(); shutdownHeld.settingGate = shutdownGate;
+claude.starts[7].deferred.resolve(shutdownHeld); await shutdownHeld.settingCalls.waitFor({ count: 1 });
+const shutdown = app.shutdown(); await shutdownHeld.closeCalls.waitFor({ count: 1 });
+assert.equal(shutdownHeld.sent.length, 0, "shutdown retires native session before reconciliation settles");
+shutdownGate.reject(new Error("late shutdown reconciliation")); await staleStartLogs.waitFor({ count: 2 }); await shutdown;
+assert.deepEqual([closeHeld.closed, closeHeld.sent.length, shutdownHeld.closed, shutdownHeld.sent.length], [1, 0, 1, 0]);
 const transportApp = createReviewBridge({ version: "test", port: 0, log: () => {},
   createProviders: () => ({ claude: undefined, codex: undefined }) });
 const transportClient = await new Client(await transportApp.listening).opened();

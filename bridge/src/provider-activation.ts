@@ -7,14 +7,15 @@ export async function activateProvider(args: {
   provider: ReviewProvider;
   start: StartArgs;
   isCurrent: () => boolean;
+  capture: (session: ReviewSession) => void;
   reconcile?: (session: ReviewSession) => Promise<void>;
   accept: (session: ReviewSession) => void;
 }): Promise<ReviewSession | undefined> {
   const session = await args.provider.start(args.start);
-  if (!args.isCurrent()) { session.close(); return; }
-  try { await args.reconcile?.(session); }
-  catch (error) { session.close(); throw error; }
-  if (!args.isCurrent()) { session.close(); return; }
+  args.capture(session);
+  if (!args.isCurrent()) return;
+  await args.reconcile?.(session);
+  if (!args.isCurrent()) return;
   args.accept(session);
   return session;
 }

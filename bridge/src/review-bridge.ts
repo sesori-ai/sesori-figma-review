@@ -20,6 +20,7 @@ import { readSessions, readSettings, saveSession, saveSettings, workspaceFor, ze
 
 type ProviderMap = Record<ProviderId, ReviewProvider | undefined>;
 type Socket = WebSocket & { fileId?: string; protocolOk?: boolean };
+type PendingStart = { fileId: string; intentId: string; owner: string; session?: ReviewSession };
 type Conversation = {
   owner: string;
   intentId: string;
@@ -69,7 +70,7 @@ export function createReviewBridge(args: {
   const activeOwners = new Set<string>();
   let figmaMcp: Health["figmaMcp"] = "down";
   let conv: Conversation | undefined;
-  let starting: { fileId: string; intentId: string; owner: string } | undefined;
+  let starting: PendingStart | undefined;
   let stopped = false;
   let claudeSettings = Promise.resolve(), codexSettings = Promise.resolve();
 
@@ -137,6 +138,10 @@ export function createReviewBridge(args: {
     activeOwners.delete(owner.owner);
     cancelRequests(owner);
   }
+  function retireStart(args: { start: PendingStart; reason: string }) {
+    deactivate({ owner: args.start.owner, reason: args.reason });
+    const session = args.start.session; args.start.session = undefined; session?.close();
+  }
   function prepareProvider(provider: ReviewProvider, fileId: string, dir: string) {
     try { provider.prepare({ fileId, dir, settings: readSettings().providers[provider.id], boundary: dormantBoundary }); }
     catch (error) { args.log(`${provider.id} advisory preparation failed`, error); }
@@ -159,11 +164,11 @@ export function createReviewBridge(args: {
   }
 
   async function startConversation(message: Extract<UpMsg, { kind: "start" }>) {
-    const reservation = { fileId: message.fileId, intentId: message.intentId, owner: randomUUID() };
+    const reservation: PendingStart = { fileId: message.fileId, intentId: message.intentId, owner: randomUUID() };
     const superseded = starting;
     starting = reservation;
     if (superseded) {
-      deactivate({ owner: superseded.owner, reason: "Pending start superseded" });
+      retireStart({ start: superseded, reason: "Pending start superseded" });
       send(superseded.fileId, { kind: "error", intentId: superseded.intentId, message: "Pending start was superseded by another file." });
     }
     endConversation("Started another session");
@@ -173,7 +178,7 @@ export function createReviewBridge(args: {
     const provider = providers[providerId];
     if (!provider) {
       if (starting === reservation) starting = undefined;
-      deactivate({ owner: reservation.owner, reason: "Provider unavailable" });
+      retireStart({ start: reservation, reason: "Provider unavailable" });
       return send(message.fileId, { kind: "error", intentId: reservation.intentId, message: `${providerId === "codex" ? "Codex" : providerId} is not available in this build.` });
     }
     const previous = message.resume
@@ -181,7 +186,7 @@ export function createReviewBridge(args: {
       : undefined;
     if (message.resume && !previous) {
       if (starting === reservation) starting = undefined;
-      deactivate({ owner: reservation.owner, reason: "Unknown resume session" });
+      retireStart({ start: reservation, reason: "Unknown resume session" });
       return send(message.fileId, { kind: "error", intentId: reservation.intentId, message: "Unknown provider-qualified session" });
     }
     const record = previous ?? freshRecord(message, providerId);
@@ -201,6 +206,7 @@ export function createReviewBridge(args: {
           baseRecord: record,
         },
         isCurrent: () => starting === reservation,
+        capture: session => { if (starting === reservation) reservation.session = session; else session.close(); },
         reconcile: async session => {
           while (starting === reservation) {
             const latest = readSettings().providers[providerId];
@@ -212,6 +218,7 @@ export function createReviewBridge(args: {
         },
         accept: session => {
           const current: Conversation = { owner, intentId: message.intentId, fileId: message.fileId, dir, record, session, busy: true, textItems: new Map() };
+          reservation.session = undefined;
           starting = undefined;
           conv = current;
           const anchor = `Figma file "${message.fileName}", page "${message.pageName}" (${message.pageId}). Anchor: ${message.anchor.type}${message.anchor.nodeIds.length ? ` ${message.anchor.nodeIds.join(", ")}` : ""}`;
@@ -232,9 +239,9 @@ export function createReviewBridge(args: {
           prepareProvider(provider, message.fileId, dir);
         },
       });
-      if (!activated) deactivate({ owner, reason: "Superseded while starting" });
+      if (!activated) retireStart({ start: reservation, reason: "Superseded while starting" });
     } catch (error) {
-      deactivate({ owner, reason: "Session failed to start" });
+      retireStart({ start: reservation, reason: "Session failed to start" });
       if (dispatchFailed) return;
       if (starting === reservation) {
         starting = undefined;
@@ -453,7 +460,7 @@ export function createReviewBridge(args: {
         if (!ws.fileId || clients.get(ws.fileId) !== ws) return;
         if (starting?.fileId === ws.fileId) {
           const abandoned = starting; starting = undefined;
-          deactivate({ owner: abandoned.owner, reason: message.reason });
+          retireStart({ start: abandoned, reason: message.reason });
         }
         if (conv?.fileId === ws.fileId) endConversation(message.reason);
         return;
@@ -503,7 +510,7 @@ export function createReviewBridge(args: {
     shutdown: async () => {
       if (stopped) return;
       stopped = true;
-      if (starting) deactivate({ owner: starting.owner, reason: "Bridge shutting down" });
+      if (starting) retireStart({ start: starting, reason: "Bridge shutting down" });
       starting = undefined;
       endConversation("Bridge shutting down");
       for (const provider of Object.values(providers)) provider?.dispose();

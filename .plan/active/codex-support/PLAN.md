@@ -2,8 +2,8 @@
 
 Status: Steps 1 and 2 squash-merged as `232048a` and `ece1379d6768ecc032d6f030933034007d357910`. Older cutover
 checkpoint `f7265eb` remains reference-only on `origin/codex-support-step-2`; superseded PR #2 was not merged.
-Step 3's implementation reviews rejected two checkpoints. Parent-probed queue/history/transport/smoke-lifetime fixes
-are implemented locally; another focused independent review remains required before publication.
+Step 3's reviewed queue/history/transport/smoke-lifetime and pending-native cancellation fixes are implemented
+locally; another focused independent review remains required before publication.
 
 ## Goal and locked user direction
 
