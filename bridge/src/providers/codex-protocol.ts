@@ -83,3 +83,136 @@ export const projectCodexModels = (result: CodexModelListResult): ModelDescripto
     label: item.displayName,
     efforts: item.supportedReasoningEfforts.map(option => option.reasoningEffort),
   }));
+
+const identifier = z.string().min(1);
+const userInput = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("text"), text: z.string() }).passthrough(),
+  z.object({ type: z.literal("image"), url: z.string() }).passthrough(),
+  z.object({ type: z.literal("localImage"), path: z.string() }).passthrough(),
+  z.object({ type: z.literal("skill"), name: z.string(), path: z.string() }).passthrough(),
+]);
+const fileChange = z.object({ path: z.string(), kind: z.unknown(), diff: z.string() }).passthrough();
+const dynamicContent = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("inputText"), text: z.string() }),
+  z.object({ type: z.literal("inputImage"), imageUrl: z.string() }),
+  z.object({ type: z.literal("inputAudio"), audioUrl: z.string() }),
+]);
+const knownThreadItem = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("userMessage"), id: identifier, content: z.array(userInput) }).passthrough(),
+  z.object({ type: z.literal("agentMessage"), id: identifier, text: z.string() }).passthrough(),
+  z.object({ type: z.literal("dynamicToolCall"), id: identifier, tool: identifier, arguments: z.unknown(),
+    status: z.string(), contentItems: z.array(dynamicContent).nullable().optional(), success: z.boolean().nullable().optional() }).passthrough(),
+  z.object({ type: z.literal("commandExecution"), id: identifier, command: z.string(), cwd: z.string(),
+    status: z.string() }).passthrough(),
+  z.object({ type: z.literal("fileChange"), id: identifier, changes: z.array(fileChange), status: z.string() }).passthrough(),
+  z.object({ type: z.literal("mcpToolCall"), id: identifier, server: identifier, tool: identifier,
+    arguments: z.unknown(), status: z.string() }).passthrough(),
+  z.object({ type: z.literal("contextCompaction"), id: identifier }).passthrough(),
+]);
+export const codexThreadItem = z.union([
+  knownThreadItem,
+  z.object({ type: z.string(), id: identifier }).passthrough().transform(value => ({ type: "ignored" as const, id: value.id })),
+]);
+export type CodexThreadItem = z.infer<typeof codexThreadItem>;
+const turn = z.object({ id: identifier, items: z.array(codexThreadItem), status: z.enum([
+  "completed", "interrupted", "failed", "inProgress",
+]), error: z.object({ message: z.string() }).passthrough().nullable().optional() }).passthrough();
+const threadEnvironment = z.object({
+  environmentId: z.literal("local"), cwd: z.string(), runtimeWorkspaceRoots: z.array(z.string()),
+});
+const thread = z.object({
+  id: identifier, turns: z.array(turn), environments: z.array(threadEnvironment).nullable().optional(),
+}).passthrough();
+const threadStartResult = z.object({
+  thread, model: identifier, cwd: z.string(), runtimeWorkspaceRoots: z.array(z.string()),
+  approvalsReviewer: z.enum(["user", "auto_review"]), approvalPolicy: record,
+  activePermissionProfile: z.object({ id: identifier, extends: z.string().nullable().optional() }).passthrough().nullable(),
+  reasoningEffort: z.string().nullable(), serviceTier: z.string().nullable(),
+}).passthrough();
+export type CodexThreadStartResult = z.infer<typeof threadStartResult>;
+export const parseThreadStartResult = (value: unknown): CodexThreadStartResult => threadStartResult.parse(value);
+export const parseThreadReadResult = (value: unknown) => z.object({ thread }).passthrough().parse(value);
+export const parseTurnStartResult = (value: unknown) => z.object({ turn }).passthrough().parse(value);
+export const parseEmptyResult = (value: unknown) => z.object({}).passthrough().parse(value);
+export const parseTurnSteerResult = (value: unknown) => z.object({ turnId: identifier }).passthrough().parse(value);
+export const parseTurnSettingsResult = (value: unknown) => z.object({
+  status: z.enum(["applied", "targetUnavailable"]),
+}).passthrough().parse(value);
+
+const envelope = { threadId: identifier, turnId: identifier };
+const turnNotification = z.object({ threadId: identifier, turn });
+const itemNotification = z.object({ ...envelope, item: codexThreadItem });
+const deltaNotification = z.object({ ...envelope, itemId: identifier, delta: z.string() });
+const threadSettingsNotification = z.object({
+  threadId: identifier, threadSettings: z.object({ model: identifier, effort: z.string().nullable() }).passthrough(),
+});
+const usageNotification = z.object({
+  ...envelope,
+  tokenUsage: z.object({ total: z.object({
+    inputTokens: z.number().int().nonnegative().safe(), cachedInputTokens: z.number().int().nonnegative().safe(),
+    cacheWriteInputTokens: z.number().int().nonnegative().safe().default(0),
+    outputTokens: z.number().int().nonnegative().safe(), reasoningOutputTokens: z.number().int().nonnegative().safe(),
+  }).passthrough() }).passthrough(),
+});
+export type CodexConsumedNotification =
+  | { method: "turn/started"; params: z.infer<typeof turnNotification> }
+  | { method: "turn/completed"; params: z.infer<typeof turnNotification> }
+  | { method: "item/started"; params: z.infer<typeof itemNotification> }
+  | { method: "item/completed"; params: z.infer<typeof itemNotification> }
+  | { method: "item/agentMessage/delta"; params: z.infer<typeof deltaNotification> }
+  | { method: "thread/settings/updated"; params: z.infer<typeof threadSettingsNotification> }
+  | { method: "thread/tokenUsage/updated"; params: z.infer<typeof usageNotification> };
+export const parseCodexNotification = (notification: CodexNotification): CodexConsumedNotification | undefined => {
+  switch (notification.method) {
+    case "turn/started": return { method: "turn/started", params: turnNotification.parse(notification.params) };
+    case "turn/completed": return { method: "turn/completed", params: turnNotification.parse(notification.params) };
+    case "item/started": return { method: "item/started", params: itemNotification.parse(notification.params) };
+    case "item/completed": return { method: "item/completed", params: itemNotification.parse(notification.params) };
+    case "item/agentMessage/delta": return { method: notification.method, params: deltaNotification.parse(notification.params) };
+    case "thread/settings/updated": return { method: notification.method,
+      params: threadSettingsNotification.parse(notification.params) };
+    case "thread/tokenUsage/updated": return { method: notification.method, params: usageNotification.parse(notification.params) };
+    default: return undefined;
+  }
+};
+
+const turnRequestBase = z.object({ threadId: identifier, turnId: identifier }).passthrough();
+const requestBase = turnRequestBase.extend({ itemId: identifier });
+export const parseDynamicToolRequest = (value: unknown) => turnRequestBase.extend({
+  callId: identifier, namespace: z.string().nullable().optional(), tool: identifier, arguments: z.unknown(),
+}).parse(value);
+export const parseCommandApprovalRequest = (value: unknown) => requestBase.extend({
+  kind: z.enum(["command", "writeStdin"]).default("command"), command: z.string().nullable().optional(),
+  cwd: z.string().nullable().optional(), reason: z.string().nullable().optional(),
+  additionalPermissions: record.nullable().optional(), proposedExecpolicyAmendment: z.unknown().nullable().optional(),
+  proposedNetworkPolicyAmendments: z.unknown().nullable().optional(), availableDecisions: z.array(z.string()).nullable().optional(),
+}).parse(value);
+export const parseFileApprovalRequest = (value: unknown) => requestBase.extend({
+  reason: z.string().nullable().optional(), grantRoot: z.string().nullable().optional(),
+}).parse(value);
+export const parsePermissionsApprovalRequest = (value: unknown) => requestBase.extend({
+  cwd: z.string(), reason: z.string().nullable(), permissions: record,
+}).parse(value);
+export const parseUserInputRequest = (value: unknown) => requestBase.extend({
+  isBlocking: z.boolean(), questions: z.array(z.object({
+    id: identifier, question: z.string(), options: z.array(z.object({ label: z.string() }).passthrough()).nullable(),
+  }).passthrough()),
+}).parse(value);
+
+const accountUsage = z.object({ threadUsage: z.object({
+  threadId: identifier,
+  estimatedUsageUsdMicros: z.number().int().nonnegative().safe().nullable(),
+  estimatedUsageCreditsMicros: z.number().int().nonnegative().safe().nullable().optional(),
+}).passthrough().nullable().optional() }).passthrough();
+export const parseAccountUsageResult = (value: unknown) => accountUsage.parse(value);
+export type CodexUsageAvailability = {
+  threadUsagePresent: boolean; threadMatches: boolean; usdPresent: boolean; creditsPresent: boolean;
+};
+export const codexUsageAvailability = (
+  result: ReturnType<typeof parseAccountUsageResult>, expectedThreadId: string,
+): CodexUsageAvailability => ({
+  threadUsagePresent: result.threadUsage != null,
+  threadMatches: result.threadUsage?.threadId === expectedThreadId,
+  usdPresent: result.threadUsage?.estimatedUsageUsdMicros != null,
+  creditsPresent: result.threadUsage?.estimatedUsageCreditsMicros != null,
+});

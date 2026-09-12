@@ -84,7 +84,10 @@ class FakeProvider implements ReviewProvider {
   start(args: { boundary: ProviderRequestBoundary }) {
     const pending = deferred<ReviewSession>(); this.starts.push({ deferred: pending, boundary: args.boundary }); this.startCalls.hit(); return pending.promise;
   }
-  readHistory() { if (this.throwOnHistory) throw new Error("history rejected"); return this.history; }
+  async readHistory() {
+    if (this.throwOnHistory) throw new Error("history rejected");
+    return { messages: this.history };
+  }
   dispose() { this.disposeCount++; }
 }
 type Message<K extends DownMsg["kind"]> = Extract<DownMsg, { kind: K }>;
@@ -257,6 +260,7 @@ const settingsOrigin = fresh, settingsReplacement = await new Client(port).opene
 settingsReplacement.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 await settingsReplacement.next(message => message.kind === "connection");
 assert.deepEqual((await settingsReplacement.next(message => message.kind === "health")).health.settings.providers.claude, beforeLiveSettings);
+const prepareBeforeCommit = claude.prepareCount;
 gate.resolve();
 const settled = await settingsReplacement.next(down({ kind: "health", where: message => !message.health.settingsResult
   && message.health.settings.providers.claude.model === "sonnet" }));
@@ -267,7 +271,8 @@ assert.deepEqual(readSettings().providers, {
   claude: { model: "sonnet", effort: "high" }, codex: { model: "image", effort: "medium" },
 }, "awaited active update preserves unrelated provider commit");
 assert.deepEqual(currentSession.settings.at(-1), { model: "sonnet", effort: "high" });
-assert.equal(claude.disposeCount, disposeBeforeLive + 1);
+assert.deepEqual([claude.disposeCount, claude.prepareCount], [disposeBeforeLive, prepareBeforeCommit],
+  "accepted live settings keep active provider ownership without re-preparing beneath it");
 const reversionGate = deferred<void>(); currentSession.settingGate = reversionGate;
 fresh.send({ kind: "settings", requestId: "away", provider: "claude", settings: { model: "haiku", effort: "low" } });
 await currentSession.settingCalls.waitFor({ count: 3 });
@@ -407,6 +412,40 @@ const shutdown = app.shutdown(); await shutdownHeld.closeCalls.waitFor({ count: 
 assert.equal(shutdownHeld.sent.length, 0, "shutdown retires native session before reconciliation settles");
 shutdownGate.reject(new Error("late shutdown reconciliation")); await staleStartLogs.waitFor({ count: 2 }); await shutdown;
 assert.deepEqual([closeHeld.closed, closeHeld.sent.length, shutdownHeld.closed, shutdownHeld.sent.length], [1, 0, 1, 0]);
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ provider: "codex",
+  providers: { claude: { model: "", effort: "" }, codex: { model: "luna", effort: "max" } } }));
+const codexApp = createReviewBridge({ version: "test", port: 0, log: () => {}, createProviders: () => ({ claude, codex }) });
+const codexClient = await new Client(await codexApp.listening).opened();
+codexClient.send({ kind: "hello", protocolVersion: 3, fileId: "codex-file", fileName: "Codex" });
+await codexClient.next(message => message.kind === "connection"); await codexClient.next(message => message.kind === "health");
+codexClient.send(startMessage("codex-core", "codex-file")); await codex.startCalls.waitFor({ count: 1 });
+for (const tool of ["get_flow", "get_screen", "focus", "annotate", "ask_user"] as const) {
+  const response = codex.starts[0].boundary.tool({ tool, args: { proof: tool } });
+  const card = await codexClient.next(message => message.kind === "tool");
+  assert.deepEqual([card.tool, card.args], [tool, { proof: tool }]);
+  codexClient.send({ kind: "reply", id: card.id, result: { content: [{ type: "text", text: `${tool}-ok` }] } });
+  assert.deepEqual(await response, { content: [{ type: "text", text: `${tool}-ok` }] });
+}
+const permission = codex.starts[0].boundary.permission({ tool: "codex_file_change", input: { pathClass: "notes" } });
+const permissionCard = await codexClient.next(message => message.kind === "permission");
+codexClient.send({ kind: "reply", id: permissionCard.id, result: { behavior: "allow" } });
+assert.deepEqual(await permission, { behavior: "allow" });
+const codexSession = new FakeSession("codex"); codex.starts[0].deferred.resolve(codexSession);
+await codexSession.sendCalls.waitFor({ count: 1 });
+codexSession.output.push({ kind: "initialized", sessionId: "codex-owned", health: {
+  provider: "codex", status: "ready", model: "luna", models: [] } });
+await codexClient.next(down({ kind: "started", where: message => message.session.provider === "codex" }));
+codexSession.output.push({ kind: "usage", usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+  cost: { usd: 0, status: "unavailable" }, turnCompleted: true });
+const codexRecord = await codexClient.next(down({ kind: "session", where: message => message.session.turns === 1 }));
+assert.deepEqual([codexRecord.session.provider, codexRecord.session.costUsd, codexRecord.session.costStatus],
+  ["codex", 0, "unavailable"]);
+codex.history = [{ role: "tool", name: "ask_user", input: { question: "Q" } }, { role: "answer", text: "A" }];
+codexClient.send({ kind: "open", intentId: "codex-history", fileId: "codex-file", fileName: "Codex",
+  session: { provider: "codex", sessionId: "codex-owned" } });
+assert.deepEqual((await codexClient.next(message => message.kind === "history")).messages, codex.history);
+codexClient.send({ kind: "close", reason: "fixture complete" }); await codexSession.closeCalls.waitFor({ count: 1 });
+codexSession.output.reject(new Error("fixture complete")); codexClient.close(); await codexApp.shutdown();
 const transportApp = createReviewBridge({ version: "test", port: 0, log: () => {},
   createProviders: () => ({ claude: undefined, codex: undefined }) });
 const transportClient = await new Client(await transportApp.listening).opened();

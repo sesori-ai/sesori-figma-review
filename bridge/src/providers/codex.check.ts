@@ -60,6 +60,8 @@ assert.deepEqual(
   ["/qualified/codex", ["app-server", "--stdio", "--strict-config"], [policy.notesDir], CODEX_PERMISSION_PROFILE],
 );
 assert.equal("sandbox" in policy.thread, false);
+assert.equal(policy.thread.approvalPolicy.granular.sandbox_approval, false,
+  "unrestricted sandbox approvals stay disabled so APP_REPO remains read-only");
 const profileOverride = policy.args.find(value => value.startsWith(`permissions.${CODEX_PERMISSION_PROFILE}=`));
 assert.ok(profileOverride?.includes(`${JSON.stringify(policy.appRepo)} = "read"`));
 assert.ok(profileOverride?.includes(`${JSON.stringify(policy.notesDir)} = "write"`));
@@ -71,6 +73,8 @@ assert.equal(
 );
 assert.ok(policy.args.includes("features.plugins=false"));
 assert.ok(policy.args.includes("features.multi_agent=false"));
+assert.ok(policy.args.includes("features.request_permissions_tool=true"));
+assert.ok(policy.args.includes("features.step_model_switching=true"));
 assert.ok(policy.args.some(value => value.startsWith("apps=") && value.includes('"_default" = { enabled = false }')));
 mkdirSync(join(dir, "source"));
 assert.throws(
@@ -315,12 +319,13 @@ const configFor = (selected: CodexExecutionPolicy): Record<string, unknown> => (
   default_permissions: CODEX_PERMISSION_PROFILE,
   approvals_reviewer: "user",
   approval_policy: { granular: {
-    sandbox_approval: true, rules: true, mcp_elicitations: false, request_permissions: true, skill_approval: false,
+    sandbox_approval: false, rules: true, mcp_elicitations: false, request_permissions: true, skill_approval: false,
   } },
   web_search: "disabled",
   features: {
     apps: false, plugins: false, multi_agent: false, remote_plugin: false, hooks: false, goals: false, memories: false,
     web_search: false, web_search_cached: false, web_search_request: false, skill_mcp_dependency_install: false,
+    request_permissions_tool: true, step_model_switching: true,
   },
   agents: { enabled: false }, feedback: { enabled: false }, apps: { _default: { enabled: false } }, plugins: {},
   mcp_servers: { "figma-desktop": { enabled: true, url: "http://127.0.0.1:3845/mcp" } },
@@ -360,6 +365,17 @@ assert.throws(
   () => assertCodexConfigIsolated({ result: { config: unsafeApproval, origins: {} }, policy }),
   /granular approval policy/,
 );
+for (const feature of ["request_permissions_tool", "step_model_switching"]) {
+  for (const value of [undefined, false]) {
+    const missingCapability = configFor(policy);
+    if (value === undefined) delete (missingCapability.features as Record<string, unknown>)[feature];
+    else (missingCapability.features as Record<string, unknown>)[feature] = value;
+    assert.throws(
+      () => assertCodexConfigIsolated({ result: { config: missingCapability, origins: {} }, policy }),
+      new RegExp(`features\\.${feature}`),
+    );
+  }
+}
 const unsafeConfig = configFor(policy);
 const unsafeProfile = (unsafeConfig.permissions as Record<string, Record<string, Record<string, unknown>>>)[
   CODEX_PERMISSION_PROFILE

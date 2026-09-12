@@ -33,6 +33,12 @@ export interface ReviewSession {
   close(): void;
 }
 
+export type ProviderHistory = {
+  messages: HistoryItem[];
+  usage?: Usage;
+  cost?: { usd: number; status: CostStatus };
+};
+
 export interface ReviewProvider {
   readonly id: ProviderId;
   health(args: { settings: ProviderSettings }): ProviderHealth;
@@ -45,6 +51,13 @@ export interface ReviewProvider {
     boundary: ProviderRequestBoundary;
     baseRecord: ProviderSessionRecord;
   }): Promise<ReviewSession>;
-  readHistory(args: { dir: string; sessionId: string }): HistoryItem[];
+  readHistory(args: {
+    fileId: string;
+    dir: string;
+    sessionId: string;
+    settings: ProviderSettings;
+    boundary: ProviderRequestBoundary;
+    baseRecord: ProviderSessionRecord;
+  }): Promise<ProviderHistory>;
   dispose(): void;
 }

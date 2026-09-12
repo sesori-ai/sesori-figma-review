@@ -639,7 +639,9 @@ export class ClaudeProvider implements ReviewProvider {
     });
   }
 
-  readHistory(args: { dir: string; sessionId: string }): HistoryItem[] { return readClaudeTranscript(args); }
+  async readHistory(args: { dir: string; sessionId: string }): Promise<{ messages: HistoryItem[] }> {
+    return { messages: readClaudeTranscript(args) };
+  }
   dispose() {
     const warm = this.warm;
     this.warm = undefined;

@@ -9,10 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added test-client Codex bridge composition and native session/replay support behind existing provider selection.
 - GitHub Releases attach a built `sesori-review-plugin-vX.Y.Z.zip` for manual Figma installation, including the manifest, sandbox/UI bundles, README and license. `npm run package:plugin` builds it locally; packaging checks cover archive layout, version agreement, missing inputs and clean reruns. Release retries rebuild and replace the asset even when npm publishing is skipped.
 
 ### Changed
 
+- Codex keeps verified token usage while reporting Cost unavailable when its supported native API omits USD.
+- Codex now pins required permission/settings capabilities and confirms queued future settings.
 - Quick start and the bridge banner recommend importing the plugin already bundled with npm while Figma Community review is pending. Manual setup docs cover the stable manifest path, standalone release ZIPs, matching bridge versions, and the different update steps for bridge-managed, ZIP and Community installs.
 - Architecture and contributor docs describe manual-install release assets and the `zip`/`unzip` tooling used to package and check them.
 

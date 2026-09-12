@@ -1,0 +1,440 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ProviderOutput, ProviderRequestBoundary } from "./types.ts";
+import type { ProviderSettings, ToolResult } from "../../../shared/protocol.ts";
+import { CodexRpcError } from "./codex-client.ts";
+import { assertCodexLocalDefaults, CODEX_PERMISSION_PROFILE, type CodexExecutionPolicy } from "./codex-execution.ts";
+import {
+  codexUsageAvailability, parseAccountUsageResult, parseCodexNotification, parseDynamicToolRequest,
+  parseThreadStartResult, type CodexNotification,
+  type CodexServerRequest, type CodexThreadStartResult,
+} from "./codex-protocol.ts";
+import {
+  CodexProvider, CodexResumeError, CodexSettingsError, CodexThreadPolicyMismatchError, diagnoseCodexThreadPolicy,
+  projectCodexHistory,
+  type CodexThreadPolicyField,
+} from "./codex.ts";
+
+assert.doesNotThrow(() => parseDynamicToolRequest({ threadId: "thread", turnId: "turn", callId: "call", tool: "focus",
+  arguments: {} }), "native dynamic-tool requests do not carry itemId");
+assert.doesNotThrow(() => parseCodexNotification({ method: "turn/started", params: {
+  threadId: "thread", turn: { id: "turn", items: [], status: "inProgress" },
+} }), "native turn lifecycle notifications carry turn id inside turn");
+
+const root = mkdtempSync(join(tmpdir(), "codex-session-"));
+process.once("exit", () => rmSync(root, { recursive: true, force: true }));
+const dir = join(root, "workspace"), appRepo = join(root, "app");
+mkdirSync(join(dir, "notes"), { recursive: true }); mkdirSync(appRepo);
+const codexHome = join(root, "codex-home"); mkdirSync(codexHome); process.env.CODEX_HOME = codexHome;
+assert.doesNotThrow(assertCodexLocalDefaults);
+writeFileSync(join(codexHome, "environments.toml"), "default = 'local'");
+assert.throws(assertCodexLocalDefaults, /requires an absent environment manifest/);
+rmSync(join(codexHome, "environments.toml"));
+process.env.CODEX_EXEC_SERVER_URL = "remote";
+assert.throws(assertCodexLocalDefaults, /blocked by environment registration input/);
+delete process.env.CODEX_EXEC_SERVER_URL;
+writeFileSync(join(dir, "CLAUDE.md"), "User instructions\n");
+writeFileSync(join(dir, "permissions.json"), JSON.stringify({ allow: [] }));
+writeFileSync(join(dir, "sessions.json"), "[]\n");
+process.env.APP_REPO = appRepo;
+
+const effectiveConfig = (policy: CodexExecutionPolicy) => ({
+  default_permissions: CODEX_PERMISSION_PROFILE,
+  approvals_reviewer: "user",
+  approval_policy: { granular: {
+    sandbox_approval: false, rules: true, mcp_elicitations: false, request_permissions: true, skill_approval: false,
+  } },
+  web_search: "disabled",
+  features: {
+    apps: false, plugins: false, multi_agent: false, remote_plugin: false, hooks: false, goals: false, memories: false,
+    web_search: false, web_search_cached: false, web_search_request: false, skill_mcp_dependency_install: false,
+    request_permissions_tool: true, step_model_switching: true,
+  },
+  agents: { enabled: false }, feedback: { enabled: false }, apps: { _default: { enabled: false } }, plugins: {},
+  mcp_servers: { "figma-desktop": { enabled: true, url: "http://127.0.0.1:3845/mcp" } },
+  permissions: { [CODEX_PERMISSION_PROFILE]: {
+    description: "Sesori Review: workspace read-only, notes write-only",
+    filesystem: {
+      ":minimal": "read", [policy.dir]: "read", [policy.notesDir]: "write", [policy.appRepo!]: "read",
+    },
+    network: { enabled: false },
+  } },
+});
+
+type RpcArgs<T> = { method: string; params: unknown; parse: (value: unknown) => T };
+type Call = { method: string; params: unknown };
+class FakeClient {
+  calls: Call[] = [];
+  disposed = 0;
+  responses = new Map<string, unknown>();
+  failures = new Map<string, Error>();
+  confirmSettings = true;
+  retirementGate?: Promise<void>;
+  constructor(readonly args: {
+    policy: CodexExecutionPolicy;
+    onRequest?: (request: CodexServerRequest) => Promise<unknown>;
+    onNotification?: (notification: CodexNotification) => void;
+    onTerminal?: (error: Error) => void;
+  }, readonly kind: "discovery" | "runtime") {}
+  async connect() {
+    this.calls.push({ method: "initialize", params: {} });
+    return { userAgent: "codex_app_server/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "macos" };
+  }
+  async request<T>(args: RpcArgs<T>): Promise<T> {
+    this.calls.push({ method: args.method, params: args.params });
+    const failure = this.failures.get(args.method);
+    if (failure) { this.failures.delete(args.method); throw failure; }
+    let response = this.responses.get(args.method);
+    if (response === undefined) response = this.defaultResponse(args.method, args.params);
+    if (args.method === "thread/settings/update" && this.confirmSettings) {
+      const settings = args.params as { threadId: string; model: string; effort: string };
+      this.notify("thread/settings/updated", { threadId: settings.threadId,
+        threadSettings: { model: settings.model, effort: settings.effort } });
+    }
+    return args.parse(response);
+  }
+  private defaultResponse(method: string, params: unknown): unknown {
+    if (method === "config/read") {
+      const config = effectiveConfig(this.args.policy);
+      return { config: this.kind === "discovery" ? { ...config, mcp_servers: {} } : config, origins: {} };
+    }
+    if (method === "account/read") return { requiresOpenaiAuth: true, account: { type: "chatgpt" } };
+    if (method === "model/list") return { data: [{
+      id: "codex-cheap", model: "codex-cheap", displayName: "Codex Cheap", hidden: false, isDefault: true,
+      inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }],
+    }] };
+    if (method === "permissionProfile/list") return { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] };
+    if (method === "thread/start" || method === "thread/resume") {
+      const values = params as { threadId?: string; cwd: string; runtimeWorkspaceRoots: string[];
+        config: { model_reasoning_effort: string; project_doc_max_bytes: number } };
+      return { thread: { id: values.threadId ?? "thread-new", turns: [],
+        environments: [this.args.policy.thread.defaultEnvironment] },
+        model: "codex-cheap", cwd: values.cwd, runtimeWorkspaceRoots: values.runtimeWorkspaceRoots,
+        approvalsReviewer: "user",
+        approvalPolicy: this.args.policy.thread.approvalPolicy,
+        activePermissionProfile: { id: CODEX_PERMISSION_PROFILE },
+        reasoningEffort: values.config.model_reasoning_effort, serviceTier: "default" };
+    }
+    if (method === "turn/start") return { turn: { id: "turn-new", items: [], status: "inProgress" } };
+    if (method === "turn/steer") return { turnId: "turn-new" };
+    if (method === "turn/settings/update") return { status: "applied" };
+    if (method === "account/usage/read") return { threadUsage: {
+      threadId: (params as { threadId: string }).threadId, estimatedUsageUsdMicros: 125_000,
+    } };
+    return {};
+  }
+  dispose() { this.disposed++; }
+  async disposeAndWait() { this.dispose(); await this.retirementGate; }
+  notify(method: string, params: unknown) { this.args.onNotification?.({ method, params }); }
+  server(method: string, params: unknown, id: number = 1) {
+    assert.ok(this.args.onRequest); return this.args.onRequest!({ id, method, params });
+  }
+}
+
+const clients: FakeClient[] = [];
+const toolCalls: { tool: string; args: Record<string, unknown> }[] = [];
+const permissionCalls: { tool: string; input: Record<string, unknown> }[] = [];
+let toolGate: Promise<ToolResult> | undefined, permissionBehavior: "allow" | "deny" = "allow";
+const boundary: ProviderRequestBoundary = {
+  tool: async request => {
+    toolCalls.push(request);
+    if (toolGate) return toolGate;
+    if (request.tool === "get_screen") return { content: [
+      { type: "text", text: "screen tree" }, { type: "image", mimeType: "image/png", data: "cG5n" },
+    ] };
+    return { content: [{ type: "text", text: request.tool === "ask_user" ? "Next" : "ok" }] };
+  },
+  permission: async request => { permissionCalls.push(request); return permissionBehavior === "allow"
+    ? { behavior: "allow" } : { behavior: "deny", message: "fixture denial" }; },
+};
+const logs: string[] = [], prepared: string[] = [];
+const provider = new CodexProvider({
+  version: "test", log: (...values) => logs.push(values.map(String).join(" ")), onPrepared: () => prepared.push("changed"),
+  clientFactory: args => {
+    const client = new FakeClient(args, clients.length === 0 ? "discovery" : "runtime"); clients.push(client); return client;
+  },
+});
+const settings: ProviderSettings = { model: "codex-cheap", effort: "low" };
+provider.prepare({ fileId: "file", dir, settings, boundary });
+while (provider.health({ settings }).status === "starting") await new Promise(resolve => setImmediate(resolve));
+assert.equal(provider.health({ settings }).status, "ready", JSON.stringify(provider.health({ settings })));
+assert.equal(clients.length, 2);
+assert.equal(clients[0].disposed, 1, "discovery process retires before isolated runtime");
+assert.deepEqual(clients[0].calls.map(call => call.method), ["initialize", "config/read"]);
+assert.equal(clients[1].calls.some(call => call.method.startsWith("thread/")), false, "prepare creates no empty thread");
+
+const baseRecord = {
+  provider: "codex" as const, sessionId: "", title: "Review", anchor: { type: "page" as const, nodeIds: [] },
+  pageId: "0:1", pageName: "Page", createdAt: "now", updatedAt: "now", turns: 0,
+  costUsd: 0, costStatus: "unavailable" as const, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+};
+const session = await provider.start({ fileId: "file", dir, settings, boundary, baseRecord });
+const runtime = clients[1];
+const iterator = session.output[Symbol.asyncIterator]();
+const initialized = (await iterator.next()).value as ProviderOutput;
+assert.equal(initialized.kind === "initialized" && initialized.sessionId, "thread-new");
+const startCall = runtime.calls.find(call => call.method === "thread/start")!;
+const startParams = startCall.params as Record<string, unknown>;
+assert.equal((startParams.dynamicTools as unknown[]).length, 5);
+assert.deepEqual((startParams.dynamicTools as { name: string }[]).map(tool => tool.name),
+  ["get_flow", "get_screen", "focus", "annotate", "ask_user"]);
+assert.equal(startParams.permissions, CODEX_PERMISSION_PROFILE);
+assert.equal(startParams.allowProviderModelFallback, false);
+assert.equal("environments" in startParams, false, "qualified local-only default supplies thread environment");
+assert.equal(startParams.serviceTier, "default", "initial turn cannot inherit fast service mode");
+assert.equal("effort" in startParams, false, "0.154 thread/start has no effort field");
+assert.deepEqual(startParams.config, { model_reasoning_effort: "low", project_doc_max_bytes: 0 });
+assert.match(String(startParams.baseInstructions), /User instructions/);
+
+const retainedPolicy = parseThreadStartResult({
+  thread: { id: "thread-new", turns: [], environments: [runtime.args.policy.thread.defaultEnvironment] },
+  model: "codex-cheap", cwd: runtime.args.policy.thread.cwd,
+  runtimeWorkspaceRoots: runtime.args.policy.thread.runtimeWorkspaceRoots, approvalsReviewer: "user",
+  approvalPolicy: runtime.args.policy.thread.approvalPolicy,
+  activePermissionProfile: { id: CODEX_PERMISSION_PROFILE, extends: null },
+  reasoningEffort: "low", serviceTier: "default",
+});
+const diagnosticArgs = { policy: runtime.args.policy, model: "codex-cheap", effort: "low" };
+const assertMismatch = (field: CodexThreadPolicyField, result: CodexThreadStartResult, resume?: string) =>
+  assert.deepEqual(diagnoseCodexThreadPolicy({ result, resume, ...diagnosticArgs }),
+    { matches: false, fields: [field] }, `privacy-safe diagnostic for ${field}`);
+assert.deepEqual(diagnoseCodexThreadPolicy({ result: retainedPolicy, ...diagnosticArgs }), { matches: true, fields: [] });
+assertMismatch("threadId", retainedPolicy, "other");
+assertMismatch("cwd", { ...retainedPolicy, cwd: `${dir}/other` });
+assertMismatch("runtimeWorkspaceRoots", { ...retainedPolicy, runtimeWorkspaceRoots: [dir] });
+assertMismatch("environmentSelection", { ...retainedPolicy,
+  thread: { ...retainedPolicy.thread, environments: [] } });
+assertMismatch("approvalsReviewer", { ...retainedPolicy, approvalsReviewer: "auto_review" });
+assertMismatch("approvalPolicy", { ...retainedPolicy, approvalPolicy: { granular: { rules: false } } });
+assertMismatch("activePermissionProfile.id", { ...retainedPolicy, activePermissionProfile: { id: ":read-only" } });
+assertMismatch("activePermissionProfile.extends", { ...retainedPolicy,
+  activePermissionProfile: { id: CODEX_PERMISSION_PROFILE, extends: ":read-only" } });
+assertMismatch("model", { ...retainedPolicy, model: "other" });
+assertMismatch("reasoningEffort", { ...retainedPolicy, reasoningEffort: "medium" });
+assertMismatch("serviceTier", { ...retainedPolicy, serviceTier: null });
+const safeMismatch = new CodexThreadPolicyMismatchError(["reasoningEffort"]);
+assert.deepEqual({ code: safeMismatch.code, fields: safeMismatch.fields }, {
+  code: "CODEX_THREAD_POLICY_MISMATCH", fields: ["reasoningEffort"],
+});
+assert.equal(safeMismatch.message.includes("medium"), false, "diagnostic contains no observed value");
+
+session.send({ text: "Review this", selection: [{ id: "1:2", name: "Screen", type: "FRAME" }], context: "Figma file X" });
+await new Promise(resolve => setImmediate(resolve));
+const firstTurn = runtime.calls.find(call => call.method === "turn/start")!;
+const firstInput = (firstTurn.params as { input: { type: string; text?: string }[] }).input;
+assert.match(firstInput[0].text!, /Review this[\s\S]*Current selection: Screen \(FRAME 1:2\)/);
+assert.deepEqual(firstInput.map(input => input.type), ["text", "skill"]);
+assert.deepEqual((firstTurn.params as { environments: unknown }).environments,
+  runtime.args.policy.thread.turnEnvironments, "fresh turns select only the reserved local executor");
+runtime.notify("turn/started", { threadId: "thread-new", turnId: "turn-new",
+  turn: { id: "turn-new", items: [], status: "inProgress" } });
+runtime.notify("item/started", { threadId: "thread-new", turnId: "turn-new",
+  item: { type: "agentMessage", id: "message-1", text: "" } });
+runtime.notify("item/agentMessage/delta", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "message-1", delta: "Hello",
+});
+runtime.notify("item/completed", { threadId: "thread-new", turnId: "turn-new",
+  item: { type: "agentMessage", id: "message-1", text: "Hello" } });
+assert.deepEqual((await iterator.next()).value, { kind: "event", event: {
+  type: "text_start", session: { provider: "codex", sessionId: "thread-new" }, itemId: "message-1",
+} });
+assert.equal(((await iterator.next()).value as { event: { text: string } }).event.text, "Hello");
+assert.equal(((await iterator.next()).value as { event: { type: string } }).event.type, "text_end");
+
+const imageResult = await runtime.server("item/tool/call", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "tool-item", callId: "call", namespace: null,
+  tool: "get_screen", arguments: { nodeId: "1:2", scale: 2 },
+});
+assert.deepEqual(imageResult, { success: true, contentItems: [
+  { type: "inputText", text: "screen tree" }, { type: "inputImage", imageUrl: "data:image/png;base64,cG5n" },
+] });
+await assert.rejects(runtime.server("item/tool/call", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "bad", callId: "bad", namespace: null,
+  tool: "get_screen", arguments: { nodeId: 4 },
+}), /expected string/);
+assert.deepEqual(await runtime.server("item/tool/call", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "unsupported", callId: "unsupported", namespace: "other",
+  tool: "get_screen", arguments: { nodeId: "1:2" },
+}), { success: false, contentItems: [{ type: "inputText", text: "Unsupported dynamic tool get_screen" }] });
+
+assert.deepEqual(await runtime.server("item/commandExecution/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "cmd", startedAtMs: 1, kind: "command",
+  command: "ls", cwd: dir, reason: "inspect", availableDecisions: ["accept", "decline"],
+}), { decision: "accept" });
+assert.deepEqual(permissionCalls.at(-1), { tool: "codex_command", input: {
+  command: "ls", cwd: dir, reason: "inspect", additionalPermissions: undefined,
+} });
+const notesGrant = { fileSystem: { entries: [{ path: { type: "path", path: join(dir, "notes", "proof.txt") },
+  access: "write" }] } };
+assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "notes-scope", startedAtMs: 1, cwd: join(dir, "notes"),
+  reason: "confirm notes", permissions: notesGrant,
+}), { permissions: notesGrant, scope: "turn" });
+assert.deepEqual(permissionCalls.at(-1), { tool: "codex_permission_scope", input: {
+  cwd: join(dir, "notes"), reason: "confirm notes", permissions: notesGrant, scope: "turn",
+} });
+permissionBehavior = "deny";
+assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "notes-deny", startedAtMs: 1, cwd: join(dir, "notes"),
+  reason: "deny extra grant", permissions: notesGrant,
+}), { permissions: {}, scope: "turn" }, "denial withholds only the requested extra grant");
+permissionBehavior = "allow";
+for (const write of [appRepo, join(appRepo, "new", "file"), join(appRepo, "..")]) {
+  assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
+    threadId: "thread-new", turnId: "turn-new", itemId: "scope", startedAtMs: 1, cwd: dir, reason: "write app",
+    permissions: { fileSystem: { write: [write] } },
+  }), { permissions: {}, scope: "turn" }, "APP_REPO and overlapping ancestor write escalation are denied");
+}
+assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "entry-scope", startedAtMs: 1, cwd: dir, reason: "write app",
+  permissions: { fileSystem: { entries: [{ path: { type: "path", path: appRepo }, access: "write" }] } },
+}), { permissions: {}, scope: "turn" }, "source-shaped local-path entry cannot widen APP_REPO access");
+const configuredPolicyAppRepo = runtime.args.policy.appRepo;
+for (const configuredAppRepo of [configuredPolicyAppRepo, undefined]) {
+  runtime.args.policy.appRepo = configuredAppRepo;
+  assert.deepEqual(await runtime.server("item/permissions/requestApproval", { threadId: "thread-new", turnId: "turn-new",
+    itemId: "network-scope", startedAtMs: 1, cwd: dir, reason: "network", permissions: { network: { enabled: true } } }),
+  { permissions: {}, scope: "turn" }, "disabled network cannot be widened with or without APP_REPO");
+}
+runtime.args.policy.appRepo = configuredPolicyAppRepo;
+runtime.notify("item/started", { threadId: "thread-new", turnId: "turn-new", item: {
+  type: "fileChange", id: "patch", status: "inProgress", changes: [{ path: join(appRepo, "owned.ts"), kind: "add", diff: "+bad" }],
+} });
+assert.equal(((await iterator.next()).value as { event: { name: string } }).event.name, "file_change");
+assert.deepEqual(await runtime.server("item/fileChange/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "patch", startedAtMs: 1, reason: "write",
+}), { decision: "decline" });
+
+const slow = new Promise<ToolResult>(resolve => setImmediate(() => resolve({ content: [{ type: "text", text: "Free text" }] })));
+toolGate = slow;
+assert.deepEqual(await runtime.server("item/tool/requestUserInput", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "question", isBlocking: true,
+  questions: [{ id: "q1", header: "Choice", question: "Continue?", options: [{ label: "Yes", description: "" }] }],
+}), { answers: { q1: { answers: ["Free text"] } } });
+toolGate = undefined;
+assert.deepEqual(toolCalls.at(-1), { tool: "ask_user", args: { question: "Continue?", options: ["Yes"] } });
+
+session.send({ text: "Steer", selection: [] }); await new Promise(resolve => setImmediate(resolve));
+assert.equal(runtime.calls.filter(call => call.method === "turn/steer").length, 1);
+runtime.confirmSettings = false;
+let settingsSettled = false;
+const settingsUpdate = session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } })
+  .then(() => { settingsSettled = true; });
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(settingsSettled, false, "queued thread ACK is not an applied future-settings confirmation");
+runtime.notify("thread/settings/updated", { threadId: "thread-new",
+  threadSettings: { model: "codex-cheap", effort: "low" } });
+await new Promise(resolve => setImmediate(resolve)); assert.equal(settingsSettled, false, "stale settings event is ignored");
+runtime.notify("thread/settings/updated", { threadId: "thread-new",
+  threadSettings: { model: "codex-cheap", effort: "medium" } });
+await settingsUpdate;
+assert.deepEqual(runtime.calls.slice(-2).map(call => call.method), ["thread/settings/update", "turn/settings/update"]);
+const callsAfterSettings = runtime.calls.length;
+await session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
+assert.equal(runtime.calls.length, callsAfterSettings, "unchanged settings need no duplicate native notification");
+runtime.failures.set("thread/settings/update", new CodexRpcError(-32602, "private rejected path"));
+await assert.rejects(session.applySettings({ settings: { model: "codex-cheap", effort: "low" } }),
+  error => error instanceof CodexSettingsError && error.definitelyUnchanged && !error.message.includes("private"));
+assert.equal(runtime.calls.length, callsAfterSettings + 1, "definite pre-mutation rejection needs no no-op rollback");
+runtime.confirmSettings = true;
+runtime.failures.set("turn/settings/update", new CodexRpcError(-32602, "private native path"));
+await assert.rejects(session.applySettings({ settings: { model: "codex-cheap", effort: "low" } }),
+  error => error instanceof CodexSettingsError && error.category === "native-rejected"
+    && !error.message.includes("private"));
+assert.deepEqual(runtime.calls.slice(-3).map(call => call.method),
+  ["thread/settings/update", "turn/settings/update", "thread/settings/update"], "failed live update rolls future settings back");
+await session.interrupt(); assert.equal(runtime.calls.at(-1)?.method, "turn/interrupt");
+
+runtime.notify("thread/tokenUsage/updated", { threadId: "thread-new", turnId: "turn-new", tokenUsage: { total: {
+  totalTokens: 100, inputTokens: 70, cachedInputTokens: 20, cacheWriteInputTokens: 5,
+  outputTokens: 30, reasoningOutputTokens: 9,
+}, last: {}, modelContextWindow: 1000 } });
+const usage = (await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
+assert.deepEqual(usage.usage, { input: 45, output: 30, cacheRead: 20, cacheWrite: 5 });
+runtime.notify("turn/completed", { threadId: "thread-new", turnId: "turn-new",
+  turn: { id: "turn-new", items: [], status: "interrupted" } });
+assert.equal(((await iterator.next()).value as { event: { outcome: string } }).event.outcome, "interrupted");
+const completed = (await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
+assert.deepEqual([completed.turnCompleted, completed.cost], [true, { usd: 0.125, status: "estimated" }]);
+
+runtime.failures.set("turn/steer", new CodexRpcError(-32602, "expected turn id is stale"));
+runtime.notify("turn/started", { threadId: "thread-new", turnId: "turn-stale",
+  turn: { id: "turn-stale", items: [], status: "inProgress" } });
+session.send({ text: "Race", selection: [] }); await new Promise(resolve => setImmediate(resolve));
+assert.equal(runtime.calls.at(-1)?.method, "turn/start", "explicit stale steer retries once as a new turn");
+
+runtime.confirmSettings = false;
+const closingSettings = session.applySettings({ settings: { model: "codex-cheap", effort: "low" } });
+await new Promise(resolve => setImmediate(resolve));
+const callsBeforeClose = runtime.calls.length;
+session.close();
+await assert.rejects(closingSettings,
+  error => error instanceof CodexSettingsError && error.category === "closed");
+assert.equal(runtime.calls.length, callsBeforeClose, "session close cannot dispatch a rollback RPC after terminal fencing");
+const historyTurns = [{ id: "h1", status: "completed", items: [
+  { type: "userMessage", id: "u", content: [{ type: "text", text: "[Figma file X]\nQuestion\n[Current selection: none]" }] },
+  { type: "agentMessage", id: "a", text: "Answer" },
+  { type: "dynamicToolCall", id: "q", tool: "ask_user", arguments: { question: "Next?" }, status: "completed",
+    contentItems: [{ type: "inputText", text: "Next" }], success: true },
+  { type: "reasoning", id: "hidden", summary: ["secret"], content: ["secret"] },
+], error: null }, { id: "h2", status: "interrupted", items: [], error: null }];
+assert.deepEqual(projectCodexHistory(historyTurns as Parameters<typeof projectCodexHistory>[0]), [
+  { role: "user", text: "Question" }, { role: "assistant", text: "Answer", itemId: "a" },
+  { role: "tool", name: "ask_user", input: { question: "Next?" }, itemId: "q" },
+  { role: "answer", text: "Next" }, { role: "tool", name: "stopped", input: {}, itemId: "h2" },
+]);
+runtime.responses.set("thread/read", { thread: { id: "thread-new", turns: historyTurns } });
+runtime.responses.set("account/usage/read", { threadUsage: {
+  threadId: "thread-new", estimatedUsageUsdMicros: null, estimatedUsageCreditsMicros: 10,
+} });
+assert.deepEqual(codexUsageAvailability(parseAccountUsageResult(runtime.responses.get("account/usage/read")), "thread-new"),
+  { threadUsagePresent: true, threadMatches: true, usdPresent: false, creditsPresent: true });
+const history = await provider.readHistory({ fileId: "file", dir, sessionId: "thread-new", settings, boundary, baseRecord: {
+  ...baseRecord, sessionId: "thread-new", costUsd: 0.125, costStatus: "estimated",
+} });
+assert.deepEqual(history.cost, { usd: 0.125, status: "unavailable" });
+assert.equal(history.messages.some(item => item.role === "assistant" && item.text === "Answer"), true);
+assert.equal(runtime.calls.some(call => call.method === "thread/read"), true);
+assert.equal(runtime.calls.filter(call => call.method === "thread/resume").length, 0,
+  "history display does not resume native context");
+
+runtime.responses.delete("account/usage/read");
+runtime.failures.set("thread/resume", new CodexRpcError(-32603, "error resuming thread: /private/value"));
+await assert.rejects(provider.start({ fileId: "file", dir, resume: "thread-new", settings, boundary, baseRecord: {
+  ...baseRecord, sessionId: "thread-new",
+} }), error => error instanceof CodexResumeError && error.category === "resume-create" && !error.message.includes("private"));
+const resumed = await provider.start({ fileId: "file", dir, resume: "thread-new", settings, boundary, baseRecord: {
+  ...baseRecord, sessionId: "thread-new",
+} });
+const resumeParams = runtime.calls.filter(call => call.method === "thread/resume").at(-1)!.params as Record<string, unknown>;
+assert.deepEqual(resumeParams.config, { model_reasoning_effort: "low", project_doc_max_bytes: 0 });
+for (const unsupported of ["environments", "selectedCapabilityRoots", "allowProviderModelFallback"]) {
+  assert.equal(unsupported in resumeParams, false);
+}
+resumed.close(); provider.dispose();
+assert.equal(runtime.disposed, 1);
+assert.ok(prepared.length >= 2);
+
+const retirementDir = join(root, "retirement");
+mkdirSync(join(retirementDir, "notes"), { recursive: true });
+writeFileSync(join(retirementDir, "CLAUDE.md"), "instructions");
+const retirementClients: FakeClient[] = [];
+let releaseRetirement!: () => void;
+const retirementGate = new Promise<void>(resolve => { releaseRetirement = resolve; });
+const retirementProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, retirementClients.length === 0 ? "discovery" : "runtime");
+    if (!retirementClients.length) client.retirementGate = retirementGate;
+    retirementClients.push(client); return client;
+  } });
+retirementProvider.prepare({ fileId: "retire", dir: retirementDir, settings, boundary });
+while (!retirementClients[0]?.disposed) await new Promise(resolve => setImmediate(resolve));
+assert.equal(retirementClients.length, 1, "isolated runtime waits for observed discovery retirement");
+retirementProvider.dispose();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(retirementClients.length, 1, "dispose captures in-progress discovery owner");
+releaseRetirement(); await new Promise(resolve => setImmediate(resolve));
+assert.equal(retirementClients.length, 1, "superseded preparation never spawns an isolated owner");
+console.log("codex session, replay, controls and accounting check ok");

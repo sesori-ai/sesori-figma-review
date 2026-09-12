@@ -366,9 +366,13 @@ export function createReviewBridge(args: {
       return;
     }
     if (nativeChanged && target?.health) target.health = { ...target.health, model: message.settings.model || target.health.model };
-    if (preferenceChanged) providers[message.provider]?.dispose();
+    if (preferenceChanged && !(nativeChanged && target?.record.provider === message.provider)) {
+      providers[message.provider]?.dispose();
+    }
     if (selectedChanged && (!preferenceChanged || before.provider !== message.provider)) providers[before.provider]?.dispose();
-    if (ws.fileId && (selectedChanged || (preferenceChanged && next.provider === message.provider))) {
+    const activeProviderUpdated = nativeChanged && target?.record.provider === next.provider;
+    if (ws.fileId && !activeProviderUpdated
+      && (selectedChanged || (preferenceChanged && next.provider === message.provider))) {
       const provider = providers[next.provider];
       if (provider) prepareProvider(provider, ws.fileId, workspaceFor(ws.fileId, "Figma file"));
     }
@@ -425,7 +429,21 @@ export function createReviewBridge(args: {
           const attached = conv?.record.provider === message.session.provider && conv.record.sessionId === message.session.sessionId;
           const provider = providers[session.provider];
           if (!provider) throw new Error(`${session.provider} is unavailable; cannot read its native history.`);
-          return send(message.fileId, { kind: "history", intentId: message.intentId, session: attached ? conv!.record : session, messages: provider.readHistory({ dir, sessionId: session.sessionId }), attached });
+          const history = await provider.readHistory({
+            fileId: message.fileId,
+            dir,
+            sessionId: session.sessionId,
+            settings: readSettings().providers[session.provider],
+            boundary: dormantBoundary,
+            baseRecord: session,
+          });
+          if (history.usage) session.usage = history.usage;
+          if (history.cost) { session.costUsd = history.cost.usd; session.costStatus = history.cost.status; }
+          if (history.usage || history.cost) saveSession(dir, session);
+          return send(message.fileId, {
+            kind: "history", intentId: message.intentId, session: attached ? conv!.record : session,
+            messages: history.messages, attached,
+          });
         } catch (error) {
           return send(message.fileId, { kind: "error", intentId: message.intentId, message: error instanceof Error ? error.message : String(error) });
         }

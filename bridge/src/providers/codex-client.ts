@@ -8,7 +8,7 @@ import {
   type CodexServerRequest,
   type JsonRpcId,
 } from "./codex-protocol.ts";
-import type { CodexExecutionPolicy } from "./codex-execution.ts";
+import { assertCodexLocalDefaults, type CodexExecutionPolicy } from "./codex-execution.ts";
 
 const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -90,6 +90,9 @@ export class CodexClient {
   private stderrBuffer = Buffer.alloc(0);
   private terminalError?: Error;
   private nativeOutputBytes = 0;
+  private exitObserved = false;
+  private readonly exited: Promise<void>;
+  private resolveExited!: () => void;
 
   constructor(private readonly args: {
     policy: CodexExecutionPolicy;
@@ -101,8 +104,11 @@ export class CodexClient {
     onNativeOutput?: (bytes: number) => void;
     onRequest?: (request: CodexServerRequest) => Promise<unknown>;
     onNotification?: (notification: CodexNotification) => void;
+    onTerminal?: (error: Error) => void;
     log: (...values: unknown[]) => void;
-  }) {}
+  }) {
+    this.exited = new Promise(resolve => { this.resolveExited = resolve; });
+  }
 
   async connect(): Promise<CodexInitializeResult> {
     if (this.initialized) return this.initialized;
@@ -123,6 +129,7 @@ export class CodexClient {
 
   private async startAndInitialize(): Promise<CodexInitializeResult> {
     try {
+      assertCodexLocalDefaults();
       const child = (this.args.childFactory ?? defaultChildFactory)({
         command: this.args.policy.command,
         args: this.args.policy.args,
@@ -297,13 +304,17 @@ export class CodexClient {
   private readonly onStderrEnd = () => this.flushStderr();
   private readonly onChildError = (error: Error) =>
     this.terminate(new Error(`Codex App Server failed: ${error.message}`));
-  private readonly onChildExit = (code: number | null, signal: NodeJS.Signals | null) =>
+  private readonly onChildExit = (code: number | null, signal: NodeJS.Signals | null) => {
+    this.exitObserved = true; this.resolveExited();
     this.terminate(new Error(`Codex App Server exited unexpectedly (${signal ?? `code ${code ?? "unknown"}`})`), false);
+  };
 
   private error(value: unknown): Error { return value instanceof Error ? value : new Error(String(value)); }
   private terminate(error: Error, kill = true) {
     if (this.terminalError) return;
     this.terminalError = error;
+    try { this.args.onTerminal?.(error); }
+    catch (callbackError) { this.args.log("Codex terminal callback failed", callbackError); }
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pending.clear();
     const child = this.child;
@@ -311,11 +322,25 @@ export class CodexClient {
     this.flushStderr();
     child.stdout.off("data", this.onStdoutData); child.stdout.off("end", this.onStdoutEnd);
     child.stderr.off("data", this.onStderrData); child.stderr.off("end", this.onStderrEnd);
-    child.off("error", this.onChildError); child.off("exit", this.onChildExit);
+    child.off("error", this.onChildError);
     try { child.stdin.end(); } catch (cleanupError) { this.args.log("Codex stdin cleanup failed", cleanupError); }
     if (kill) try { child.kill("SIGTERM"); }
     catch (cleanupError) { this.args.log("Codex process cleanup failed", cleanupError); }
   }
 
   dispose() { this.terminate(new Error("Codex App Server client disposed")); }
+  async disposeAndWait(args: { timeoutMs?: number } = {}) {
+    this.dispose();
+    if (!this.child || this.exitObserved) return;
+    const timeoutMs = args.timeoutMs ?? 5_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.exited,
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(
+          new Error(`Codex App Server retirement was not observed after ${timeoutMs}ms`),
+        ), timeoutMs); }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
 }
