@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,6 +18,17 @@ const quiet = { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] };
 const git = (dir, ...args) => execFileSync("git", args, { cwd: dir, ...quiet }).trim();
 const release = (dir, ...args) => execFileSync(process.execPath, [join(dir, "scripts/release.mjs"), ...args], { cwd: dir, env, ...quiet });
 const manifestVersion = (dir) => JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version;
+const ran = "check-ran";
+// Everything a refused release must leave alone. Not the local tag list: release.mjs fetches tags before it
+// looks at them, so a tag that exists only on origin legitimately appears locally on the way to being refused.
+const written = ["package.json", "plugin/package.json", "bridge/package.json", "package-lock.json", "CHANGELOG.md"];
+const state = (dir, remote) => [
+  git(remote, "rev-parse", "refs/heads/master"),
+  git(remote, "tag", "--list"),
+  git(dir, "rev-parse", "HEAD"),
+  git(dir, "status", "--porcelain"),
+  ...written.map((name) => readFileSync(join(dir, name), "utf8")),
+];
 
 const temp = (prefix) => {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -33,8 +44,10 @@ const fixture = () => {
   const dir = temp("release-check-");
   for (const sub of ["scripts", "plugin", "bridge"]) mkdirSync(join(dir, sub));
   for (const name of ["scripts/bump.mjs", "scripts/release.mjs"]) cpSync(new URL(name, repo), join(dir, name));
-  // `check` stands in for the real one: release.mjs has to run it, and what it runs is not under test here.
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ version: "0.1.0", scripts: { check: "exit 0" } }, null, 2) + "\n");
+  // `check` stands in for the real one, and leaves a (gitignored) mark so a release that skipped it is caught.
+  const check = `node -e "require('node:fs').writeFileSync('${ran}', '')"`;
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ version: "0.1.0", scripts: { check } }, null, 2) + "\n");
+  writeFileSync(join(dir, ".gitignore"), `${ran}\n`);
   for (const ws of ["plugin", "bridge"]) writeFileSync(join(dir, ws, "package.json"), JSON.stringify({ version: "0.1.0" }, null, 2) + "\n");
   const packages = { "": { version: "0.1.0" }, plugin: { version: "0.1.0" }, bridge: { version: "0.1.0" } };
   writeFileSync(join(dir, "package-lock.json"), JSON.stringify({ name: "fixture", version: "0.1.0", packages }, null, 2) + "\n");
@@ -55,18 +68,21 @@ release(dir, "0.2.0");
 assert.equal(git(dir, "log", "-1", "--pretty=%s"), "Release v0.2.0", "the release commit names the version");
 assert.equal(manifestVersion(dir), "0.2.0", "the manifests were bumped");
 assert.match(readFileSync(join(dir, "CHANGELOG.md"), "utf8"), /^## \[Unreleased\]\n\n## \[0\.2\.0\]\n/m, "the changelog was cut");
+assert.ok(existsSync(join(dir, ran)), "the checks ran before any of it was pushed");
 assert.equal(git(remote, "rev-parse", "refs/heads/master"), git(dir, "rev-parse", "HEAD"), "the release commit reached origin");
-// An annotated tag: publish.yml reads the tag name, and `^{}` is the commit it dereferences to.
-assert.equal(git(remote, "rev-parse", "refs/tags/v0.2.0^{}"), git(dir, "rev-parse", "HEAD"), "an annotated tag on origin names that commit");
+// `cat-file -t` is what tells an annotated tag from a lightweight one; `^{}` dereferences either.
+assert.equal(git(remote, "cat-file", "-t", "refs/tags/v0.2.0"), "tag", "the tag on origin is annotated");
+assert.equal(git(remote, "rev-parse", "refs/tags/v0.2.0^{}"), git(dir, "rev-parse", "HEAD"), "and it names that commit");
 assert.equal(git(dir, "status", "--porcelain"), "", "nothing is left uncommitted");
 
 // Each refusal has to happen before anything is written or pushed, so the release can just be retried.
 const refuses = (what, spoil, ...args) => {
   const { dir, remote } = fixture();
   spoil(dir, remote);
-  const before = [git(remote, "rev-parse", "refs/heads/master"), git(remote, "tag", "--list"), manifestVersion(dir)];
+  const before = state(dir, remote);
   assert.throws(() => release(dir, ...args), `refuses ${what}`);
-  assert.deepEqual([git(remote, "rev-parse", "refs/heads/master"), git(remote, "tag", "--list"), manifestVersion(dir)], before, `and changes nothing for ${what}`);
+  assert.deepEqual(state(dir, remote), before, `and changes nothing for ${what}`);
+  assert.ok(!existsSync(join(dir, ran)), `and refuses ${what} before spending a check run`);
 };
 
 refuses("a missing version", () => {});

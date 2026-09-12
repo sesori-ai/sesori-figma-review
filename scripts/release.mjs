@@ -32,13 +32,24 @@ if (git("rev-parse", "HEAD") !== git("rev-parse", "origin/master")) refuse("mast
 if (git("tag", "--list", tag)) refuse(`${tag} already exists locally`);
 if (git("ls-remote", "--tags", "origin", tag)) refuse(`${tag} already exists on origin`);
 
+// Past here the tree is being written to, so the two things that can still fail say how to get back.
 run(process.execPath, [script("bump.mjs"), version], { SESORI_RELEASE: "1" });
-// publish.yml runs the checks too, but failing them there leaves the tag pushed and the release half done.
-run("npm", ["run", "check"]);
+try {
+  // publish.yml runs the checks too, but failing them there leaves the tag pushed and the release half done.
+  // npm is a .cmd shim on Windows, which execFileSync cannot launch by the bare name.
+  run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "check"]);
+} catch {
+  refuse(`\nthe checks failed and the bump is still in the tree.\n  fix it and run this again, or drop the bump with \`git checkout -- .\``);
+}
 
 git("commit", "-am", `Release ${tag}`);
 git("tag", "-a", tag, "-m", tag);
-// Atomic, so the tag never reaches origin without the commit it names.
-run("git", ["push", "--atomic", "origin", "master", tag]);
+try {
+  // Atomic, so the tag never reaches origin without the commit it names.
+  run("git", ["push", "--atomic", "origin", "master", tag]);
+} catch {
+  // The commit and the tag are both correct here; only the push is missing, so retrying it is the whole recovery.
+  refuse(`\nthe push failed. ${tag} and the release commit are ready locally:\n  retry with \`git push --atomic origin master ${tag}\`\n  or undo with \`git tag -d ${tag} && git reset --hard origin/master\``);
+}
 
 console.log(`\n${tag} pushed; publish.yml has it from here:\n  gh run watch $(gh run list --workflow=publish.yml --limit 1 --json databaseId -q '.[0].databaseId')\n`);

@@ -31,9 +31,10 @@ what it does, [ARCHITECTURE.md](ARCHITECTURE.md) how the pieces fit, [PLAN.md](P
 
 - `npm run bump-and-release <X.Y.Z>` is the release. From a clean `master` that matches origin it bumps the version,
   runs `npm run check`, commits `Release vX.Y.Z`, and pushes that commit and an annotated `vX.Y.Z` tag atomically.
-  It refuses what cannot be taken back: an unclean tree, a branch other than `master`, a `master` out of sync with
-  origin, a tag that already exists. Never run `npm publish` by hand — that is how 0.3.0 and 0.3.1 shipped without
-  provenance, and a published version cannot be replaced.
+  It refuses what cannot be taken back — an unclean tree, a branch other than `master`, a `master` out of sync with
+  origin, a tag that already exists — and refuses all of it before writing anything, so a refusal costs nothing. A
+  check or a push that fails after that point prints the one command that finishes or undoes it. Never run
+  `npm publish` by hand: that is how 0.3.0 and 0.3.1 shipped without provenance, and a version cannot be replaced.
 - `npm run bump <X.Y.Z>` is the first half on its own: the version into the three `package.json` files and the
   lockfile, `[Unreleased]` cut into a `[X.Y.Z]` section, nothing committed.
 - The tag is what publishes. `.github/workflows/publish.yml` checks the tag against the manifests, extracts the
