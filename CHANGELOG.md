@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `npm run bump-and-release <X.Y.Z>` cuts a release in one command: from a clean `master` that matches origin it bumps the version, runs `npm run check`, commits `Release vX.Y.Z` and pushes that commit and an annotated `vX.Y.Z` tag atomically, leaving the publish to `publish.yml`. It refuses an unclean tree, a branch other than `master`, a `master` out of sync with origin, and a tag that already exists, all before writing anything; a check or a push that fails after that point prints the command that finishes or undoes the release.
+
+### Changed
+
+- `npm run bump` points at `bump-and-release` in the commands it prints, and stays silent about them when `bump-and-release` is the caller.
+- AGENTS.md and README.md document `npm run bump-and-release` as the way to release, and AGENTS.md records that the npm trusted publisher needs **Allowed actions → allow `npm publish`**: npm defaults a new connection to staged publishing only, which `publish.yml` does not use, and a connection cannot be edited afterwards.
+
 ## [0.3.1]
 
 ### Added
