@@ -62,6 +62,12 @@ for (const bad of ["", "1.2", "01.2.3", "9.9.10-beta.1"]) {
 assert.throws(() => bump(dir, "9.9.10"), "refuses a new version with nothing under [Unreleased]");
 assert.deepEqual(snapshot(dir), before, "and writes nothing");
 
+// A version behind the manifests would rewrite them backwards and print tag instructions.
+const backwards = fixture();
+const beforeBackwards = snapshot(backwards);
+assert.throws(() => bump(backwards, "0.0.1"), "refuses a version older than the current one");
+assert.deepEqual(snapshot(backwards), beforeBackwards, "and writes nothing");
+
 // A cut version plus new Unreleased entries would tag changes the release notes omit.
 writeFileSync(join(dir, "CHANGELOG.md"), cut.replace("## [Unreleased]\n", "## [Unreleased]\n\n### Fixed\n\n- Something found after the bump.\n"));
 const withEntries = snapshot(dir);

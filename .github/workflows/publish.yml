@@ -37,6 +37,11 @@ jobs:
         run: |
           awk -v heading="## [${GITHUB_REF_NAME#v}]" '$0 == heading { found = 1; next } found && /^## \[/ { exit } found' CHANGELOG.md > notes.md
           grep -q '[^[:space:]]' notes.md || { echo "CHANGELOG.md has no section for $GITHUB_REF_NAME, or it is empty"; exit 1; }
+          # Anything still under [Unreleased] ships in this tag but not in its notes.
+          if awk '$0 == "## [Unreleased]" { found = 1; next } found && /^## \[/ { exit } found && /[^[:space:]]/ { stray = 1 } END { exit !stray }' CHANGELOG.md; then
+            echo "CHANGELOG.md still has entries under [Unreleased]; they belong in the $GITHUB_REF_NAME section"
+            exit 1
+          fi
 
       - run: npm run check
 
