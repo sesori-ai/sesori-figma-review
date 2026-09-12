@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `npm run bump` points at `bump-and-release` in the commands it prints, and stays silent about them when `bump-and-release` is the caller.
+- `.gitignore` covers `.worktrees/`, so a `git worktree` created under the repository root does not show up as untracked in the main checkout.
+- `npm run bump` prints only the manual commit, tag and push path, and stays silent about it when `bump-and-release` is the caller.
 - AGENTS.md and README.md document `npm run bump-and-release` as the way to release, and AGENTS.md records that the npm trusted publisher needs **Allowed actions → allow `npm publish`**: npm defaults a new connection to staged publishing only, which `publish.yml` does not use, and a connection cannot be edited afterwards.
 
 ## [0.3.1]
