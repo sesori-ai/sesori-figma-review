@@ -39,7 +39,9 @@ try {
   // npm is a .cmd shim on Windows, which execFileSync cannot launch by the bare name.
   run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "check"]);
 } catch {
-  refuse(`\nthe checks failed and the bump is still in the tree.\n  fix it and run this again, or drop the bump with \`git checkout -- .\``);
+  // Not "fix it and rerun": the bump is in the tree, and the unclean-tree guard would refuse that. The bump is
+  // cheap to recreate, so dropping it and releasing again once master is green is the shorter way round.
+  refuse(`\nthe checks failed, and the bump is still in the tree.\n  drop it with \`git checkout -- .\`, land the fix on master, then run this again`);
 }
 
 git("commit", "-am", `Release ${tag}`);
@@ -48,8 +50,11 @@ try {
   // Atomic, so the tag never reaches origin without the commit it names.
   run("git", ["push", "--atomic", "origin", "master", tag]);
 } catch {
-  // The commit and the tag are both correct here; only the push is missing, so retrying it is the whole recovery.
-  refuse(`\nthe push failed. ${tag} and the release commit are ready locally:\n  retry with \`git push --atomic origin master ${tag}\`\n  or undo with \`git tag -d ${tag} && git reset --hard origin/master\``);
+  // Retrying the push is the whole recovery only while origin/master is where the preflight left it. If it moved,
+  // this release is cut from the old tip and git rejects the retry; starting over is cheaper than reconciling.
+  refuse(
+    `\nthe push failed. ${tag} and the release commit are ready locally:\n  retry with \`git push --atomic origin master ${tag}\`\n  or undo with \`git tag -d ${tag} && git reset --hard origin/master\`\nif origin/master has moved on, git rejects the retry: undo, pull, and run this again.`,
+  );
 }
 
 console.log(`\n${tag} pushed; publish.yml has it from here:\n  gh run watch $(gh run list --workflow=publish.yml --limit 1 --json databaseId -q '.[0].databaseId')\n`);

@@ -75,6 +75,19 @@ assert.equal(git(remote, "cat-file", "-t", "refs/tags/v0.2.0"), "tag", "the tag 
 assert.equal(git(remote, "rev-parse", "refs/tags/v0.2.0^{}"), git(dir, "rev-parse", "HEAD"), "and it names that commit");
 assert.equal(git(dir, "status", "--porcelain"), "", "nothing is left uncommitted");
 
+// The one failure past the guards that can be provoked here. What the message promises has to be true: the bump
+// is in the tree to be dropped, and nothing of the release exists anywhere else.
+const failed = fixture();
+writeFileSync(join(failed.dir, "package.json"), JSON.stringify({ version: "0.1.0", scripts: { check: "exit 1" } }, null, 2) + "\n");
+git(failed.dir, "commit", "-am", "a check that fails");
+git(failed.dir, "push", "origin", "master");
+const tip = git(failed.dir, "rev-parse", "HEAD");
+assert.throws(() => release(failed.dir, "0.2.0"), "a failing check stops the release");
+assert.equal(manifestVersion(failed.dir), "0.2.0", "leaving the bump in the tree, as the message says it does");
+assert.equal(git(failed.dir, "rev-parse", "HEAD"), tip, "with nothing committed");
+assert.equal(git(failed.dir, "tag", "--list"), "", "no tag");
+assert.equal(git(failed.remote, "rev-parse", "refs/heads/master"), tip, "and origin untouched");
+
 // Each refusal has to happen before anything is written or pushed, so the release can just be retried.
 const refuses = (what, spoil, ...args) => {
   const { dir, remote } = fixture();
