@@ -39,7 +39,8 @@
   "scripts": {
     "build": "npm run build -w plugin && npm run build -w bridge",
     "bridge": "npm run start -w bridge",
-    "check": "npm run check --workspaces && node scripts/bump.check.mjs && node scripts/release.check.mjs",
+    "check": "npm run check --workspaces && node scripts/bump.check.mjs && node scripts/release.check.mjs && node scripts/package-plugin.check.mjs",
+    "package:plugin": "npm run build -w plugin && node scripts/package-plugin.mjs",
     "bump": "node scripts/bump.mjs",
     "bump-and-release": "node scripts/release.mjs",
     "prepack": "npm run build"

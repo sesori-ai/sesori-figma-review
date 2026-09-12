@@ -1,4 +1,5 @@
 node_modules/
 plugin/dist/
 bridge/dist/
+/release/
 .worktrees/

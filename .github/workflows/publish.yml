@@ -1,7 +1,7 @@
 name: publish
 
-# Releasing is `npm run bump X.Y.Z`, a "Release vX.Y.Z" commit, then an annotated vX.Y.Z tag.
-# Pushing that tag runs this. The Figma plugin is published by hand; Figma has no API for it.
+# `npm run bump-and-release X.Y.Z` pushes the release commit and annotated vX.Y.Z tag.
+# The tag publishes npm + the manual-install plugin ZIP. Figma Community publishing is still manual.
 on:
   push:
     tags: ["v*"]
@@ -45,8 +45,13 @@ jobs:
 
       - run: npm run check
 
+      # Build even on a retry that skips npm publish (and therefore its prepack build).
+      # Finish the asset before publishing: a broken plugin build must not publish an npm version.
+      - name: Build manual-install plugin ZIP
+        run: npm run package:plugin
+
       # Re-running the job after a partial release finishes it: the publish is skipped once
-      # that version is on the registry, and the release is created or its notes refreshed.
+      # that version is on the registry, and the release notes and asset are refreshed.
       - name: Publish to npm
         run: |
           version=${GITHUB_REF_NAME#v}
@@ -59,4 +64,6 @@ jobs:
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md || gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md || gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          gh release upload "$GITHUB_REF_NAME" "release/sesori-review-plugin-${GITHUB_REF_NAME}.zip" --clobber

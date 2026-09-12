@@ -12,8 +12,9 @@ what it does, [ARCHITECTURE.md](ARCHITECTURE.md) how the pieces fit, [PLAN.md](P
 
 ## Working here
 
-- `npm run check` (type-check plus the sandbox, UI and bridge self-checks) passes before a PR goes up. `npm run build`
-  produces `plugin/dist/` and `bridge/dist/bridge.mjs`; neither is committed.
+- `npm run check` (type-check plus the sandbox, UI, bridge and release/packaging self-checks) passes before a PR goes
+  up. `npm run build` produces `plugin/dist/` and `bridge/dist/bridge.mjs`; neither is committed. Packaging and its
+  checks need `zip` and `unzip`, available on macOS and the Ubuntu release runner.
 - Checks live next to the code they cover (`*.check.ts`, or `*.check.mjs` where there is nothing to compile) and run
   from `npm run check`. Non-trivial logic gets one; one-liners do not.
 - `ponytail:` comments mark deliberate shortcuts and name the upgrade path. Keep them accurate and keep
@@ -40,13 +41,16 @@ what it does, [ARCHITECTURE.md](ARCHITECTURE.md) how the pieces fit, [PLAN.md](P
 - `npm run bump <X.Y.Z>` is the first half on its own: the version into the three `package.json` files and the
   lockfile, `[Unreleased]` cut into a `[X.Y.Z]` section, nothing committed.
 - The tag is what publishes. `.github/workflows/publish.yml` checks the tag against the manifests, extracts the
-  changelog section, runs `npm run check`, `npm publish --access public`, and opens a GitHub Release with that
-  section. npm auth is trusted publishing over OIDC, so no token lives here, and it is what gets the package its
+  changelog section, runs `npm run check` and `npm run package:plugin`, publishes with `npm publish --access public`,
+  and opens a GitHub Release with that section and `sesori-review-plugin-vX.Y.Z.zip`. The ZIP contains the built
+  plugin, README and license, ready for manifest import without a source build. It is built before publishing and
+  uploaded with `--clobber`, including on retries that skip an already-published npm version. `release/` is ignored.
+  npm auth is trusted publishing over OIDC, so no token lives here, and it is what gets the package its
   provenance attestation. The setup is npmjs.com → `@sesori/figma-review` → Settings → Trusted publisher → GitHub
   Actions, this repo, workflow `publish.yml`, with **Allowed actions → allow `npm publish`** ticked: npm defaults a
   new connection to staged publishing only, which `publish.yml` does not use, and a connection cannot be edited
   afterwards, only deleted and recreated.
-- The Figma plugin is published by hand from the Figma desktop app (import `plugin/manifest.json` → Publish new
+- The Figma Community plugin is still published by hand from the Figma desktop app (import `plugin/manifest.json` → Publish new
   version, then Figma reviews it) — there is no API for it. The `id` in that manifest is the
   [Community listing](https://www.figma.com/community/plugin/1680238164100658906/sesori-review); its copy and assets
   are `docs/community-listing.md` and `plugin/assets/`.
