@@ -107,7 +107,7 @@ npm run smoke -w bridge   # fake plugin, one real turn through the bridge, no Fi
 
 Layout: `plugin/` (Figma sandbox + UI iframe, bundled by `plugin/build.mjs`), `bridge/` (WebSocket server + Agent SDK session manager), `shared/protocol.ts` (the wire protocol). Decisions in [PLAN.md](PLAN.md).
 
-**Releasing**: entries land under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md) as you go; then `npm run bump <v>`, commit, and push a `v<v>` tag — the tag is what publishes to npm (see [AGENTS.md](AGENTS.md)). The Figma plugin ships separately: import `plugin/manifest.json` in the desktop app and **Publish new version** — its `id` is the [Community listing](https://www.figma.com/community/plugin/1680238164100658906/sesori-review), listing copy is in [docs/community-listing.md](docs/community-listing.md) and its art in `plugin/assets/`.
+**Releasing**: entries land under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md) as you go; then `npm run bump-and-release <v>` from a clean `master` bumps the version, runs the checks, commits and pushes the `v<v>` tag — the tag is what publishes to npm (see [AGENTS.md](AGENTS.md)). The Figma plugin ships separately: import `plugin/manifest.json` in the desktop app and **Publish new version** — its `id` is the [Community listing](https://www.figma.com/community/plugin/1680238164100658906/sesori-review), listing copy is in [docs/community-listing.md](docs/community-listing.md) and its art in `plugin/assets/`.
 </details>
 
 ## License

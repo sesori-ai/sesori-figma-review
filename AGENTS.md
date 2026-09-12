@@ -29,12 +29,20 @@ what it does, [ARCHITECTURE.md](ARCHITECTURE.md) how the pieces fit, [PLAN.md](P
 
 ## Building / releasing
 
-- `npm run bump <X.Y.Z>` writes the version into the three `package.json` files and the lockfile and cuts
-  `[Unreleased]` into a `[X.Y.Z]` section. Commit it as `Release vX.Y.Z`, then push an annotated `vX.Y.Z` tag.
+- `npm run bump-and-release <X.Y.Z>` is the release. From a clean `master` that matches origin it bumps the version,
+  runs `npm run check`, commits `Release vX.Y.Z`, and pushes that commit and an annotated `vX.Y.Z` tag atomically.
+  It refuses what cannot be taken back: an unclean tree, a branch other than `master`, a `master` out of sync with
+  origin, a tag that already exists. Never run `npm publish` by hand — that is how 0.3.0 and 0.3.1 shipped without
+  provenance, and a published version cannot be replaced.
+- `npm run bump <X.Y.Z>` is the first half on its own: the version into the three `package.json` files and the
+  lockfile, `[Unreleased]` cut into a `[X.Y.Z]` section, nothing committed.
 - The tag is what publishes. `.github/workflows/publish.yml` checks the tag against the manifests, extracts the
   changelog section, runs `npm run check`, `npm publish --access public`, and opens a GitHub Release with that
-  section. npm auth is trusted publishing over OIDC, so no token lives here; the one-time setup is npmjs.com →
-  `@sesori/figma-review` → Settings → Trusted publisher → this repo, workflow `publish.yml`.
+  section. npm auth is trusted publishing over OIDC, so no token lives here, and it is what gets the package its
+  provenance attestation. The setup is npmjs.com → `@sesori/figma-review` → Settings → Trusted publisher → GitHub
+  Actions, this repo, workflow `publish.yml`, with **Allowed actions → allow `npm publish`** ticked: npm defaults a
+  new connection to staged publishing only, which `publish.yml` does not use, and a connection cannot be edited
+  afterwards, only deleted and recreated.
 - The Figma plugin is published by hand from the Figma desktop app (import `plugin/manifest.json` → Publish new
   version, then Figma reviews it) — there is no API for it. The `id` in that manifest is the
   [Community listing](https://www.figma.com/community/plugin/1680238164100658906/sesori-review); its copy and assets

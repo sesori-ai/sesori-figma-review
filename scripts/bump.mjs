@@ -2,7 +2,8 @@
 // lockfile, and cut the CHANGELOG "Unreleased" section under that version. Everything is
 // read and validated before the first write, and every file is rewritten on every run, so
 // a rerun repairs whatever an interrupted one left behind. Nothing is committed; the
-// commands to run next are printed.
+// commands to run next are printed. `npm run bump-and-release` (scripts/release.mjs) runs
+// this and then those commands itself.
 
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -61,4 +62,5 @@ writeFileSync(file("package-lock.json"), JSON.stringify(lock, null, 2) + "\n");
 if (alreadyCut) console.log(`CHANGELOG.md already has a [${version}] section; left as is`);
 else writeFileSync(file("CHANGELOG.md"), changelog.replace(/^## \[Unreleased\]\r?\n/m, `## [Unreleased]\n\n## [${version}]\n`));
 
-console.log(`\nNext:\n  git commit -am "Release v${version}"\n  git tag -a v${version} -m "v${version}"\n  git push && git push origin v${version}   # the tag is what publishes\n`);
+// release.mjs is about to run these itself, so it asks for the versions without the instructions.
+if (!process.env.SESORI_RELEASE) console.log(`\nNext:\n  npm run bump-and-release ${version}   # does all of the below, from a clean master\n  git commit -am "Release v${version}"\n  git tag -a v${version} -m "v${version}"\n  git push && git push origin v${version}   # the tag is what publishes\n`);
