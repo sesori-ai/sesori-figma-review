@@ -31,6 +31,8 @@ what it does, [ARCHITECTURE.md](ARCHITECTURE.md) how the pieces fit, [PLAN.md](P
 
 - `npm run bump-and-release <X.Y.Z>` is the release. From a clean `master` that matches origin it bumps the version,
   runs `npm run check`, commits `Release vX.Y.Z`, and pushes that commit and an annotated `vX.Y.Z` tag atomically.
+  A bump that already landed in its own PR, the way v0.3.1's did, leaves nothing to commit and the release is
+  only the tag.
   It refuses what cannot be taken back — an unclean tree, a branch other than `master`, a `master` out of sync with
   origin, a tag that already exists — and refuses all of it before writing anything, so a refusal costs nothing. A
   check or a push that fails after that point prints the one command that finishes or undoes it. Never run

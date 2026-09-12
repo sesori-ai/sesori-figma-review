@@ -47,8 +47,15 @@ try {
   refuse(`\nthe checks failed, and the bump is still in the tree.\n  drop it with \`git checkout -- ${bumped}\`, land the fix on master, then run this again`);
 }
 
-git("commit", "-am", `Release ${tag}`);
-git("tag", "-a", tag, "-m", tag);
+try {
+  // The bump is allowed to land in its own PR, the way v0.3.1's did, and then there is nothing left to commit.
+  if (git("status", "--porcelain")) git("commit", "-am", `Release ${tag}`);
+  git("tag", "-a", tag, "-m", tag);
+} catch (error) {
+  // git() pipes stderr, so without this the reason — a signing failure, a hook — is lost behind a stack trace.
+  refuse(`\ncould not commit or tag the release:\n${error.stderr || error.message}\n  undo with \`git reset --hard origin/master\`, and \`git tag -d ${tag}\` if the tag got created`);
+}
+
 try {
   // Atomic, so the tag never reaches origin without the commit it names.
   run("git", ["push", "--atomic", "origin", "master", tag]);

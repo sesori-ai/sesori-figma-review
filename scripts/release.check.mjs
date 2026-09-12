@@ -75,6 +75,18 @@ assert.equal(git(remote, "cat-file", "-t", "refs/tags/v0.2.0"), "tag", "the tag 
 assert.equal(git(remote, "rev-parse", "refs/tags/v0.2.0^{}"), git(dir, "rev-parse", "HEAD"), "and it names that commit");
 assert.equal(git(dir, "status", "--porcelain"), "", "nothing is left uncommitted");
 
+// The bump can land in its own PR, the way v0.3.1's did. Then the release is only the tag, and `git commit -am`
+// would fail on an empty commit.
+const prepared = fixture();
+execFileSync(process.execPath, [join(prepared.dir, "scripts/bump.mjs"), "0.2.0"], { cwd: prepared.dir, env, ...quiet });
+git(prepared.dir, "commit", "-am", "Release v0.2.0");
+git(prepared.dir, "push", "origin", "master");
+const preparedTip = git(prepared.dir, "rev-parse", "HEAD");
+release(prepared.dir, "0.2.0");
+assert.equal(git(prepared.dir, "rev-parse", "HEAD"), preparedTip, "a bump already committed is not committed twice");
+assert.equal(git(prepared.remote, "cat-file", "-t", "refs/tags/v0.2.0"), "tag", "and the tag still goes out");
+assert.equal(git(prepared.remote, "rev-parse", "refs/tags/v0.2.0^{}"), preparedTip, "naming the commit that was already there");
+
 // The one failure past the guards that can be provoked here. What the message promises has to be true: the bump
 // is in the tree to be dropped, and nothing of the release exists anywhere else.
 const failed = fixture();
