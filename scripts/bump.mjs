@@ -62,5 +62,6 @@ writeFileSync(file("package-lock.json"), JSON.stringify(lock, null, 2) + "\n");
 if (alreadyCut) console.log(`CHANGELOG.md already has a [${version}] section; left as is`);
 else writeFileSync(file("CHANGELOG.md"), changelog.replace(/^## \[Unreleased\]\r?\n/m, `## [Unreleased]\n\n## [${version}]\n`));
 
-// release.mjs is about to run these itself, so it asks for the versions without the instructions.
-if (!process.env.SESORI_RELEASE) console.log(`\nNext:\n  npm run bump-and-release ${version}   # does all of the below, from a clean master\n  git commit -am "Release v${version}"\n  git tag -a v${version} -m "v${version}"\n  git push && git push origin v${version}   # the tag is what publishes\n`);
+// release.mjs is about to run these itself, so it asks for the versions without the instructions. It is not
+// offered as an alternative here either: the tree is dirty now, which is the first thing it refuses.
+if (!process.env.SESORI_RELEASE) console.log(`\nNext:\n  git commit -am "Release v${version}"\n  git tag -a v${version} -m "v${version}"\n  git push && git push origin v${version}   # the tag is what publishes\n`);

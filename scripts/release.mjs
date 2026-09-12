@@ -12,7 +12,9 @@ import { fileURLToPath } from "node:url";
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const script = (name) => fileURLToPath(new URL(name, import.meta.url));
 const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
-const run = (command, args, env) => execFileSync(command, args, { cwd: repo, stdio: "inherit", env: { ...process.env, ...env } });
+const run = (command, args, options) => execFileSync(command, args, { cwd: repo, stdio: "inherit", ...options, env: { ...process.env, ...options?.env } });
+// What bump.mjs writes, so the recovery below restores exactly that and nothing else in the tree.
+const bumped = "package.json plugin/package.json bridge/package.json package-lock.json CHANGELOG.md";
 const refuse = (why) => {
   console.error(why);
   process.exit(1);
@@ -33,15 +35,16 @@ if (git("tag", "--list", tag)) refuse(`${tag} already exists locally`);
 if (git("ls-remote", "--tags", "origin", tag)) refuse(`${tag} already exists on origin`);
 
 // Past here the tree is being written to, so the two things that can still fail say how to get back.
-run(process.execPath, [script("bump.mjs"), version], { SESORI_RELEASE: "1" });
+run(process.execPath, [script("bump.mjs"), version], { env: { SESORI_RELEASE: "1" } });
 try {
   // publish.yml runs the checks too, but failing them there leaves the tag pushed and the release half done.
-  // npm is a .cmd shim on Windows, which execFileSync cannot launch by the bare name.
-  run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "check"]);
+  // Through a shell: npm is a .cmd shim on Windows, which execFileSync refuses to launch directly.
+  run("npm", ["run", "check"], { shell: true });
 } catch {
   // Not "fix it and rerun": the bump is in the tree, and the unclean-tree guard would refuse that. The bump is
   // cheap to recreate, so dropping it and releasing again once master is green is the shorter way round.
-  refuse(`\nthe checks failed, and the bump is still in the tree.\n  drop it with \`git checkout -- .\`, land the fix on master, then run this again`);
+  // Named files rather than `.`, so a fix already made somewhere else in the tree survives.
+  refuse(`\nthe checks failed, and the bump is still in the tree.\n  drop it with \`git checkout -- ${bumped}\`, land the fix on master, then run this again`);
 }
 
 git("commit", "-am", `Release ${tag}`);
@@ -57,4 +60,6 @@ try {
   );
 }
 
-console.log(`\n${tag} pushed; publish.yml has it from here:\n  gh run watch $(gh run list --workflow=publish.yml --limit 1 --json databaseId -q '.[0].databaseId')\n`);
+// A URL rather than a `gh run list --limit 1` incantation: the run may not exist yet, and that one would
+// then hand back the previous release's run, green, while this one fails.
+console.log(`\n${tag} pushed; publish.yml has it from here:\n  https://github.com/sesori-ai/sesori-figma-review/actions/workflows/publish.yml\n`);
