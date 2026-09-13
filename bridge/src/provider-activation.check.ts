@@ -97,8 +97,10 @@ class ActualCodexClient {
   calls: { method: string; params: unknown }[] = [];
   disposed = 0;
   threadStartGate?: Promise<void>;
-  nativeSettings = { model: "codex-cheap", effort: "low", serviceTier: "default" as const };
-  constructor(readonly args: ActualClientArgs, readonly runtime: boolean) {}
+  nativeSettings: { model: string; effort: string; serviceTier: "default"; cwd: string };
+  constructor(readonly args: ActualClientArgs, readonly runtime: boolean) {
+    this.nativeSettings = { model: "codex-cheap", effort: "low", serviceTier: "default", cwd: args.policy.thread.cwd };
+  }
   async connect() {
     return { userAgent: "codex_app_server/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "macos" };
   }
@@ -123,14 +125,16 @@ class ActualCodexClient {
         reasoningEffort: "low", serviceTier: "default" };
     }
     if (args.method === "thread/settings/update") {
-      this.nativeSettings = { model: String(params.model), effort: String(params.effort), serviceTier: "default" };
+      this.nativeSettings = { model: String(params.model), effort: String(params.effort), serviceTier: "default",
+        cwd: String(params.cwd) };
       this.notify("thread/settings/updated", { threadId: params.threadId, threadSettings: this.nativeSettings });
     }
     if (args.method === "turn/start") {
       response = { turn: { id: `actual-turn-${this.calls.filter(call => call.method === "turn/start").length}`,
         items: [], status: "inProgress" } };
       const turnId = (response as { turn: { id: string } }).turn.id, threadId = String(params.threadId);
-      this.notify("thread/settings/updated", { threadId, threadSettings: this.nativeSettings });
+      this.notify("thread/settings/updated", { threadId,
+        threadSettings: { ...this.nativeSettings, cwd: this.args.policy.thread.turnEnvironments[0]!.cwd } });
       this.notify("turn/started", { threadId, turn: { id: turnId, items: [], status: "inProgress" } });
     }
     if (args.method === "turn/steer") response = { turnId: params.expectedTurnId };
@@ -139,6 +143,7 @@ class ActualCodexClient {
   }
   requestOptionalAccounting<T>(args: { method: "account/usage/read"; params: unknown;
     parse: (value: unknown) => T }): Promise<T | undefined> { return this.request(args); }
+  hasPendingRequiredRequests() { return false; }
   notify(method: string, params: unknown) { this.args.onNotification?.({ method, params }); }
   server(method: string, params: unknown, id: string | number = 1) {
     if (!this.args.onRequest) return Promise.reject(new Error("Actual Codex fixture has no request callback"));
@@ -660,6 +665,16 @@ heldThreadStart.resolve();
 await pendingActualClient.next(down({ kind: "started", where: message => message.session.provider === "codex" }));
 assert.equal(pendingActualClients[1]!.calls.some(call => call.method === "thread/settings/update"), true,
   "pending-start reconciliation applies settings saved while native start was held");
+const actualNullPermissions = { fileSystem: { read: null, write: null, entries: [{ access: "write",
+  path: { type: "path", path: join(pendingActualClients[1]!.args.policy.notesDir, "actual.txt") } }] } };
+const routedActualPermission = pendingActualClients[1]!.server("item/permissions/requestApproval", {
+  threadId: "actual-thread", turnId: "actual-turn-1", itemId: "actual-permission", startedAtMs: 1,
+  cwd: pendingActualClients[1]!.args.policy.notesDir, reason: "actual callback", permissions: actualNullPermissions,
+}, 77);
+const actualPermissionCard = await pendingActualClient.next(message => message.kind === "permission");
+pendingActualClient.send({ kind: "reply", id: actualPermissionCard.id, result: { behavior: "allow" } });
+assert.deepEqual(await routedActualPermission, { permissions: actualNullPermissions, scope: "turn" },
+  "actual-provider fixture forwards numeric native permission requests through bridge callback ownership");
 pendingActualClients[1]!.terminate(new Error("actual fixture terminal"));
 await pendingActualClient.next(message => message.kind === "error");
 const pendingTerminalDeadline = Date.now() + 2_000;

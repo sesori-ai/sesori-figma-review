@@ -152,7 +152,7 @@ const itemNotification = z.object({ ...envelope, item: codexThreadItem });
 const deltaNotification = z.object({ ...envelope, itemId: identifier, delta: z.string() });
 const threadSettingsNotification = z.object({
   threadId: identifier, threadSettings: z.object({
-    model: identifier, effort: z.string().nullable(), serviceTier: z.string().nullable(),
+    model: identifier, effort: z.string().nullable(), serviceTier: z.string().nullable(), cwd: z.string(),
   }).passthrough(),
 });
 const usageNotification = z.object({

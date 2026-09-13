@@ -125,6 +125,11 @@ export class CodexClient {
     return this.rawRequest(args);
   }
 
+  hasPendingRequiredRequests() {
+    for (const id of this.pending.keys()) if (id !== this.optionalAccountingId) return true;
+    return false;
+  }
+
   async requestOptionalAccounting<T>(args: {
     method: "account/usage/read"; params: unknown; parse: (value: unknown) => T; waitForSlot?: boolean;
   }): Promise<T | undefined> {

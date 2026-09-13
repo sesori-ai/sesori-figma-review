@@ -94,19 +94,28 @@ class FakeClient {
   turnStartOrder: "none" | "settings-before-response" | "settings-response-started" | "response-settings-started"
     | "settings-started-response" | "settings-started-completed-response" | "response-started-settings"
     = "settings-before-response";
-  nativeSettings = { model: "codex-cheap", effort: "low", serviceTier: "default" as const };
+  nativeSettings: { model: string; effort: string; serviceTier: "default"; cwd: string };
   retirementGate?: Promise<void>;
   constructor(readonly args: {
     policy: CodexExecutionPolicy;
     onRequest?: (request: CodexServerRequest) => Promise<unknown>;
     onNotification?: (notification: CodexNotification) => void;
     onTerminal?: (error: Error) => void;
-  }, readonly kind: "discovery" | "runtime") {}
+  }, readonly kind: "discovery" | "runtime") {
+    this.nativeSettings = { model: "codex-cheap", effort: "low", serviceTier: "default", cwd: args.policy.thread.cwd };
+  }
   async connect() {
     this.calls.push({ method: "initialize", params: {} });
     return { userAgent: "codex_app_server/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "macos" };
   }
+  private requiredRequests = 0;
   async request<T>(args: RpcArgs<T>): Promise<T> {
+    this.requiredRequests++;
+    try { return await this.performRequest(args); }
+    finally { this.requiredRequests--; }
+  }
+  hasPendingRequiredRequests() { return this.requiredRequests > 0; }
+  private async performRequest<T>(args: RpcArgs<T>): Promise<T> {
     this.calls.push({ method: args.method, params: args.params });
     const failure = this.failures.get(args.method);
     if (failure) { this.failures.delete(args.method); throw failure; }
@@ -114,14 +123,17 @@ class FakeClient {
     let response = queued ? await queued : this.responses.get(args.method);
     if (response === undefined) response = this.defaultResponse(args.method, args.params);
     if (args.method === "thread/settings/update" && this.confirmSettings) {
-      const settings = args.params as { threadId: string; model: string; effort: string };
-      this.nativeSettings = { model: settings.model, effort: settings.effort, serviceTier: "default" };
+      const settings = args.params as { threadId: string; model: string; effort: string; cwd: string };
+      this.nativeSettings = { model: settings.model, effort: settings.effort, serviceTier: "default", cwd: settings.cwd };
       this.notify("thread/settings/updated", { threadId: settings.threadId, threadSettings: this.nativeSettings });
     }
     if (args.method === "turn/start") {
       const turn = args.params as { threadId: string }, turnId = (response as { turn: { id: string } }).turn.id;
-      const settings = () => { this.initialSettingsNotifications++;
-        this.notify("thread/settings/updated", { threadId: turn.threadId, threadSettings: this.nativeSettings }); };
+      const settings = () => {
+        this.initialSettingsNotifications++;
+        this.notify("thread/settings/updated", { threadId: turn.threadId,
+          threadSettings: { ...this.nativeSettings, cwd: this.args.policy.thread.turnEnvironments[0]!.cwd } });
+      };
       const started = () => this.notify("turn/started", { threadId: turn.threadId, turnId,
         turn: { id: turnId, items: [], status: "inProgress" } });
       if (this.turnStartOrder.startsWith("settings-")) settings();
@@ -155,7 +167,7 @@ class FakeClient {
       if (!available || this.optionalAccountingPending) return undefined;
     }
     this.optionalAccountingPending = true;
-    try { return await this.request(args); }
+    try { return await this.performRequest(args); }
     finally {
       this.optionalAccountingPending = false;
       for (const ready of this.optionalAccountingWaiters) ready();
@@ -502,12 +514,24 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(settingsSettled, false, "queued thread ACK is not an applied future-settings confirmation");
 runtime.confirmSettings = true;
 runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "low", serviceTier: "default" } });
+  threadSettings: { model: "codex-cheap", effort: "low", serviceTier: "default", cwd: runtime.args.policy.thread.cwd } });
 await assert.rejects(settingsUpdate,
   error => error instanceof CodexSettingsError && error.category === "confirmation");
 assert.equal(settingsSettled, false, "incorrect explicit settings confirmation is rejected");
 assert.deepEqual(runtime.calls.slice(-2).map(call => call.method), ["thread/settings/update", "thread/settings/update"],
   "incorrect explicit confirmation restores the last confirmed settings");
+runtime.confirmSettings = false;
+const wrongFutureCwd = session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
+await new Promise(resolve => setImmediate(resolve));
+runtime.confirmSettings = true;
+runtime.notify("thread/settings/updated", { threadId: "thread-new", threadSettings: {
+  model: "codex-cheap", effort: "medium", serviceTier: "default",
+  cwd: runtime.args.policy.thread.turnEnvironments[0]!.cwd,
+} });
+await assert.rejects(wrongFutureCwd,
+  error => error instanceof CodexSettingsError && error.category === "confirmation");
+assert.deepEqual(runtime.calls.slice(-2).map(call => call.method), ["thread/settings/update", "thread/settings/update"],
+  "future-settings confirmation rejects active-turn cwd and restores confirmed thread defaults");
 await session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
 assert.deepEqual(runtime.calls.slice(-2).map(call => call.method), ["thread/settings/update", "turn/settings/update"]);
 const callsAfterSettings = runtime.calls.length;
@@ -769,6 +793,38 @@ async function orderingFixture(label: string, options: { turnStartEventTimeoutMs
   return { provider: fixtureProvider, session: fixtureSession, runtime: fixtureClients[1]!, clients: fixtureClients,
     iterator: fixtureIterator, dir: fixtureDir };
 }
+const stalledHistory = await orderingFixture("stalled-history-retirement");
+const heldHistoryRead = deferred<unknown>(), heldHistoryRetirement = deferred<void>();
+stalledHistory.runtime.responseQueues.set("thread/read", [heldHistoryRead.promise]);
+stalledHistory.runtime.retirementGate = heldHistoryRetirement.promise;
+const stalledHistoryRead = stalledHistory.provider.readHistory({
+  fileId: "stalled-history-retirement", dir: stalledHistory.dir, sessionId: "thread-new", settings, boundary,
+  baseRecord: { ...baseRecord, sessionId: "thread-new" },
+});
+await waitUntil({ predicate: () => stalledHistory.runtime.calls.some(call => call.method === "thread/read")
+    && stalledHistory.runtime.hasPendingRequiredRequests(),
+  label: "required History read admission" });
+stalledHistory.session.close();
+await waitUntil({ predicate: () => stalledHistory.runtime.disposed === 1, label: "required History read retirement" });
+const historyReplacementPending = stalledHistory.provider.start({
+  fileId: "stalled-history-retirement", dir: stalledHistory.dir, settings, boundary, baseRecord,
+});
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(stalledHistory.clients.length, 2,
+  "same-file replacement waits for required History read runtime retirement");
+heldHistoryRetirement.resolve();
+await waitUntil({ predicate: () => stalledHistory.clients.length === 4, label: "post-History replacement preparation" });
+const historyReplacement = await historyReplacementPending, historyReplacementRuntime = stalledHistory.clients[3]!;
+assert.notEqual(historyReplacementRuntime, stalledHistory.runtime,
+  "replacement owns a fresh runtime rather than reusing required-read owner");
+stalledHistory.runtime.terminate(new Error("Codex thread/read timed out after 10ms"));
+heldHistoryRead.resolve({ thread: { id: "thread-new", turns: [] } });
+await stalledHistoryRead;
+assert.deepEqual([Reflect.get(historyReplacement, "closed"), historyReplacementRuntime.disposed], [false, 0],
+  "old required-read timeout and late response cannot close replacement");
+historyReplacement.close(); stalledHistory.provider.dispose();
+await waitUntil({ predicate: () => historyReplacementRuntime.disposed === 1, label: "History replacement retirement" });
+
 const retainedSkill = await orderingFixture("retained-first-skill");
 retainedSkill.runtime.confirmSettings = false;
 const heldInitialSettings = retainedSkill.session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
@@ -777,7 +833,8 @@ await waitUntil({ predicate: () => retainedSkill.runtime.calls.some(call => call
 retainedSkill.session.send({ text: "discard before native admission", selection: [] });
 const stopBeforeAdmission = retainedSkill.session.interrupt();
 retainedSkill.runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
+  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default",
+    cwd: retainedSkill.runtime.args.policy.thread.cwd } });
 await Promise.all([heldInitialSettings, stopBeforeAdmission]);
 assert.equal(retainedSkill.runtime.calls.filter(call => call.method === "turn/start").length, 0,
   "Stop discards queued first send before native admission");
@@ -1019,7 +1076,8 @@ idleSettingsClose.provider.prepare({ fileId: "idle-settings-close", dir: idleSet
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(idleSettingsClose.clients.length, 2, "replacement preparation waits for pending-settings runtime retirement");
 idleSettingsClose.runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
+  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default",
+    cwd: idleSettingsClose.runtime.args.policy.thread.cwd } });
 retirement.resolve();
 await waitUntil({ predicate: () => idleSettingsClose.clients.length === 4
     && idleSettingsClose.provider.health({ settings }).status === "ready",
@@ -1027,7 +1085,8 @@ await waitUntil({ predicate: () => idleSettingsClose.clients.length === 4
 const idleReplacement = await idleSettingsClose.provider.start({ fileId: "idle-settings-close", dir: idleSettingsClose.dir,
   settings, boundary, baseRecord });
 idleSettingsClose.runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
+  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default",
+    cwd: idleSettingsClose.runtime.args.policy.thread.cwd } });
 assert.equal(Reflect.get(idleReplacement, "closed"), false,
   "late notification from retired settings runtime cannot close replacement");
 settingsAck.resolve({}); idleReplacement.close(); idleSettingsClose.provider.dispose();
@@ -1079,7 +1138,10 @@ for (const order of sourceOrders) {
   fixture.session.close(); fixture.provider.dispose();
   await waitUntil({ predicate: () => fixture.runtime.disposed === 1, label: `${order} retirement` });
 }
-const validInitialSettings = { model: "codex-cheap", effort: "low", serviceTier: "default" };
+const initialSettings = (fixture: Awaited<ReturnType<typeof orderingFixture>>) => ({
+  model: "codex-cheap", effort: "low", serviceTier: "default",
+  cwd: fixture.runtime.args.policy.thread.turnEnvironments[0]!.cwd,
+});
 async function expectInitialFailure(label: string,
   act: (fixture: Awaited<ReturnType<typeof orderingFixture>>) => void | Promise<void>) {
   const fixture = await orderingFixture(label); await act(fixture);
@@ -1089,30 +1151,31 @@ async function expectInitialFailure(label: string,
   await waitUntil({ predicate: () => fixture.runtime.disposed === 1, label: `${label} retirement` });
 }
 await expectInitialFailure("initial-before-start", fixture => fixture.runtime.notify("thread/settings/updated", {
-  threadId: "thread-new", threadSettings: validInitialSettings,
+  threadId: "thread-new", threadSettings: initialSettings(fixture),
 }));
 await expectInitialFailure("initial-wrong-thread", fixture => fixture.runtime.notify("thread/settings/updated", {
-  threadId: "other-thread", threadSettings: validInitialSettings,
+  threadId: "other-thread", threadSettings: initialSettings(fixture),
 }));
 await expectInitialFailure("initial-malformed", fixture => fixture.runtime.notify("thread/settings/updated", {
   threadId: "thread-new", threadSettings: { model: "codex-cheap", effort: "low" },
 }));
-for (const [label, threadSettings] of [
-  ["model", { ...validInitialSettings, model: "other-model" }],
-  ["effort", { ...validInitialSettings, effort: "medium" }],
-  ["tier", { ...validInitialSettings, serviceTier: "priority" }],
-] as const) {
+for (const label of ["model", "effort", "tier", "cwd"] as const) {
   await expectInitialFailure(`initial-${label}-drift`, async fixture => {
     fixture.runtime.turnStartOrder = "none"; fixture.session.send({ text: label, selection: [] });
     await waitUntil({ predicate: () => Reflect.get(fixture.session, "turnStart") !== undefined,
       label: `${label} initial window` });
+    const valid = initialSettings(fixture);
+    const threadSettings = label === "model" ? { ...valid, model: "other-model" }
+      : label === "effort" ? { ...valid, effort: "medium" }
+      : label === "tier" ? { ...valid, serviceTier: "priority" }
+      : { ...valid, cwd: fixture.runtime.args.policy.thread.cwd };
     fixture.runtime.notify("thread/settings/updated", { threadId: "thread-new", threadSettings });
   });
 }
 await expectInitialFailure("initial-excess", async fixture => {
   fixture.runtime.turnStartOrder = "settings-before-response"; fixture.session.send({ text: "excess", selection: [] });
   await waitUntil({ predicate: () => fixture.runtime.initialSettingsNotifications === 1, label: "initial snapshot admission" });
-  fixture.runtime.notify("thread/settings/updated", { threadId: "thread-new", threadSettings: validInitialSettings });
+  fixture.runtime.notify("thread/settings/updated", { threadId: "thread-new", threadSettings: initialSettings(fixture) });
 });
 await expectInitialFailure("initial-after-started", fixture => {
   fixture.runtime.turnStartOrder = "response-started-settings"; fixture.session.send({ text: "late", selection: [] });
@@ -1127,7 +1190,7 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(initialCannotConfirm.runtime.calls.some(call => call.method === "thread/settings/update"), false,
   "explicit settings cannot enter the initial-snapshot window");
 initialCannotConfirm.runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "low", serviceTier: "default" } });
+  threadSettings: initialSettings(initialCannotConfirm) });
 initialCannotConfirm.runtime.notify("turn/started", { threadId: "thread-new",
   turn: { id: "turn-new", items: [], status: "inProgress" } });
 await concurrentSettings;
@@ -1141,7 +1204,9 @@ const failedStartError = new Error("turn start failed"); failedStart.runtime.fai
 const failedStartOutput = failedStart.iterator.next(); failedStart.session.send({ text: "fail", selection: [] });
 await assert.rejects(failedStartOutput, error => error === failedStartError, "queued start keeps its original error");
 await waitUntil({ predicate: () => failedStart.runtime.disposed === 1, label: "failed turn-start retirement" });
-failedStart.runtime.notify("thread/settings/updated", { threadId: "thread-new", threadSettings: validInitialSettings });
+failedStart.runtime.notify("thread/settings/updated", {
+  threadId: "thread-new", threadSettings: initialSettings(failedStart),
+});
 assert.equal(Reflect.get(failedStart.session, "closed"), true, "failed/closed start cannot admit a late initial snapshot");
 failedStart.provider.dispose();
 const missingStarted = await orderingFixture("missing-turn-started", { turnStartEventTimeoutMs: 5 });

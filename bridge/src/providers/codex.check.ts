@@ -293,7 +293,11 @@ const lateCallbacks: string[] = [];
 const timedOut = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => timeoutFixture,
   requestTimeoutMs: 5, onNotification: message => lateCallbacks.push(message.method) });
 await timedOut.connect();
-await assert.rejects(timedOut.request({ method: "never/replies", params: {}, parse: String }), /timed out after 5ms/);
+const requiredTimeout = timedOut.request({ method: "never/replies", params: {}, parse: String });
+await wait();
+assert.equal(timedOut.hasPendingRequiredRequests(), true, "ordinary RPC remains required native-client work");
+await assert.rejects(requiredTimeout, /timed out after 5ms/);
+assert.equal(timedOut.hasPendingRequiredRequests(), false, "terminal cleanup clears required RPC ownership");
 assert.equal(timeoutFixture.killed, true);
 await assert.rejects(timedOut.request({ method: "after-timeout", params: {}, parse: String }), /timed out/);
 timeoutFixture.send({ method: "late/event", params: {} }); assert.deepEqual(lateCallbacks, []);
@@ -310,8 +314,14 @@ const optionalFixture = new FakeChild((message, server) => {
 const optionalClient = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => optionalFixture,
   requestTimeoutMs: 5 });
 await optionalClient.connect();
-assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {}, parse: value => value }),
-  undefined, "optional accounting timeout reports unavailable without terminating shared runtime");
+const optionalTimeout = optionalClient.requestOptionalAccounting({
+  method: "account/usage/read", params: {}, parse: value => value,
+});
+await wait();
+assert.equal(optionalClient.hasPendingRequiredRequests(), false,
+  "optional accounting is excluded from required client ownership");
+assert.equal(await optionalTimeout, undefined,
+  "optional accounting timeout reports unavailable without terminating shared runtime");
 const sentAfterTimeout = optionalFixture.sent.length;
 assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {}, parse: value => value }),
   undefined);

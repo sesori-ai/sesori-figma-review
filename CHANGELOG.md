@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native admission, retires all in-flight mutations before replacement, and reports unsafe initial workspace preparation.
 - Codex accepts source-defined nullable permission roots, bounds and detaches queued accounting waits, and retains failed replay
   turns without native error text.
+- Codex binds initial and future settings confirmations to their operation-specific working directories and retires clients with
+  outstanding required History reads before replacement.
 
 ## [0.3.2]
 

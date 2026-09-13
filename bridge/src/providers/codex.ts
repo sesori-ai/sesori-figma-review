@@ -81,7 +81,8 @@ class OutputQueue implements AsyncIterable<ProviderOutput> {
   }
 }
 
-type RpcClient = Pick<CodexClient, "connect" | "request" | "requestOptionalAccounting" | "dispose" | "disposeAndWait">;
+type RpcClient = Pick<CodexClient,
+  "connect" | "request" | "requestOptionalAccounting" | "hasPendingRequiredRequests" | "dispose" | "disposeAndWait">;
 type ClientFactory = (args: {
   policy: CodexExecutionPolicy;
   onRequest?: (request: CodexServerRequest) => Promise<unknown>;
@@ -232,7 +233,7 @@ export function projectCodexHistory(turns: { id: string; items: CodexThreadItem[
 
 type TurnStartLifecycle = {
   responseSettled: boolean; started: boolean; completed: boolean; settingsObserved: boolean;
-  turnId?: string; model: string; effort: string; startedEvent: Promise<void>;
+  turnId?: string; model: string; effort: string; cwd: string; startedEvent: Promise<void>;
   resolveStarted: () => void; rejectStarted: (error: Error) => void; timer: ReturnType<typeof setTimeout>;
 };
 
@@ -257,7 +258,8 @@ class CodexSession implements ReviewSession {
   private costRead?: Promise<{ usd: number; status: "reported" | "estimated" | "unavailable" }>;
   private readonly changes = new Map<string, unknown[]>();
   private futureSettings?: {
-    model: string; effort: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>;
+    model: string; effort: string; cwd: string;
+    resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>;
   };
 
   constructor(private readonly args: {
@@ -386,9 +388,12 @@ class CodexSession implements ReviewSession {
     void startedEvent.catch(() => {});
     const timeoutMs = this.args.turnStartEventTimeoutMs ?? TURN_START_EVENT_TIMEOUT_MS;
     const timer = setTimeout(() => rejectStarted(new Error(`Codex turn start event timed out after ${timeoutMs}ms`)), timeoutMs);
+    const turnEnvironment = this.args.policy.thread.turnEnvironments[0];
+    if (!turnEnvironment) throw new Error("Codex turn environment is unavailable");
     const lifecycle: TurnStartLifecycle = this.turnStart = {
       responseSettled: false, started: false, completed: false, settingsObserved: false,
-      model: this.settings.model, effort: this.settings.effort, startedEvent, resolveStarted, rejectStarted, timer,
+      model: this.settings.model, effort: this.settings.effort, cwd: turnEnvironment.cwd,
+      startedEvent, resolveStarted, rejectStarted, timer,
     };
     try {
       const started = await this.mutate(() => this.args.client.request({
@@ -415,7 +420,7 @@ class CodexSession implements ReviewSession {
     let resolve!: () => void, reject!: (error: Error) => void;
     const confirmed = new Promise<void>((accept, decline) => { resolve = accept; reject = decline; });
     const timer = setTimeout(() => reject(new CodexSettingsError("confirmation")), 10_000);
-    const pending = this.futureSettings = { ...settings, resolve, reject, timer };
+    const pending = this.futureSettings = { ...settings, cwd: this.args.policy.thread.cwd, resolve, reject, timer };
     try {
       const request = this.mutate(() => this.args.client.request({ method: "thread/settings/update", params: {
         threadId: this.args.threadId, model: settings.model, effort: settings.effort,
@@ -464,12 +469,13 @@ class CodexSession implements ReviewSession {
       const lifecycle = this.turnStart, pending = this.futureSettings, applied = parsed.params.threadSettings;
       if (lifecycle && !lifecycle.started && !lifecycle.settingsObserved) {
         if (applied.model !== lifecycle.model || applied.effort !== lifecycle.effort
-          || applied.serviceTier !== "default") {
+          || applied.serviceTier !== "default" || applied.cwd !== lifecycle.cwd) {
           this.fail(new Error("Codex initial turn settings differ from the selected settings")); this.close(); return;
         }
         lifecycle.settingsObserved = true;
       } else if (pending) {
-        if (applied.model === pending.model && applied.effort === pending.effort && applied.serviceTier === "default") {
+        if (applied.model === pending.model && applied.effort === pending.effort
+          && applied.serviceTier === "default" && applied.cwd === pending.cwd) {
           pending.resolve();
         } else pending.reject(new CodexSettingsError("confirmation"));
       } else {
@@ -666,7 +672,7 @@ class CodexSession implements ReviewSession {
   close() {
     if (this.closed) return;
     const nativeTurnPending = this.turnStart !== undefined || this.activeTurn !== undefined
-      || this.futureSettings !== undefined || this.nativeMutations > 0;
+      || this.futureSettings !== undefined || this.nativeMutations > 0 || this.args.client.hasPendingRequiredRequests();
     const lifecycle = this.turnStart;
     this.closed = true; this.generation++; this.turnStart = undefined;
     if (lifecycle) { clearTimeout(lifecycle.timer); lifecycle.resolveStarted(); }
