@@ -571,8 +571,9 @@ export class CodexProvider implements ReviewProvider {
   private active?: CodexSession;
   private generation = 0;
   private readonly ownedClients = new Set<RpcClient>();
-  private readonly retiredClients = new WeakSet<object>();
+  private readonly retirements = new WeakMap<object, Promise<void>>();
   private retirement: Promise<void> = Promise.resolve();
+  private retirementFailure?: unknown;
   private readonly createClient: ClientFactory;
 
   constructor(private readonly args: {
@@ -712,6 +713,7 @@ export class CodexProvider implements ReviewProvider {
 
   private async prepareRuntime(args: { dir: string; generation: number }): Promise<Prepared> {
     await this.retirement;
+    if (this.retirementFailure !== undefined) throw this.retirementFailure;
     if (args.generation !== this.generation) throw new Error("Codex preparation was superseded before spawn");
     const appRepo = process.env.APP_REPO;
     const discoveryPolicy = createCodexDiscoveryPolicy({ dir: args.dir, appRepo, command: this.args.command });
@@ -742,10 +744,12 @@ export class CodexProvider implements ReviewProvider {
 
   private own<T extends RpcClient>(client: T): T { this.ownedClients.add(client); return client; }
   private retire(client: RpcClient): Promise<void> {
-    if (this.retiredClients.has(client as object)) return this.retirement;
-    this.retiredClients.add(client as object); this.ownedClients.delete(client);
-    const retirement = this.retirement.catch(() => {}).then(() => client.disposeAndWait({ timeoutMs: 5_000 }));
-    this.retirement = retirement.catch(() => {});
+    const existing = this.retirements.get(client as object);
+    if (existing) return existing;
+    this.ownedClients.delete(client);
+    const retirement = this.retirement.then(() => client.disposeAndWait({ timeoutMs: 5_000 }));
+    this.retirements.set(client as object, retirement);
+    this.retirement = retirement.then(() => {}, error => { this.retirementFailure ??= error; });
     return retirement;
   }
   private notify() { try { this.args.onPrepared(); } catch (error) { this.args.log("Codex readiness notification failed", error); } }

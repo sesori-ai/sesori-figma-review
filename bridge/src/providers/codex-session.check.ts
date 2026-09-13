@@ -551,11 +551,12 @@ const failedRetirementProvider = new CodexProvider({ version: "test", log: () =>
 failedRetirementProvider.prepare({ fileId: "failed-retirement", dir: failedRetirementDir, settings, boundary });
 await waitUntil({ predicate: () => failedRetirementProvider.health({ settings }).status === "unavailable",
   label: "failed retirement preparation" });
-failedRetirementProvider.prepare({ fileId: "recovered-retirement", dir: failedRetirementDir, settings, boundary });
-await waitUntil({ predicate: () => failedRetirementProvider.health({ settings }).status === "ready",
-  label: "preparation after rejected retirement" });
-assert.equal(failedRetirementClients.length, 3,
-  "a rejected retirement remains visible to its caller without poisoning subsequent preparation");
+failedRetirementProvider.prepare({ fileId: "blocked-retirement", dir: failedRetirementDir, settings, boundary });
+assert.equal(failedRetirementProvider.health({ settings }).status, "starting");
+await waitUntil({ predicate: () => failedRetirementProvider.health({ settings }).status === "unavailable",
+  label: "preparation blocked by rejected retirement" });
+assert.equal(failedRetirementClients.length, 1,
+  "an unproved retirement remains latched and blocks every later spawn");
 failedRetirementProvider.dispose();
 
 const terminalDir = join(root, "terminal-recovery");

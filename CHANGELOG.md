@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Codex approvals now confine writes to notes and reject network escalation; session preparation, history, accounting, terminal recovery,
-  malformed items, spawn retirement, and startup credential warnings remain safe across asynchronous races and invalid inputs.
+  malformed items, spawn retirement, latched retirement uncertainty, and startup warnings remain safe across races and invalid inputs.
 
 ## [0.3.2]
 
