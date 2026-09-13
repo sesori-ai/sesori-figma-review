@@ -781,7 +781,9 @@ export class CodexProvider implements ReviewProvider {
       result, resume: args.resume, policy: prepared.policy, model: selected.model, effort: selected.effort,
     });
     if (!diagnostics.matches) {
-      await this.rejectThreadPolicy(prepared, new CodexThreadPolicyMismatchError(diagnostics.fields));
+      await this.rejectThreadPolicy({
+        prepared, error: new CodexThreadPolicyMismatchError(diagnostics.fields),
+      });
     }
     const health: ProviderHealth = {
       provider: "codex", status: "ready", version: prepared.qualification.version, model: result.model,
@@ -923,15 +925,17 @@ export class CodexProvider implements ReviewProvider {
     } catch (error) { await this.retire(client); throw error; }
   }
 
-  private async rejectThreadPolicy(prepared: Prepared, error: CodexThreadPolicyMismatchError): Promise<never> {
-    if (prepared.generation === this.generation) {
+  private async rejectThreadPolicy(args: {
+    prepared: Prepared; error: CodexThreadPolicyMismatchError;
+  }): Promise<never> {
+    if (args.prepared.generation === this.generation) {
       const active = this.active; this.active = undefined; active?.close();
       this.client = undefined; this.prepared = undefined; this.preparedKey = undefined;
-      this.runtime = { status: "unavailable", error: error.message };
+      this.runtime = { status: "unavailable", error: args.error.message };
       this.generation++; this.startSequence++; this.notify();
     }
-    await this.retire(prepared.client);
-    throw error;
+    await this.retire(args.prepared.client);
+    throw args.error;
   }
 
   private own<T extends RpcClient>(client: T): T { this.ownedClients.add(client); return client; }

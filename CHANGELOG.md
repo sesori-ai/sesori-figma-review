@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outstanding required History reads before replacement.
 - Codex retires the exact runtime after a parse-valid thread-policy mismatch without poisoning newer ownership, and offers one-shot
   command Allow only when experimental native choices include exact `accept`.
+- New Codex mismatch lifecycle helpers use named argument objects consistently.
 
 ## [0.3.2]
 

@@ -744,7 +744,8 @@ resumed.close(); provider.dispose();
 await waitUntil({ predicate: () => runtime.disposed === 1, label: "runtime disposal" });
 assert.ok(prepared.length >= 2);
 
-async function provePolicyMismatchRetirement(label: string, resume?: string) {
+async function provePolicyMismatchRetirement(args: { label: string; resume?: string }) {
+  const { label, resume } = args;
   const mismatchDir = join(root, label); mkdirSync(join(mismatchDir, "notes"), { recursive: true });
   writeFileSync(join(mismatchDir, "CLAUDE.md"), "instructions");
   const mismatchClients: FakeClient[] = [], retirement = deferred<void>();
@@ -786,8 +787,8 @@ async function provePolicyMismatchRetirement(label: string, resume?: string) {
   replacementSession.close(); mismatchProvider.dispose();
   await waitUntil({ predicate: () => mismatchClients[3]!.disposed === 1, label: `${label} replacement retirement` });
 }
-await provePolicyMismatchRetirement("thread-start-policy-mismatch");
-await provePolicyMismatchRetirement("thread-resume-policy-mismatch", "resume-owned-id");
+await provePolicyMismatchRetirement({ label: "thread-start-policy-mismatch" });
+await provePolicyMismatchRetirement({ label: "thread-resume-policy-mismatch", resume: "resume-owned-id" });
 
 const staleMismatchDirA = join(root, "stale-policy-mismatch-a"), staleMismatchDirB = join(root, "stale-policy-mismatch-b");
 for (const mismatchDir of [staleMismatchDirA, staleMismatchDirB]) {
@@ -852,15 +853,15 @@ const sharedNewerStart = sharedMismatchProvider.start({
 });
 await waitUntil({ predicate: () => sharedOffender.calls.filter(call => call.method === "thread/start").length === 2,
   label: "shared mismatch newer request" });
-const sharedResult = (threadId: string, cwd: string) => ({
-  thread: { id: threadId, turns: [], environments: [sharedOffender.args.policy.thread.defaultEnvironment] },
-  model: "codex-cheap", cwd, runtimeWorkspaceRoots: sharedOffender.args.policy.thread.runtimeWorkspaceRoots,
+const sharedResult = (args: { threadId: string; cwd: string }) => ({
+  thread: { id: args.threadId, turns: [], environments: [sharedOffender.args.policy.thread.defaultEnvironment] },
+  model: "codex-cheap", cwd: args.cwd, runtimeWorkspaceRoots: sharedOffender.args.policy.thread.runtimeWorkspaceRoots,
   approvalsReviewer: "user", approvalPolicy: sharedOffender.args.policy.thread.approvalPolicy,
   activePermissionProfile: { id: CODEX_PERMISSION_PROFILE }, reasoningEffort: "low", serviceTier: "default",
 });
-newerReply.resolve(sharedResult("shared-newer-owned", sharedOffender.args.policy.thread.cwd));
+newerReply.resolve(sharedResult({ threadId: "shared-newer-owned", cwd: sharedOffender.args.policy.thread.cwd }));
 const sharedNewerSession = await sharedNewerStart;
-olderReply.resolve(sharedResult("shared-older-owned", join(sharedMismatchDir, "wrong-cwd")));
+olderReply.resolve(sharedResult({ threadId: "shared-older-owned", cwd: join(sharedMismatchDir, "wrong-cwd") }));
 await assert.rejects(sharedOlderStart, error => error instanceof CodexThreadPolicyMismatchError
   && error.fields[0] === "cwd");
 await waitUntil({ predicate: () => sharedOffender.disposed === 1, label: "shared mismatch exact retirement" });
