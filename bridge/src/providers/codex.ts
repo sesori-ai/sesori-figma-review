@@ -600,6 +600,7 @@ class CodexSession implements ReviewSession {
           throw new Error("Codex user input request was interrupted");
         }
         this.assertOwner(params);
+        if (result.isError) throw new Error("Codex user input request failed");
         const text = result.content.flatMap(item => item.type === "text" ? [item.text] : []).join("\n");
         answers[question.id] = { answers: [text] };
       }
@@ -692,6 +693,7 @@ export class CodexProvider implements ReviewProvider {
   private startSequence = 0;
   private pendingStartSequence?: number;
   private readonly ownedClients = new Set<RpcClient>();
+  private readonly pendingHistoryReads = new WeakMap<object, number>();
   private readonly retirements = new WeakMap<object, Promise<void>>();
   private retirement: Promise<void> = Promise.resolve();
   private retirementFailure?: unknown;
@@ -723,7 +725,7 @@ export class CodexProvider implements ReviewProvider {
 
   prepare(args: { fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary }) {
     if (this.active || this.pendingStartSequence !== undefined) return;
-    void this.ensurePrepared(args).catch(() => {});
+    void this.ensurePrepared(args, { advisory: true }).catch(() => {});
   }
 
   async start(args: {
@@ -800,9 +802,18 @@ export class CodexProvider implements ReviewProvider {
     baseRecord: ProviderSessionRecord;
   }): Promise<ProviderHistory> {
     const prepared = await this.ensurePrepared(args, { advisory: true });
-    const result = await prepared.client.request({
-      method: "thread/read", params: { threadId: args.sessionId, includeTurns: true }, parse: parseThreadReadResult,
-    });
+    const historyClient = prepared.client as object;
+    this.pendingHistoryReads.set(historyClient, (this.pendingHistoryReads.get(historyClient) ?? 0) + 1);
+    let result: ReturnType<typeof parseThreadReadResult>;
+    try {
+      result = await prepared.client.request({
+        method: "thread/read", params: { threadId: args.sessionId, includeTurns: true }, parse: parseThreadReadResult,
+      });
+    } finally {
+      const remaining = (this.pendingHistoryReads.get(historyClient) ?? 1) - 1;
+      if (remaining === 0) this.pendingHistoryReads.delete(historyClient);
+      else this.pendingHistoryReads.set(historyClient, remaining);
+    }
     if (result.thread.id !== args.sessionId) throw new Error("Codex read a different native thread");
     let cost = { usd: args.baseRecord.costUsd, status: args.baseRecord.costStatus };
     try {
@@ -820,22 +831,28 @@ export class CodexProvider implements ReviewProvider {
     return resolveCodexSettings({ qualification, settings });
   }
 
-  private ensurePrepared(args: {
+  private async ensurePrepared(args: {
     fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
   }, options: { advisory?: boolean } = {}): Promise<Prepared> {
-    const advisoryOwner = options.advisory && (this.active !== undefined || this.pendingStartSequence !== undefined);
+    const advisoryOwner = options.advisory
+      && (this.prepared !== undefined || this.active !== undefined || this.pendingStartSequence !== undefined);
     try { provisionCodexWorkspace({ dir: args.dir }); }
     catch (error) {
-      if (advisoryOwner) return Promise.reject(error);
+      if (advisoryOwner) throw error;
       this.disposeRuntime(); this.generation++;
       this.runtime = { status: "unavailable",
         error: `Codex failed to prepare: ${error instanceof Error ? error.message : String(error)}` };
       this.notify();
-      return Promise.reject(error);
+      throw error;
     }
     const key = JSON.stringify([args.fileId, args.dir, process.env.APP_REPO ?? "", args.settings]);
-    if (this.prepared && (this.preparedKey === key || advisoryOwner)) return this.prepared;
-    if (advisoryOwner) return Promise.reject(new Error("Owned Codex runtime is unavailable"));
+    const existing = this.prepared;
+    if (existing && (this.preparedKey === key || options.advisory)) {
+      const prepared = await existing;
+      if (this.prepared !== existing) return this.ensurePrepared(args, options);
+      if (options.advisory || !this.pendingHistoryReads.has(prepared.client as object)) return prepared;
+    }
+    if (advisoryOwner) throw new Error("Owned Codex runtime is unavailable");
     this.disposeRuntime();
     const generation = ++this.generation;
     this.preparedKey = key; this.runtime = { status: "starting" }; this.notify();

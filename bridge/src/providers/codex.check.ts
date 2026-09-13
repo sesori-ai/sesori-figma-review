@@ -101,6 +101,10 @@ rmSync(join(dir, "CLAUDE.md"));
 provisionCodexWorkspace({ dir });
 assert.equal(readFileSync(provisioned.instructionsPath, "utf8"), "user-owned Codex instructions\n");
 assert.equal(readFileSync(provisioned.skillPath, "utf8"), readReviewFlowSkill());
+const frozenSkill = readFileSync(provisioned.skillPath);
+provisionCodexWorkspace({ dir });
+assert.deepEqual(readFileSync(provisioned.skillPath), frozenSkill,
+  "repeated owned-skill refresh preserves exact frozen bytes even though it performs a file replacement");
 const unsafe = join(root, "unsafe");
 mkdirSync(join(unsafe, "notes"), { recursive: true });
 symlinkSync(unsafe, join(unsafe, ".agents"));

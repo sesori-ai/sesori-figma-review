@@ -503,6 +503,25 @@ interruptedQuestion.resolve({ content: [{ type: "text", text: "stopped" }], isEr
 await assert.rejects(interruptedQuestions, /user input request was interrupted/);
 assert.equal(toolCalls.length, toolCallsBeforeInterrupt + 1, "Stop during first question cannot publish a second card");
 toolGate = undefined;
+const disconnectedQuestion = deferred<ToolResult>(), toolCallsBeforeDisconnect = toolCalls.length;
+toolGate = disconnectedQuestion.promise;
+const disconnectedQuestions = runtime.server("item/tool/requestUserInput", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "disconnected-questions", isBlocking: true,
+  questions: [
+    { id: "disconnected", header: "Disconnected", question: "Still connected?", options: null },
+    { id: "must-not-run", header: "Later", question: "Must not run?", options: null },
+  ],
+});
+await waitUntil({ predicate: () => toolCalls.length === toolCallsBeforeDisconnect + 1,
+  label: "disconnected native question" });
+disconnectedQuestion.resolve({
+  content: [{ type: "text", text: "private transport diagnostic must not become an answer" }], isError: true,
+});
+await assert.rejects(disconnectedQuestions, error => error instanceof Error
+  && /user input request failed/.test(error.message) && !error.message.includes("private transport diagnostic"));
+assert.equal(toolCalls.length, toolCallsBeforeDisconnect + 1,
+  "failed question result cannot publish another question or return diagnostic text as an answer");
+toolGate = undefined;
 
 session.send({ text: "Steer", selection: [] }); await new Promise(resolve => setImmediate(resolve));
 assert.equal(runtime.calls.filter(call => call.method === "turn/steer").length, 1);
@@ -776,6 +795,105 @@ assert.deepEqual([pendingCloseClients.length, Reflect.get(pendingCloseSession, "
   Reflect.get(pendingCloseSession, "activeTurn"), pendingCloseClients[3]!.disposed], [4, true, undefined, 0],
 "late predecessor turn/start cannot continue into the replacement runtime");
 pendingCloseProvider.dispose();
+
+const sessionlessQualificationDir = join(root, "sessionless-history-qualification");
+mkdirSync(join(sessionlessQualificationDir, "notes"), { recursive: true });
+writeFileSync(join(sessionlessQualificationDir, "CLAUDE.md"), "instructions");
+const qualificationAdvisoryDir = join(root, "qualification-cross-file");
+mkdirSync(join(qualificationAdvisoryDir, "notes"), { recursive: true });
+writeFileSync(join(qualificationAdvisoryDir, "CLAUDE.md"), "instructions");
+const unsafeQualificationAdvisoryDir = join(root, "qualification-cross-file-unsafe");
+mkdirSync(join(unsafeQualificationAdvisoryDir, "notes"), { recursive: true });
+writeFileSync(join(unsafeQualificationAdvisoryDir, "CLAUDE.md"), "instructions");
+symlinkSync(root, join(unsafeQualificationAdvisoryDir, ".agents"));
+const heldQualification = deferred<unknown>(), qualificationAdvisoryClients: FakeClient[] = [];
+const qualificationAdvisoryProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, qualificationAdvisoryClients.length % 2 === 0 ? "discovery" : "runtime");
+    if (qualificationAdvisoryClients.length === 1) {
+      client.responseQueues.set("config/read", [heldQualification.promise]);
+      client.responses.set("thread/read", { thread: { id: "qualification-history", turns: [] } });
+    }
+    qualificationAdvisoryClients.push(client); return client;
+  } });
+const qualificationHistory = qualificationAdvisoryProvider.readHistory({
+  fileId: "sessionless-history-qualification", dir: sessionlessQualificationDir, sessionId: "qualification-history",
+  settings, boundary, baseRecord: { ...baseRecord, sessionId: "qualification-history" },
+});
+await waitUntil({ predicate: () => qualificationAdvisoryClients[1]?.calls.some(call => call.method === "config/read") ?? false,
+  label: "sessionless History qualification" });
+qualificationAdvisoryProvider.prepare({
+  fileId: "qualification-cross-file", dir: qualificationAdvisoryDir, settings, boundary,
+});
+qualificationAdvisoryProvider.prepare({
+  fileId: "qualification-cross-file-unsafe", dir: unsafeQualificationAdvisoryDir, settings, boundary,
+});
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual([qualificationAdvisoryClients.length, qualificationAdvisoryClients[1]!.disposed,
+  qualificationAdvisoryProvider.health({ settings }).status], [2, 0, "starting"],
+"cross-file safe and unsafe advisory preparation cannot replace or poison sessionless History qualification");
+heldQualification.resolve({ config: effectiveConfig(qualificationAdvisoryClients[1]!.args.policy), origins: {} });
+assert.deepEqual(await qualificationHistory, { messages: [], cost: { usd: 0.125, status: "estimated" } });
+assert.deepEqual([qualificationAdvisoryClients.length, qualificationAdvisoryClients[1]!.disposed,
+  qualificationAdvisoryProvider.health({ settings }).status], [2, 0, "ready"],
+"held sessionless History qualification remains owned through cross-file advisory preparation");
+qualificationAdvisoryProvider.dispose();
+
+const sessionlessReadDir = join(root, "sessionless-history-required-read");
+mkdirSync(join(sessionlessReadDir, "notes"), { recursive: true });
+writeFileSync(join(sessionlessReadDir, "CLAUDE.md"), "instructions");
+const readAdvisoryDir = join(root, "required-read-cross-file");
+mkdirSync(join(readAdvisoryDir, "notes"), { recursive: true });
+writeFileSync(join(readAdvisoryDir, "CLAUDE.md"), "instructions");
+const unsafeReadAdvisoryDir = join(root, "required-read-cross-file-unsafe");
+mkdirSync(join(unsafeReadAdvisoryDir, "notes"), { recursive: true });
+writeFileSync(join(unsafeReadAdvisoryDir, "CLAUDE.md"), "instructions");
+symlinkSync(root, join(unsafeReadAdvisoryDir, ".agents"));
+const heldSessionlessRead = deferred<unknown>(), heldSessionlessRetirement = deferred<void>();
+const readAdvisoryClients: FakeClient[] = [];
+const readAdvisoryProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, readAdvisoryClients.length % 2 === 0 ? "discovery" : "runtime");
+    if (readAdvisoryClients.length === 1) {
+      client.responseQueues.set("thread/read", [heldSessionlessRead.promise]);
+      client.retirementGate = heldSessionlessRetirement.promise;
+    }
+    readAdvisoryClients.push(client); return client;
+  } });
+const sessionlessRead = readAdvisoryProvider.readHistory({
+  fileId: "sessionless-history-required-read", dir: sessionlessReadDir, sessionId: "required-history",
+  settings, boundary, baseRecord: { ...baseRecord, sessionId: "required-history" },
+});
+await waitUntil({ predicate: () => readAdvisoryClients[1]?.calls.some(call => call.method === "thread/read") ?? false,
+  label: "sessionless required History read" });
+readAdvisoryProvider.prepare({ fileId: "required-read-cross-file", dir: readAdvisoryDir, settings, boundary });
+readAdvisoryProvider.prepare({
+  fileId: "required-read-cross-file-unsafe", dir: unsafeReadAdvisoryDir, settings, boundary,
+});
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual([readAdvisoryClients.length, readAdvisoryClients[1]!.disposed,
+  readAdvisoryProvider.health({ settings }).status], [2, 0, "ready"],
+"cross-file safe and unsafe advisory preparation cannot replace or poison a sessionless required History read");
+const explicitAfterRead = readAdvisoryProvider.start({
+  fileId: "sessionless-history-required-read", dir: sessionlessReadDir, settings, boundary, baseRecord,
+});
+await waitUntil({ predicate: () => readAdvisoryClients[1]!.disposed === 1,
+  label: "sessionless required-read ownership transfer" });
+assert.equal(readAdvisoryClients.length, 2,
+  "same-file explicit start retires the required-read owner before spawning its replacement");
+heldSessionlessRetirement.resolve();
+await waitUntil({ predicate: () => readAdvisoryClients.length === 4,
+  label: "sessionless required-read replacement preparation" });
+const explicitAfterReadSession = await explicitAfterRead, explicitAfterReadRuntime = readAdvisoryClients[3]!;
+heldSessionlessRead.resolve({ thread: { id: "required-history", turns: [] } });
+await sessionlessRead;
+readAdvisoryClients[1]!.terminate(new Error("late retired History terminal"));
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual([Reflect.get(explicitAfterReadSession, "closed"), explicitAfterReadRuntime.disposed], [false, 0],
+  "late sessionless History response and terminal callback cannot poison same-file explicit replacement");
+explicitAfterReadSession.close(); readAdvisoryProvider.dispose();
+await waitUntil({ predicate: () => explicitAfterReadRuntime.disposed === 1,
+  label: "sessionless History replacement retirement" });
 
 type TurnStartOrder = FakeClient["turnStartOrder"];
 async function orderingFixture(label: string, options: { turnStartEventTimeoutMs?: number } = {}) {
