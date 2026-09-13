@@ -23,8 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Codex approvals now confine writes to notes and reject network escalation; session preparation, history, accounting, terminal recovery,
   malformed items, spawn retirement, latched retirement uncertainty, and startup warnings remain safe across races and invalid inputs.
-- Codex preserves sessionless History ownership across advisory preparation, retires stalled reads before explicit starts, and rejects
-  failed native question results instead of submitting transport diagnostics as user answers.
+- Codex preserves sessionless History ownership across advisory preparation, fences same-tick History/start admission, prevents stale
+  cached starts from reasserting obsolete workspaces, retires dispatched stalled reads, and rejects failed native question results.
 - Codex now honors native catalog defaults, rejects one-shot network and snake-case move escapes, persists delayed cost checkpoints,
   preserves newer unavailable-cost history, strips replay-only selection metadata, retires failed sends, and binds exact settings snapshots
   to the owned turn-start lifecycle across native response/event ordering. Delayed accounting also refreshes History rows.

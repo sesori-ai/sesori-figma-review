@@ -743,7 +743,7 @@ export class CodexProvider implements ReviewProvider {
     baseRecord: ProviderSessionRecord;
   }, startSequence: number): Promise<ReviewSession> {
     this.active?.close();
-    const prepared = await this.ensurePrepared(args);
+    const prepared = await this.ensurePrepared(args, { startSequence });
     if (startSequence !== this.startSequence) throw new Error("Codex session start was superseded");
     const selected = this.resolveSettings(prepared.qualification, args.settings);
     const scaffold = provisionCodexWorkspace({ dir: args.dir });
@@ -801,7 +801,14 @@ export class CodexProvider implements ReviewProvider {
     fileId: string; dir: string; sessionId: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
     baseRecord: ProviderSessionRecord;
   }): Promise<ProviderHistory> {
+    const admittedStartSequence = this.startSequence;
+    if (this.pendingStartSequence !== undefined) {
+      throw new Error("Codex History is unavailable during an explicit start");
+    }
     const prepared = await this.ensurePrepared(args, { advisory: true });
+    if (admittedStartSequence !== this.startSequence || this.pendingStartSequence !== undefined) {
+      throw new Error("Codex History was superseded by an explicit start");
+    }
     const historyClient = prepared.client as object;
     this.pendingHistoryReads.set(historyClient, (this.pendingHistoryReads.get(historyClient) ?? 0) + 1);
     let result: ReturnType<typeof parseThreadReadResult>;
@@ -833,7 +840,7 @@ export class CodexProvider implements ReviewProvider {
 
   private async ensurePrepared(args: {
     fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
-  }, options: { advisory?: boolean } = {}): Promise<Prepared> {
+  }, options: { advisory?: boolean; startSequence?: number } = {}): Promise<Prepared> {
     const advisoryOwner = options.advisory
       && (this.prepared !== undefined || this.active !== undefined || this.pendingStartSequence !== undefined);
     try { provisionCodexWorkspace({ dir: args.dir }); }
@@ -849,7 +856,10 @@ export class CodexProvider implements ReviewProvider {
     const existing = this.prepared;
     if (existing && (this.preparedKey === key || options.advisory)) {
       const prepared = await existing;
-      if (this.prepared !== existing) return this.ensurePrepared(args, options);
+      if (options.startSequence !== undefined && options.startSequence !== this.startSequence) {
+        throw new Error("Codex session start was superseded");
+      }
+      if (this.prepared !== existing) throw new Error("Codex preparation was superseded");
       if (options.advisory || !this.pendingHistoryReads.has(prepared.client as object)) return prepared;
     }
     if (advisoryOwner) throw new Error("Owned Codex runtime is unavailable");

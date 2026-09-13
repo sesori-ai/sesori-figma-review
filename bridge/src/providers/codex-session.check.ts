@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -839,6 +839,38 @@ assert.deepEqual([qualificationAdvisoryClients.length, qualificationAdvisoryClie
 "held sessionless History qualification remains owned through cross-file advisory preparation");
 qualificationAdvisoryProvider.dispose();
 
+const explicitQualificationDir = join(root, "explicit-start-qualification");
+mkdirSync(join(explicitQualificationDir, "notes"), { recursive: true });
+writeFileSync(join(explicitQualificationDir, "CLAUDE.md"), "instructions");
+const explicitQualificationGate = deferred<unknown>(), explicitQualificationClients: FakeClient[] = [];
+const explicitQualificationProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, explicitQualificationClients.length % 2 === 0 ? "discovery" : "runtime");
+    if (explicitQualificationClients.length === 1) {
+      client.responseQueues.set("config/read", [explicitQualificationGate.promise]);
+    }
+    explicitQualificationClients.push(client); return client;
+  } });
+explicitQualificationProvider.prepare({
+  fileId: "explicit-start-qualification", dir: explicitQualificationDir, settings, boundary,
+});
+await waitUntil({ predicate: () => explicitQualificationClients[1]?.calls.some(call => call.method === "config/read") ?? false,
+  label: "explicit start held qualification" });
+const explicitQualificationStart = explicitQualificationProvider.start({
+  fileId: "explicit-start-qualification", dir: explicitQualificationDir, settings, boundary, baseRecord,
+});
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual([explicitQualificationClients.length, explicitQualificationClients[1]!.disposed], [2, 0],
+  "current explicit start waits for its existing qualification without retirement or duplicate spawn");
+explicitQualificationGate.resolve({ config: effectiveConfig(explicitQualificationClients[1]!.args.policy), origins: {} });
+const explicitQualificationSession = await explicitQualificationStart;
+assert.deepEqual([explicitQualificationClients.length, explicitQualificationClients[1]!.disposed,
+  explicitQualificationClients[1]!.calls.filter(call => call.method === "thread/start").length], [2, 0, 1],
+"qualification belonging to current explicit start is reused exactly once");
+explicitQualificationSession.close(); explicitQualificationProvider.dispose();
+await waitUntil({ predicate: () => explicitQualificationClients[1]!.disposed === 1,
+  label: "explicit qualification fixture retirement" });
+
 const sessionlessReadDir = join(root, "sessionless-history-required-read");
 mkdirSync(join(sessionlessReadDir, "notes"), { recursive: true });
 writeFileSync(join(sessionlessReadDir, "CLAUDE.md"), "instructions");
@@ -894,6 +926,83 @@ assert.deepEqual([Reflect.get(explicitAfterReadSession, "closed"), explicitAfter
 explicitAfterReadSession.close(); readAdvisoryProvider.dispose();
 await waitUntil({ predicate: () => explicitAfterReadRuntime.disposed === 1,
   label: "sessionless History replacement retirement" });
+
+const staleStartDirA = join(root, "stale-explicit-start-a"), staleStartDirB = join(root, "stale-explicit-start-b");
+for (const staleDir of [staleStartDirA, staleStartDirB]) {
+  mkdirSync(join(staleDir, "notes"), { recursive: true }); writeFileSync(join(staleDir, "CLAUDE.md"), "instructions");
+}
+const staleStartClients: FakeClient[] = [];
+const staleStartProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, staleStartClients.length % 2 === 0 ? "discovery" : "runtime");
+    staleStartClients.push(client); return client;
+  } });
+staleStartProvider.prepare({ fileId: "stale-a", dir: staleStartDirA, settings, boundary });
+await waitUntil({ predicate: () => staleStartProvider.health({ settings }).status === "ready",
+  label: "stale explicit start cached preparation" });
+const staleExplicitStart = staleStartProvider.start({
+  fileId: "stale-a", dir: staleStartDirA, settings, boundary, baseRecord,
+});
+const latestExplicitStart = staleStartProvider.start({
+  fileId: "stale-b", dir: staleStartDirB, settings, boundary, baseRecord,
+});
+const [staleExplicitOutcome, latestExplicitOutcome] = await Promise.allSettled([staleExplicitStart, latestExplicitStart]);
+const sameTickDir = join(root, "same-tick-history-start");
+mkdirSync(join(sameTickDir, "notes"), { recursive: true }); writeFileSync(join(sameTickDir, "CLAUDE.md"), "instructions");
+const sameTickClients: FakeClient[] = [];
+const sameTickProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, sameTickClients.length % 2 === 0 ? "discovery" : "runtime");
+    sameTickClients.push(client); return client;
+  } });
+sameTickProvider.prepare({ fileId: "same-tick", dir: sameTickDir, settings, boundary });
+await waitUntil({ predicate: () => sameTickProvider.health({ settings }).status === "ready",
+  label: "same-tick cached preparation" });
+const sameTickRuntime = sameTickClients[1]!, heldSameTickHistory = deferred<unknown>();
+sameTickRuntime.responseQueues.set("thread/read", [heldSameTickHistory.promise]);
+const historyFirst = sameTickProvider.readHistory({
+  fileId: "same-tick", dir: sameTickDir, sessionId: "history-first", settings, boundary,
+  baseRecord: { ...baseRecord, sessionId: "history-first" },
+});
+const startAfterHistory = sameTickProvider.start({
+  fileId: "same-tick", dir: sameTickDir, settings, boundary, baseRecord,
+});
+const historyFirstRejected = assert.rejects(historyFirst, /History was superseded by an explicit start/);
+await waitUntil({ predicate: () => sameTickRuntime.calls.some(call => call.method === "thread/start"),
+  label: "same-tick start after History" });
+assert.equal(sameTickRuntime.calls.some(call => call.method === "thread/read"), false,
+  "History-first same tick cannot register a required read after explicit reuse admission");
+await historyFirstRejected;
+const historyFirstWinner = await startAfterHistory;
+assert.deepEqual([sameTickClients.length, sameTickRuntime.disposed], [2, 0],
+  "explicit-start priority preserves normal cached idle reuse when History has not dispatched");
+historyFirstWinner.close();
+const startsBeforeStartFirst = sameTickRuntime.calls.filter(call => call.method === "thread/start").length;
+const startFirst = sameTickProvider.start({ fileId: "same-tick", dir: sameTickDir, settings, boundary, baseRecord });
+const historyAfterStart = sameTickProvider.readHistory({
+  fileId: "same-tick", dir: sameTickDir, sessionId: "start-first", settings, boundary,
+  baseRecord: { ...baseRecord, sessionId: "start-first" },
+});
+const historyAfterStartRejected = assert.rejects(historyAfterStart, /History is unavailable during an explicit start/);
+await waitUntil({ predicate: () => sameTickRuntime.calls.filter(call => call.method === "thread/start").length
+    === startsBeforeStartFirst + 1,
+  label: "same-tick start before History" });
+assert.equal(sameTickRuntime.calls.some(call => call.method === "thread/read"), false,
+  "start-first same tick cannot lend the explicit owner to advisory History");
+await historyAfterStartRejected;
+const startFirstWinner = await startFirst;
+assert.deepEqual([sameTickClients.length, sameTickRuntime.disposed], [2, 0],
+  "start-first same tick reuses idle preparation without replacement or advisory borrowing");
+startFirstWinner.close(); sameTickProvider.dispose();
+await waitUntil({ predicate: () => sameTickRuntime.disposed === 1, label: "same-tick fixture retirement" });
+
+assert.equal(staleExplicitOutcome.status, "rejected", "older same-key explicit start settles as superseded");
+assert.equal(latestExplicitOutcome.status, "fulfilled", "latest different-key explicit start survives stale cached continuation");
+assert.deepEqual([staleStartClients.length, staleStartClients[1]!.disposed, staleStartClients[3]!.disposed,
+  staleStartClients[3]!.args.policy.dir], [4, 1, 0, realpathSync(staleStartDirB)],
+"obsolete cached preparation cannot reassert workspace A or spawn beyond latest workspace B");
+latestExplicitOutcome.value.close(); staleStartProvider.dispose();
+await waitUntil({ predicate: () => staleStartClients[3]!.disposed === 1, label: "latest explicit start retirement" });
 
 type TurnStartOrder = FakeClient["turnStartOrder"];
 async function orderingFixture(label: string, options: { turnStartEventTimeoutMs?: number } = {}) {
