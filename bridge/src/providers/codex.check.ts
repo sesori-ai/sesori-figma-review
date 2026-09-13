@@ -60,6 +60,8 @@ assert.deepEqual(
   ["/qualified/codex", ["app-server", "--stdio", "--strict-config"], [policy.notesDir], CODEX_PERMISSION_PROFILE],
 );
 assert.equal("sandbox" in policy.thread, false);
+assert.equal(policy.thread.approvalPolicy.granular.sandbox_approval, false,
+  "unrestricted sandbox approvals stay disabled so APP_REPO remains read-only");
 const profileOverride = policy.args.find(value => value.startsWith(`permissions.${CODEX_PERMISSION_PROFILE}=`));
 assert.ok(profileOverride?.includes(`${JSON.stringify(policy.appRepo)} = "read"`));
 assert.ok(profileOverride?.includes(`${JSON.stringify(policy.notesDir)} = "write"`));
@@ -71,6 +73,8 @@ assert.equal(
 );
 assert.ok(policy.args.includes("features.plugins=false"));
 assert.ok(policy.args.includes("features.multi_agent=false"));
+assert.ok(policy.args.includes("features.request_permissions_tool=true"));
+assert.ok(policy.args.includes("features.step_model_switching=true"));
 assert.ok(policy.args.some(value => value.startsWith("apps=") && value.includes('"_default" = { enabled = false }')));
 mkdirSync(join(dir, "source"));
 assert.throws(
@@ -82,7 +86,7 @@ assert.throws(() => parseAccountResult({ requiresOpenaiAuth: "yes", account: nul
 assert.throws(() => parseModelListResult({ data: [{ model: "partial" }] }));
 assert.deepEqual(projectCodexModels(parseModelListResult({ data: [{
   id: "empty", model: "empty", displayName: "Empty", hidden: false, isDefault: true,
-  inputModalities: ["text", "image"], supportedReasoningEfforts: [],
+  defaultReasoningEffort: "low", inputModalities: ["text", "image"], supportedReasoningEfforts: [],
 }] })), []);
 
 const { provisionCodexWorkspace, readReviewFlowSkill } = await import("../workspace.ts");
@@ -97,6 +101,10 @@ rmSync(join(dir, "CLAUDE.md"));
 provisionCodexWorkspace({ dir });
 assert.equal(readFileSync(provisioned.instructionsPath, "utf8"), "user-owned Codex instructions\n");
 assert.equal(readFileSync(provisioned.skillPath, "utf8"), readReviewFlowSkill());
+const frozenSkill = readFileSync(provisioned.skillPath);
+provisionCodexWorkspace({ dir });
+assert.deepEqual(readFileSync(provisioned.skillPath), frozenSkill,
+  "repeated owned-skill refresh preserves exact frozen bytes even though it performs a file replacement");
 const unsafe = join(root, "unsafe");
 mkdirSync(join(unsafe, "notes"), { recursive: true });
 symlinkSync(unsafe, join(unsafe, ".agents"));
@@ -269,6 +277,16 @@ const exited = await connectedFixture();
 const exitPending = exited.fixtureClient.request({ method: "pending", params: {}, parse: String }); await wait();
 exited.fixture.emit("exit", 9, null);
 await assert.rejects(exitPending, /exited unexpectedly \(code 9\)/);
+const spawnFailedChild = new FakeChild();
+const spawnFailedClient = new CodexClient({
+  policy, clientVersion: "test", log: () => {}, childFactory: () => spawnFailedChild,
+});
+const spawnFailedConnect = spawnFailedClient.connect(); await wait();
+spawnFailedChild.emit("error", new Error("fixture ENOENT"));
+spawnFailedChild.emit("close", -2, null);
+await assert.rejects(spawnFailedConnect, /Codex App Server failed: fixture ENOENT/);
+await assert.doesNotReject(spawnFailedClient.disposeAndWait({ timeoutMs: 20 }),
+  "spawn error plus close retires without replacing the original failure");
 const timeoutFixture = new FakeChild((message, server) => {
   if (message.method === "initialize") server.send({
     id: message.id,
@@ -279,10 +297,57 @@ const lateCallbacks: string[] = [];
 const timedOut = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => timeoutFixture,
   requestTimeoutMs: 5, onNotification: message => lateCallbacks.push(message.method) });
 await timedOut.connect();
-await assert.rejects(timedOut.request({ method: "never/replies", params: {}, parse: String }), /timed out after 5ms/);
+const requiredTimeout = timedOut.request({ method: "never/replies", params: {}, parse: String });
+await wait();
+assert.equal(timedOut.hasPendingRequiredRequests(), true, "ordinary RPC remains required native-client work");
+await assert.rejects(requiredTimeout, /timed out after 5ms/);
+assert.equal(timedOut.hasPendingRequiredRequests(), false, "terminal cleanup clears required RPC ownership");
 assert.equal(timeoutFixture.killed, true);
 await assert.rejects(timedOut.request({ method: "after-timeout", params: {}, parse: String }), /timed out/);
 timeoutFixture.send({ method: "late/event", params: {} }); assert.deepEqual(lateCallbacks, []);
+let delayedAccountingId: unknown;
+const optionalFixture = new FakeChild((message, server) => {
+  if (message.method === "initialize") server.send({ id: message.id,
+    result: { userAgent: "codex/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "linux" } });
+  if (message.method === "account/usage/read") {
+    if (delayedAccountingId === undefined) delayedAccountingId = message.id;
+    else server.send({ id: message.id, result: { threadUsage: null } });
+  }
+  if (message.method === "turn/start") server.send({ id: message.id, result: { turn: "new" } });
+});
+const optionalClient = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => optionalFixture,
+  requestTimeoutMs: 5 });
+await optionalClient.connect();
+const optionalTimeout = optionalClient.requestOptionalAccounting({
+  method: "account/usage/read", params: {}, parse: value => value,
+});
+await wait();
+assert.equal(optionalClient.hasPendingRequiredRequests(), false,
+  "optional accounting is excluded from required client ownership");
+assert.equal(await optionalTimeout, undefined,
+  "optional accounting timeout reports unavailable without terminating shared runtime");
+const sentAfterTimeout = optionalFixture.sent.length;
+assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {}, parse: value => value }),
+  undefined);
+assert.equal(optionalFixture.sent.length, sentAfterTimeout, "one stuck accounting slot coalesces later optional reads");
+for (let attempt = 0; attempt < 3; attempt++) {
+  assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {},
+    parse: value => value, waitForSlot: true }), undefined,
+  "repeated trailing accounting waits remain bounded while correlation is stuck");
+  assert.equal((Reflect.get(optionalClient, "optionalAccountingDrain") as { waiters: Set<unknown> }).waiters.size, 0,
+    "timed-out optional accounting waiter detaches from retained native correlation");
+}
+assert.equal(optionalFixture.sent.length, sentAfterTimeout, "bounded trailing waits cannot overlap retained correlation");
+assert.deepEqual(await optionalClient.request({ method: "turn/start", params: {}, parse: value => value }), { turn: "new" });
+assert.equal(optionalFixture.killed, false, "optional accounting timeout cannot kill a later mutating turn");
+const trailingAccounting = optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {},
+  parse: value => value, waitForSlot: true });
+optionalFixture.send({ id: delayedAccountingId, result: { threadUsage: null } });
+assert.deepEqual(await trailingAccounting, { threadUsage: null },
+  "late response drains exact correlation before one bounded trailing accounting request");
+assert.equal(optionalFixture.sent.filter(message => message.method === "account/usage/read").length, 2,
+  "trailing accounting preserves one wire request at a time");
+optionalClient.dispose();
 const outbound = await connectedFixture({ maxLineBytes: 256 });
 await assert.rejects(
   outbound.fixtureClient.request({ method: "too/large", params: { value: "x".repeat(300) }, parse: String }),
@@ -315,12 +380,13 @@ const configFor = (selected: CodexExecutionPolicy): Record<string, unknown> => (
   default_permissions: CODEX_PERMISSION_PROFILE,
   approvals_reviewer: "user",
   approval_policy: { granular: {
-    sandbox_approval: true, rules: true, mcp_elicitations: false, request_permissions: true, skill_approval: false,
+    sandbox_approval: false, rules: true, mcp_elicitations: false, request_permissions: true, skill_approval: false,
   } },
   web_search: "disabled",
   features: {
     apps: false, plugins: false, multi_agent: false, remote_plugin: false, hooks: false, goals: false, memories: false,
     web_search: false, web_search_cached: false, web_search_request: false, skill_mcp_dependency_install: false,
+    request_permissions_tool: true, step_model_switching: true,
   },
   agents: { enabled: false }, feedback: { enabled: false }, apps: { _default: { enabled: false } }, plugins: {},
   mcp_servers: { "figma-desktop": { enabled: true, url: "http://127.0.0.1:3845/mcp" } },
@@ -360,6 +426,17 @@ assert.throws(
   () => assertCodexConfigIsolated({ result: { config: unsafeApproval, origins: {} }, policy }),
   /granular approval policy/,
 );
+for (const feature of ["request_permissions_tool", "step_model_switching"]) {
+  for (const value of [undefined, false]) {
+    const missingCapability = configFor(policy);
+    if (value === undefined) delete (missingCapability.features as Record<string, unknown>)[feature];
+    else (missingCapability.features as Record<string, unknown>)[feature] = value;
+    assert.throws(
+      () => assertCodexConfigIsolated({ result: { config: missingCapability, origins: {} }, policy }),
+      new RegExp(`features\\.${feature}`),
+    );
+  }
+}
 const unsafeConfig = configFor(policy);
 const unsafeProfile = (unsafeConfig.permissions as Record<string, Record<string, Record<string, unknown>>>)[
   CODEX_PERMISSION_PROFILE
@@ -434,10 +511,11 @@ const qualificationChild = new FakeChild((message, server) => {
   });
   if (method === "model/list") server.send({ id, result: { data: [{
     id: "qualified", model: "qualified", displayName: "Qualified", hidden: false, isDefault: true,
-    inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Low" }],
+    defaultReasoningEffort: "low", inputModalities: ["text", "image"],
+    supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Low" }],
   }, {
     id: "no-effort", model: "no-effort", displayName: "No effort", hidden: false, isDefault: false,
-    inputModalities: ["text", "image"], supportedReasoningEfforts: [],
+    defaultReasoningEffort: "low", inputModalities: ["text", "image"], supportedReasoningEfforts: [],
   }] } });
   if (method === "permissionProfile/list") server.send({
     id, result: { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] },
@@ -449,7 +527,8 @@ const qualification = await qualifyCodexRuntime({
   client: new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => qualificationChild }),
 });
 assert.deepEqual(qualification, {
-  version: "0.154.0", auth: "chatgpt", models: [{ value: "qualified", label: "Qualified", efforts: ["low"] }],
+  version: "0.154.0", auth: "chatgpt", models: [{ value: "qualified", label: "Qualified", efforts: ["low"],
+    isDefault: true, defaultEffort: "low" }],
 });
 const noEffortChild = new FakeChild((message, server) => {
   if (message.method === "initialize") server.send({ id: message.id,
@@ -458,7 +537,7 @@ const noEffortChild = new FakeChild((message, server) => {
     result: { requiresOpenaiAuth: true, account: { type: "apiKey" } } });
   if (message.method === "model/list") server.send({ id: message.id, result: { data: [{
     id: "empty", model: "empty", displayName: "Empty", hidden: false, isDefault: true,
-    inputModalities: ["text", "image"], supportedReasoningEfforts: [],
+    defaultReasoningEffort: "low", inputModalities: ["text", "image"], supportedReasoningEfforts: [],
   }] } });
 });
 await assert.rejects(qualifyCodexRuntime({ policy,
@@ -475,7 +554,8 @@ const leakingChild = new FakeChild((message, server) => {
   });
   if (method === "model/list") server.send({ id, result: { data: [{
     id: "m", model: "m", displayName: "M", hidden: false, isDefault: true,
-    inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+    defaultReasoningEffort: "low", inputModalities: ["text", "image"],
+    supportedReasoningEfforts: [{ reasoningEffort: "low" }],
   }] } });
   if (method === "permissionProfile/list") server.send({
     id, result: { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] },

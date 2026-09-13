@@ -20,7 +20,7 @@ import { readSessions, readSettings, saveSession, saveSettings, workspaceFor, ze
 
 type ProviderMap = Record<ProviderId, ReviewProvider | undefined>;
 type Socket = WebSocket & { fileId?: string; protocolOk?: boolean };
-type PendingStart = { fileId: string; intentId: string; owner: string; session?: ReviewSession };
+type PendingStart = { fileId: string; intentId: string; owner: string; provider?: ProviderId; session?: ReviewSession };
 type Conversation = {
   owner: string;
   intentId: string;
@@ -175,6 +175,7 @@ export function createReviewBridge(args: {
     const dir = workspaceFor(message.fileId, message.fileName);
     const settings = readSettings();
     const providerId = message.resume?.provider ?? settings.provider;
+    reservation.provider = providerId;
     const provider = providers[providerId];
     if (!provider) {
       if (starting === reservation) starting = undefined;
@@ -287,7 +288,13 @@ export function createReviewBridge(args: {
             send(current.fileId, { kind: "session", session: current.record });
             send(current.fileId, { kind: "sessions", sessions: readSessions(current.dir) });
             send(current.fileId, { kind: "busy", busy: false });
-          } else send(current.fileId, { kind: "session", session: current.record });
+          } else {
+            if (output.accountingCheckpoint) saveSession(current.dir, current.record);
+            send(current.fileId, { kind: "session", session: current.record });
+            if (output.accountingCheckpoint) {
+              send(current.fileId, { kind: "sessions", sessions: readSessions(current.dir) });
+            }
+          }
         }
       }
     } catch (error) {
@@ -330,7 +337,8 @@ export function createReviewBridge(args: {
     const preferenceChanged = !samePreference(before.providers[message.provider], message.settings);
     const selected = message.selectedProvider ?? before.provider;
     const selectedChanged = selected !== before.provider;
-    const target = conv;
+    const target = conv, pendingTarget = starting;
+    const pendingProviderOwned = pendingTarget?.provider === message.provider;
     let nativeChanged = false;
     if (target?.record.provider === message.provider && preferenceChanged) {
       try { await target.session.applySettings({ settings: message.settings }); nativeChanged = true; }
@@ -366,9 +374,14 @@ export function createReviewBridge(args: {
       return;
     }
     if (nativeChanged && target?.health) target.health = { ...target.health, model: message.settings.model || target.health.model };
-    if (preferenceChanged) providers[message.provider]?.dispose();
-    if (selectedChanged && (!preferenceChanged || before.provider !== message.provider)) providers[before.provider]?.dispose();
-    if (ws.fileId && (selectedChanged || (preferenceChanged && next.provider === message.provider))) {
+    if (preferenceChanged && !pendingProviderOwned
+      && !(nativeChanged && target?.record.provider === message.provider)) providers[message.provider]?.dispose();
+    const previousProviderOwned = target?.record.provider === before.provider || pendingTarget?.provider === before.provider;
+    if (selectedChanged && !previousProviderOwned
+      && (!preferenceChanged || before.provider !== message.provider)) providers[before.provider]?.dispose();
+    const activeProviderUpdated = nativeChanged && target?.record.provider === next.provider;
+    if (ws.fileId && !activeProviderUpdated
+      && (selectedChanged || (preferenceChanged && next.provider === message.provider))) {
       const provider = providers[next.provider];
       if (provider) prepareProvider(provider, ws.fileId, workspaceFor(ws.fileId, "Figma file"));
     }
@@ -422,10 +435,37 @@ export function createReviewBridge(args: {
           const dir = workspaceFor(message.fileId, message.fileName);
           const session = readSessions(dir).find(item => item.provider === message.session.provider && item.sessionId === message.session.sessionId);
           if (!session) throw new Error("Unknown provider-qualified session");
-          const attached = conv?.record.provider === message.session.provider && conv.record.sessionId === message.session.sessionId;
+          const attachedConversation = conv?.record.provider === message.session.provider
+            && conv.record.sessionId === message.session.sessionId ? conv : undefined;
           const provider = providers[session.provider];
           if (!provider) throw new Error(`${session.provider} is unavailable; cannot read its native history.`);
-          return send(message.fileId, { kind: "history", intentId: message.intentId, session: attached ? conv!.record : session, messages: provider.readHistory({ dir, sessionId: session.sessionId }), attached });
+          const history = await provider.readHistory({
+            fileId: message.fileId,
+            dir,
+            sessionId: session.sessionId,
+            settings: readSettings().providers[session.provider],
+            boundary: dormantBoundary,
+            baseRecord: session,
+          });
+          const attached = attachedConversation !== undefined && conv === attachedConversation;
+          const latest = attached ? attachedConversation.record : readSessions(dir)
+            .find(item => item.provider === session.provider && item.sessionId === session.sessionId);
+          if (!latest) throw new Error("Provider-qualified session changed while native history was loading");
+          const merged = {
+            ...latest,
+            ...(history.usage ? { usage: history.usage } : {}),
+            ...(history.cost ? {
+              costUsd: history.cost.status === "unavailable" ? latest.costUsd : history.cost.usd,
+              costStatus: history.cost.status,
+            } : {}),
+          };
+          if (history.usage || history.cost) {
+            if (attached) attachedConversation.record = merged;
+            saveSession(dir, merged);
+          }
+          return send(message.fileId, {
+            kind: "history", intentId: message.intentId, session: merged, messages: history.messages, attached,
+          });
         } catch (error) {
           return send(message.fileId, { kind: "error", intentId: message.intentId, message: error instanceof Error ? error.message : String(error) });
         }
@@ -447,13 +487,13 @@ export function createReviewBridge(args: {
       case "interrupt": {
         const target = conv;
         if (!target || target.fileId !== ws.fileId) return;
+        cancelRequests({ owner: target.owner, reason: "Turn stopped" });
         try { await target.session.interrupt(); }
         catch (error) {
           if (conv === target) send(target.fileId, { kind: "error", message: `Stop failed: ${error instanceof Error ? error.message : String(error)}` });
           else args.log("stale interrupt failed", error);
           return;
         }
-        cancelRequests({ owner: target.owner, reason: "Turn stopped" });
         return;
       }
       case "close":

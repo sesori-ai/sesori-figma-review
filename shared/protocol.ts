@@ -41,7 +41,13 @@ export type Settings = {
   provider: ProviderId;
   providers: Record<ProviderId, ProviderSettings>;
 };
-export type ModelDescriptor = { value: string; label: string; efforts: string[] };
+export type ModelDescriptor = {
+  value: string;
+  label: string;
+  efforts: string[];
+  isDefault?: boolean;
+  defaultEffort?: string;
+};
 export type ProviderHealth = {
   provider: ProviderId;
   status: "starting" | "ready" | "unavailable";

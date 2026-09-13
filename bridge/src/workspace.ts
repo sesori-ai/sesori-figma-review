@@ -157,6 +157,10 @@ export function readSettings(): Settings {
     },
   };
 }
+export function readSettingsAdvisory(args: { onError: (error: unknown) => void }): Settings | undefined {
+  try { return readSettings(); }
+  catch (error) { args.onError(error); return; }
+}
 export type SettingsIo = {
   write: (path: string, content: string) => void;
   rename: (source: string, destination: string) => void;

@@ -1,4 +1,5 @@
 import { lstatSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { FIGMA_MCP_URL } from "../../../shared/protocol.ts";
 import type { CodexConfigReadResult } from "./codex-protocol.ts";
@@ -26,14 +27,16 @@ export type CodexExecutionPolicy = {
     approvalsReviewer: "user";
     approvalPolicy: {
       granular: {
-        sandbox_approval: true;
+        sandbox_approval: false;
         rules: true;
         mcp_elicitations: false;
         request_permissions: true;
         skill_approval: false;
       };
     };
-    environments: [];
+    defaultEnvironment: { environmentId: "local"; cwd: string; runtimeWorkspaceRoots: string[] };
+    projectDocMaxBytes: 0;
+    turnEnvironments: [{ environmentId: "local"; cwd: string; runtimeWorkspaceRoots: string[] }];
     selectedCapabilityRoots: [];
     allowProviderModelFallback: false;
   };
@@ -61,8 +64,26 @@ type PolicyArgs = {
   discovery: boolean;
 };
 
+const environmentInputs = ["CODEX_EXEC_SERVER_URL", "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL",
+  "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID", "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+  "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID"] as const;
+export function assertCodexLocalDefaults() {
+  if (environmentInputs.some(name => process.env[name]?.trim())) {
+    throw new Error("Codex local-only default is blocked by environment registration input");
+  }
+  const configured = process.env.CODEX_HOME?.trim();
+  const home = configured ? canonicalAbsolute(configured, "CODEX_HOME") : join(homedir(), ".codex");
+  try { lstatSync(join(home, "environments.toml")); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error("Codex environment manifest metadata is unreadable", { cause: error });
+  }
+  throw new Error("Codex local-only default requires an absent environment manifest");
+}
+
 /** Build discovery or isolated per-process overrides. Final state is validated before any thread can start. */
 function createPolicy(args: PolicyArgs): CodexExecutionPolicy {
+  assertCodexLocalDefaults();
   const dir = canonicalAbsolute(args.dir, "Codex workspace");
   const notesPath = join(dir, "notes"), notesEntry = lstatSync(notesPath);
   if (notesEntry.isSymbolicLink() || !notesEntry.isDirectory()) {
@@ -104,7 +125,7 @@ function createPolicy(args: PolicyArgs): CodexExecutionPolicy {
     ...config("default_permissions", tomlString(CODEX_PERMISSION_PROFILE)),
     ...config(`permissions.${CODEX_PERMISSION_PROFILE}`, permissionProfile),
     ...config("approval_policy", [
-      "{ granular = { sandbox_approval = true, rules = true,",
+      "{ granular = { sandbox_approval = false, rules = true,",
       "mcp_elicitations = false, request_permissions = true, skill_approval = false } }",
     ].join(" ")),
     ...config("approvals_reviewer", tomlString("user")),
@@ -122,6 +143,8 @@ function createPolicy(args: PolicyArgs): CodexExecutionPolicy {
     ...config("features.web_search_cached", "false"),
     ...config("features.web_search_request", "false"),
     ...config("features.skill_mcp_dependency_install", "false"),
+    ...config("features.request_permissions_tool", "true"),
+    ...config("features.step_model_switching", "true"),
     ...config("feedback.enabled", "false"),
     ...plugins,
     ...mcpServers,
@@ -139,14 +162,18 @@ function createPolicy(args: PolicyArgs): CodexExecutionPolicy {
       approvalsReviewer: "user",
       approvalPolicy: {
         granular: {
-          sandbox_approval: true,
+          // Keep APP_REPO read-only: unrestricted sandbox escalation cannot preserve profile boundaries.
+          sandbox_approval: false,
           rules: true,
           mcp_elicitations: false,
           request_permissions: true,
           skill_approval: false,
         },
       },
-      environments: [],
+      defaultEnvironment: { environmentId: "local", cwd: dir, runtimeWorkspaceRoots: [notesDir] },
+      // AGENTS.md is injected as baseInstructions; native sandboxed rediscovery fails before session initialization.
+      projectDocMaxBytes: 0,
+      turnEnvironments: [{ environmentId: "local", cwd: notesDir, runtimeWorkspaceRoots: [notesDir] }],
       selectedCapabilityRoots: [],
       allowProviderModelFallback: false,
     },
@@ -176,9 +203,11 @@ const forbiddenFeatures = [
   "apps", "plugins", "multi_agent", "remote_plugin", "hooks", "goals", "memories", "web_search",
   "web_search_cached", "web_search_request", "skill_mcp_dependency_install",
 ] as const;
+const requiredFeatures = ["request_permissions_tool", "step_model_switching"] as const;
 const assertCapabilitiesDisabled = (effective: Record<string, unknown>) => {
   const features = object(effective.features) ?? {};
   for (const feature of forbiddenFeatures) assertFlag(features, feature, false);
+  for (const feature of requiredFeatures) assertFlag(features, feature, true);
   if (object(effective.agents)?.enabled !== false) throw new Error("Codex subagents are not disabled");
   if (object(effective.feedback)?.enabled !== false) throw new Error("Codex feedback networking is not disabled");
 };

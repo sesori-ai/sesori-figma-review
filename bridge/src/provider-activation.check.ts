@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DownMsg, HistoryItem, ProviderHealth, ProviderSessionRecord, ProviderSettings } from "../../shared/protocol.ts";
 import { decodeBridgeMessage } from "../../plugin/src/wire.ts";
-import type { ProviderOutput, ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
+import { CODEX_PERMISSION_PROFILE, type CodexExecutionPolicy } from "./providers/codex-execution.ts";
+import type { CodexNotification, CodexServerRequest } from "./providers/codex-protocol.ts";
+import type { ProviderHistory, ProviderOutput, ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
 
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "review-bridge-check-"));
 const { createReviewBridge } = await import("./review-bridge.ts");
-const { readSettings } = await import("./workspace.ts");
+const { readSessions, readSettings } = await import("./workspace.ts");
+const { CodexProvider } = await import("./providers/codex.ts");
 
 class OutputQueue implements AsyncIterable<ProviderOutput> {
   private values: ProviderOutput[] = [];
@@ -68,14 +71,100 @@ const deferred = <T>() => {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
+type ActualClientArgs = {
+  policy: CodexExecutionPolicy;
+  onNotification?: (notification: CodexNotification) => void;
+  onRequest?: (request: CodexServerRequest) => Promise<unknown>;
+  onTerminal?: (error: Error) => void;
+};
+const codexConfig = (policy: CodexExecutionPolicy, runtime: boolean) => ({
+  default_permissions: CODEX_PERMISSION_PROFILE, approvals_reviewer: "user", web_search: "disabled",
+  approval_policy: { granular: { sandbox_approval: false, rules: true, mcp_elicitations: false,
+    request_permissions: true, skill_approval: false } },
+  features: { apps: false, plugins: false, multi_agent: false, remote_plugin: false, hooks: false, goals: false,
+    memories: false, web_search: false, web_search_cached: false, web_search_request: false,
+    skill_mcp_dependency_install: false, request_permissions_tool: true, step_model_switching: true },
+  agents: { enabled: false }, feedback: { enabled: false }, apps: { _default: { enabled: false } }, plugins: {},
+  mcp_servers: runtime ? { "figma-desktop": { enabled: true, url: "http://127.0.0.1:3845/mcp" } } : {},
+  permissions: { [CODEX_PERMISSION_PROFILE]: {
+    description: "Sesori Review: workspace read-only, notes write-only",
+    filesystem: { ":minimal": "read", [policy.dir]: "read", [policy.notesDir]: "write",
+      ...(policy.appRepo ? { [policy.appRepo]: "read" } : {}) },
+    network: { enabled: false },
+  } },
+});
+class ActualCodexClient {
+  calls: { method: string; params: unknown }[] = [];
+  disposed = 0;
+  threadStartGate?: Promise<void>;
+  nativeSettings: { model: string; effort: string; serviceTier: "default"; cwd: string };
+  constructor(readonly args: ActualClientArgs, readonly runtime: boolean) {
+    this.nativeSettings = { model: "codex-cheap", effort: "low", serviceTier: "default", cwd: args.policy.thread.cwd };
+  }
+  async connect() {
+    return { userAgent: "codex_app_server/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "macos" };
+  }
+  async request<T>(args: { method: string; params: unknown; parse: (value: unknown) => T }): Promise<T> {
+    this.calls.push({ method: args.method, params: args.params });
+    const params = args.params as Record<string, unknown>;
+    let response: unknown = {};
+    if (args.method === "config/read") response = { config: codexConfig(this.args.policy, this.runtime), origins: {} };
+    if (args.method === "account/read") response = { requiresOpenaiAuth: true, account: { type: "chatgpt" } };
+    if (args.method === "model/list") response = { data: [{ id: "codex-cheap", model: "codex-cheap",
+      displayName: "Codex Cheap", hidden: false, isDefault: true, defaultReasoningEffort: "low",
+      inputModalities: ["text", "image"], supportedReasoningEfforts: [
+        { reasoningEffort: "low" }, { reasoningEffort: "medium" },
+      ] }] };
+    if (args.method === "permissionProfile/list") response = { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] };
+    if (args.method === "thread/start") {
+      await this.threadStartGate;
+      response = { thread: { id: "actual-thread", turns: [],
+        environments: [this.args.policy.thread.defaultEnvironment] }, model: "codex-cheap", cwd: params.cwd,
+        runtimeWorkspaceRoots: params.runtimeWorkspaceRoots, approvalsReviewer: "user",
+        approvalPolicy: this.args.policy.thread.approvalPolicy, activePermissionProfile: { id: CODEX_PERMISSION_PROFILE },
+        reasoningEffort: "low", serviceTier: "default" };
+    }
+    if (args.method === "thread/settings/update") {
+      this.nativeSettings = { model: String(params.model), effort: String(params.effort), serviceTier: "default",
+        cwd: String(params.cwd) };
+      this.notify("thread/settings/updated", { threadId: params.threadId, threadSettings: this.nativeSettings });
+    }
+    if (args.method === "turn/start") {
+      response = { turn: { id: `actual-turn-${this.calls.filter(call => call.method === "turn/start").length}`,
+        items: [], status: "inProgress" } };
+      const turnId = (response as { turn: { id: string } }).turn.id, threadId = String(params.threadId);
+      this.notify("thread/settings/updated", { threadId,
+        threadSettings: { ...this.nativeSettings, cwd: this.args.policy.thread.turnEnvironments[0]!.cwd } });
+      this.notify("turn/started", { threadId, turn: { id: turnId, items: [], status: "inProgress" } });
+    }
+    if (args.method === "turn/steer") response = { turnId: params.expectedTurnId };
+    if (args.method === "account/usage/read") response = { threadUsage: null };
+    return args.parse(response);
+  }
+  requestOptionalAccounting<T>(args: { method: "account/usage/read"; params: unknown;
+    parse: (value: unknown) => T }): Promise<T | undefined> { return this.request(args); }
+  hasPendingRequiredRequests() { return false; }
+  notify(method: string, params: unknown) { this.args.onNotification?.({ method, params }); }
+  server(method: string, params: unknown, id: string | number = 1) {
+    if (!this.args.onRequest) return Promise.reject(new Error("Actual Codex fixture has no request callback"));
+    return this.args.onRequest({ id, method, params });
+  }
+  terminate(error: Error) { this.args.onTerminal?.(error); }
+  dispose() { this.disposed++; }
+  disposeAndWait() { this.dispose(); return Promise.resolve(); }
+}
+
 class FakeProvider implements ReviewProvider {
   prepareCount = 0;
   readonly startCalls = new ObservedCalls();
+  readonly historyCalls = new ObservedCalls();
   disposeCount = 0;
   throwOnPrepare = false;
   throwOnHistory = false;
   starts: { deferred: ReturnType<typeof deferred<ReviewSession>>; boundary: ProviderRequestBoundary }[] = [];
   history: HistoryItem[] = [{ role: "assistant", text: "native history" }];
+  historyGate?: Promise<void>;
+  historyResult?: ProviderHistory;
   constructor(readonly id: "claude" | "codex") {}
   health(args: { settings: ProviderSettings }): ProviderHealth {
     return { provider: this.id, status: "ready", model: args.settings.model, models: [] };
@@ -84,7 +173,12 @@ class FakeProvider implements ReviewProvider {
   start(args: { boundary: ProviderRequestBoundary }) {
     const pending = deferred<ReviewSession>(); this.starts.push({ deferred: pending, boundary: args.boundary }); this.startCalls.hit(); return pending.promise;
   }
-  readHistory() { if (this.throwOnHistory) throw new Error("history rejected"); return this.history; }
+  async readHistory() {
+    this.historyCalls.hit();
+    if (this.throwOnHistory) throw new Error("history rejected");
+    await this.historyGate;
+    return this.historyResult ?? { messages: this.history };
+  }
   dispose() { this.disposeCount++; }
 }
 type Message<K extends DownMsg["kind"]> = Extract<DownMsg, { kind: K }>;
@@ -129,8 +223,10 @@ const initialized = (sessionId: string): ProviderOutput => ({
   kind: "initialized", sessionId,
   health: { provider: "claude", status: "ready", model: "haiku", models: [] },
 });
-const usage = (input: number, cost: number, status: "reported" | "estimated", turnCompleted = false): ProviderOutput => ({
-  kind: "usage", usage: { input, output: input + 1, cacheRead: 0, cacheWrite: 0 }, cost: { usd: cost, status }, turnCompleted,
+const usage = (input: number, cost: number, status: "reported" | "estimated", turnCompleted = false,
+  accountingCheckpoint = false): ProviderOutput => ({
+  kind: "usage", usage: { input, output: input + 1, cacheRead: 0, cacheWrite: 0 }, cost: { usd: cost, status },
+  turnCompleted, accountingCheckpoint,
 });
 
 const claude = new FakeProvider("claude"), codex = new FakeProvider("codex");
@@ -229,13 +325,14 @@ assert.deepEqual(currentSession.sent, ["prompt-current", "steer"]);
 const heldTool = claude.starts[2].boundary.tool({ tool: "focus", args: { nodeId: "1:2" } });
 const heldCard = await fresh.next(message => message.kind === "tool");
 const rejectedStop = deferred<void>(); currentSession.interruptGate = rejectedStop.promise;
-fresh.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 1 }); rejectedStop.reject(new Error("interrupt rejected"));
+fresh.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 1 });
+assert.equal((await fresh.next(message => message.kind === "cancel_request")).id, heldCard.id,
+  "Stop revokes pending cards before native interrupt settles");
+assert.equal((await heldTool).isError, true);
+rejectedStop.reject(new Error("interrupt rejected"));
 assert.match((await fresh.next(message => message.kind === "error")).message, /Stop failed: interrupt rejected/);
-assert.deepEqual(fresh.matching(message => message.kind === "cancel_request"), []);
 currentSession.interruptGate = undefined; fresh.send({ kind: "interrupt" });
 await currentSession.interruptSuccesses.waitFor({ count: 1 });
-assert.equal((await fresh.next(message => message.kind === "cancel_request")).id, heldCard.id);
-assert.equal((await heldTool).isError, true);
 
 currentSession.output.push(usage(10, 5, "estimated"));
 assert.deepEqual((await fresh.next(down({ kind: "session", where: message => message.session.usage.input === 10 && message.session.turns === 0 }))).session,
@@ -257,6 +354,7 @@ const settingsOrigin = fresh, settingsReplacement = await new Client(port).opene
 settingsReplacement.send({ kind: "hello", protocolVersion: 3, fileId: "file-a", fileName: "File" });
 await settingsReplacement.next(message => message.kind === "connection");
 assert.deepEqual((await settingsReplacement.next(message => message.kind === "health")).health.settings.providers.claude, beforeLiveSettings);
+const prepareBeforeCommit = claude.prepareCount;
 gate.resolve();
 const settled = await settingsReplacement.next(down({ kind: "health", where: message => !message.health.settingsResult
   && message.health.settings.providers.claude.model === "sonnet" }));
@@ -267,7 +365,8 @@ assert.deepEqual(readSettings().providers, {
   claude: { model: "sonnet", effort: "high" }, codex: { model: "image", effort: "medium" },
 }, "awaited active update preserves unrelated provider commit");
 assert.deepEqual(currentSession.settings.at(-1), { model: "sonnet", effort: "high" });
-assert.equal(claude.disposeCount, disposeBeforeLive + 1);
+assert.deepEqual([claude.disposeCount, claude.prepareCount], [disposeBeforeLive, prepareBeforeCommit],
+  "accepted live settings keep active provider ownership without re-preparing beneath it");
 const reversionGate = deferred<void>(); currentSession.settingGate = reversionGate;
 fresh.send({ kind: "settings", requestId: "away", provider: "claude", settings: { model: "haiku", effort: "low" } });
 await currentSession.settingCalls.waitFor({ count: 3 });
@@ -407,6 +506,185 @@ const shutdown = app.shutdown(); await shutdownHeld.closeCalls.waitFor({ count: 
 assert.equal(shutdownHeld.sent.length, 0, "shutdown retires native session before reconciliation settles");
 shutdownGate.reject(new Error("late shutdown reconciliation")); await staleStartLogs.waitFor({ count: 2 }); await shutdown;
 assert.deepEqual([closeHeld.closed, closeHeld.sent.length, shutdownHeld.closed, shutdownHeld.sent.length], [1, 0, 1, 0]);
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ provider: "codex",
+  providers: { claude: { model: "", effort: "" }, codex: { model: "luna", effort: "max" } } }));
+const codexApp = createReviewBridge({ version: "test", port: 0, log: () => {}, createProviders: () => ({ claude, codex }) });
+const codexClient = await new Client(await codexApp.listening).opened();
+codexClient.send({ kind: "hello", protocolVersion: 3, fileId: "codex-file", fileName: "Codex" });
+await codexClient.next(message => message.kind === "connection"); await codexClient.next(message => message.kind === "health");
+codexClient.send(startMessage("codex-core", "codex-file")); await codex.startCalls.waitFor({ count: 1 });
+for (const tool of ["get_flow", "get_screen", "focus", "annotate", "ask_user"] as const) {
+  const response = codex.starts[0].boundary.tool({ tool, args: { proof: tool } });
+  const card = await codexClient.next(message => message.kind === "tool");
+  assert.deepEqual([card.tool, card.args], [tool, { proof: tool }]);
+  codexClient.send({ kind: "reply", id: card.id, result: { content: [{ type: "text", text: `${tool}-ok` }] } });
+  assert.deepEqual(await response, { content: [{ type: "text", text: `${tool}-ok` }] });
+}
+const permission = codex.starts[0].boundary.permission({ tool: "codex_file_change", input: { pathClass: "notes" } });
+const permissionCard = await codexClient.next(message => message.kind === "permission");
+codexClient.send({ kind: "reply", id: permissionCard.id, result: { behavior: "allow" } });
+assert.deepEqual(await permission, { behavior: "allow" });
+const codexSession = new FakeSession("codex"); codex.starts[0].deferred.resolve(codexSession);
+await codexSession.sendCalls.waitFor({ count: 1 });
+codexSession.output.push({ kind: "initialized", sessionId: "codex-owned", health: {
+  provider: "codex", status: "ready", model: "luna", models: [] } });
+await codexClient.next(down({ kind: "started", where: message => message.session.provider === "codex" }));
+codexSession.output.push({ kind: "usage", usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+  cost: { usd: 0, status: "unavailable" }, turnCompleted: true });
+const codexRecord = await codexClient.next(down({ kind: "session", where: message => message.session.turns === 1 }));
+assert.deepEqual([codexRecord.session.provider, codexRecord.session.costUsd, codexRecord.session.costStatus],
+  ["codex", 0, "unavailable"]);
+const completionTimestamp = codexRecord.session.updatedAt;
+await codexClient.next(down({ kind: "busy", where: message => !message.busy }));
+const completedBusyMessages = codexClient.matching(down({ kind: "busy", where: message => !message.busy })).length;
+codexSession.output.push(usage(2, 0.75, "estimated", false, true));
+await codexClient.next(down({ kind: "session", where: message => message.session.costUsd === 0.75 }));
+const refreshedSessions = await codexClient.next(down({ kind: "sessions", where: message =>
+  message.sessions.some(session => session.sessionId === "codex-owned" && session.costUsd === 0.75) }));
+const refreshedHistoryRow = refreshedSessions.sessions.find(session => session.sessionId === "codex-owned")!;
+const checkpointed = readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!;
+assert.deepEqual([checkpointed.turns, checkpointed.updatedAt, checkpointed.costUsd, checkpointed.costStatus,
+  refreshedHistoryRow.turns, refreshedHistoryRow.updatedAt, refreshedHistoryRow.costUsd, refreshedHistoryRow.costStatus],
+[1, completionTimestamp, 0.75, "estimated", 1, completionTimestamp, 0.75, "estimated"],
+"delayed cost checkpoints persist and refresh History rows without incrementing turns or changing completion time");
+assert.equal(codexClient.matching(down({ kind: "busy", where: message => !message.busy })).length, completedBusyMessages,
+  "accounting checkpoints do not publish a false turn completion");
+codex.history = [{ role: "tool", name: "ask_user", input: { question: "Q" } }, { role: "answer", text: "A" }];
+codexClient.send({ kind: "open", intentId: "codex-history", fileId: "codex-file", fileName: "Codex",
+  session: { provider: "codex", sessionId: "codex-owned" } });
+assert.deepEqual((await codexClient.next(message => message.kind === "history")).messages, codex.history);
+const unavailableGate = deferred<void>(); codex.historyGate = unavailableGate.promise;
+codex.historyResult = { messages: codex.history, cost: { usd: 0, status: "unavailable" } };
+codexClient.send({ kind: "open", intentId: "codex-history-unavailable", fileId: "codex-file", fileName: "Codex",
+  session: { provider: "codex", sessionId: "codex-owned" } });
+await codex.historyCalls.waitFor({ count: 2 });
+codexSession.output.push(usage(4, 7, "estimated"));
+await codexClient.next(down({ kind: "session", where: message => message.session.costUsd === 7 }));
+assert.equal(readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!.costUsd, 0.75,
+  "non-checkpoint in-memory accounting remains newer than disk during attached history");
+unavailableGate.resolve();
+const unavailableHistory = await codexClient.next(down({ kind: "history",
+  where: message => message.intentId === "codex-history-unavailable" }));
+assert.deepEqual([unavailableHistory.attached, unavailableHistory.session.costUsd, unavailableHistory.session.costStatus],
+  [true, 7, "unavailable"], "unavailable history preserves newer attached USD while marking provenance unavailable");
+assert.deepEqual([readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!.costUsd,
+  readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!.costStatus], [7, "unavailable"]);
+const historyGate = deferred<void>(); codex.historyGate = historyGate.promise;
+codex.historyResult = { messages: codex.history, cost: { usd: 9, status: "estimated" } };
+codexClient.send({ kind: "open", intentId: "codex-history-race", fileId: "codex-file", fileName: "Codex",
+  session: { provider: "codex", sessionId: "codex-owned" } });
+await codex.historyCalls.waitFor({ count: 3 });
+codexSession.output.push({ kind: "usage", usage: { input: 6, output: 7, cacheRead: 1, cacheWrite: 0 },
+  cost: { usd: 2, status: "estimated" }, turnCompleted: true });
+await codexClient.next(down({ kind: "session", where: message => message.session.turns === 2 }));
+codexClient.send({ kind: "close", reason: "fixture complete" }); await codexSession.closeCalls.waitFor({ count: 1 });
+historyGate.resolve();
+const racedHistory = await codexClient.next(down({ kind: "history", where: message => message.intentId === "codex-history-race" }));
+assert.deepEqual([racedHistory.attached, racedHistory.session.turns, racedHistory.session.usage.input,
+  racedHistory.session.costUsd], [false, 2, 6, 9],
+"history revalidates attachment and merges cost into latest completed-turn record");
+assert.deepEqual(readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]?.usage,
+  { input: 6, output: 7, cacheRead: 1, cacheWrite: 0 });
+
+codexSession.output.reject(new Error("fixture complete")); codexClient.close(); await codexApp.shutdown();
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ provider: "codex",
+  providers: { claude: { model: "", effort: "" }, codex: { model: "codex-cheap", effort: "low" } } }));
+const actualClients: ActualCodexClient[] = [];
+let actualCodex!: InstanceType<typeof CodexProvider>;
+const defaultClaude = new FakeProvider("claude");
+const actualApp = createReviewBridge({ version: "test", port: 0, log: () => {}, createProviders: ({ onChanged }) => {
+  actualCodex = new CodexProvider({ version: "test", log: () => {}, onPrepared: onChanged,
+    clientFactory: args => { const client = new ActualCodexClient(args, actualClients.length % 2 === 1);
+      actualClients.push(client); return client; } });
+  return { claude: defaultClaude, codex: actualCodex };
+} });
+const actualClient = await new Client(await actualApp.listening).opened();
+actualClient.send({ kind: "hello", protocolVersion: 3, fileId: "actual-codex", fileName: "Actual Codex" });
+await actualClient.next(message => message.kind === "connection"); await actualClient.next(message => message.kind === "health");
+actualClient.send(startMessage("actual-codex-start", "actual-codex"));
+await actualClient.next(down({ kind: "started", where: message => message.session.provider === "codex" }));
+assert.equal(actualClients.length, 2); const actualRuntime = actualClients[1]!;
+actualRuntime.notify("turn/completed", { threadId: "actual-thread",
+  turn: { id: "actual-turn-1", items: [], status: "completed", error: null } });
+await actualClient.next(down({ kind: "busy", where: message => !message.busy }));
+actualClient.send({ kind: "settings", requestId: "future-claude", provider: "claude",
+  settings: { model: "", effort: "" }, selectedProvider: "claude" });
+await actualClient.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "future-claude" }));
+const attachedActual = Reflect.get(actualCodex, "active") as { close: () => void } | undefined;
+assert.ok(attachedActual, "default-provider switch preserves actual CodexProvider attached session");
+assert.equal(actualRuntime.disposed, 0, "default-provider switch cannot retire attached Codex runtime");
+actualClient.send({ kind: "user", text: "still attached", selection: [] });
+await actualClient.next(down({ kind: "busy", where: message => message.busy }));
+const reuseDeadline = Date.now() + 2_000;
+while (actualRuntime.calls.filter(call => call.method === "turn/start").length < 2 && Date.now() < reuseDeadline) {
+  await new Promise(resolve => setImmediate(resolve));
+}
+assert.equal(actualRuntime.calls.filter(call => call.method === "turn/start").length, 2,
+  "preserved Codex session remains usable after future default changes to Claude");
+actualClient.close(); await actualApp.shutdown();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(actualRuntime.disposed, 1, "bridge shutdown eventually retires preserved actual Codex runtime");
+
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ provider: "codex",
+  providers: { claude: { model: "", effort: "" }, codex: { model: "codex-cheap", effort: "low" } } }));
+const pendingActualClients: ActualCodexClient[] = [], heldThreadStart = deferred<void>();
+let pendingActualCodex!: InstanceType<typeof CodexProvider>;
+const pendingActualApp = createReviewBridge({ version: "test", port: 0, log: () => {}, createProviders: ({ onChanged }) => {
+  pendingActualCodex = new CodexProvider({ version: "test", log: () => {}, onPrepared: onChanged,
+    clientFactory: args => {
+      const client = new ActualCodexClient(args, pendingActualClients.length % 2 === 1);
+      if (pendingActualClients.length % 2 === 1) client.threadStartGate = heldThreadStart.promise;
+      pendingActualClients.push(client); return client;
+    } });
+  return { claude: new FakeProvider("claude"), codex: pendingActualCodex };
+} });
+const pendingActualClient = await new Client(await pendingActualApp.listening).opened();
+pendingActualClient.send({ kind: "hello", protocolVersion: 3, fileId: "pending-actual", fileName: "Pending Actual" });
+await pendingActualClient.next(message => message.kind === "connection");
+await pendingActualClient.next(message => message.kind === "health");
+pendingActualClient.send(startMessage("pending-actual-start", "pending-actual"));
+const pendingRuntimeDeadline = Date.now() + 2_000;
+while (!pendingActualClients[1]?.calls.some(call => call.method === "thread/start") && Date.now() < pendingRuntimeDeadline) {
+  await new Promise(resolve => setImmediate(resolve));
+}
+assert.equal(pendingActualClients[1]?.calls.some(call => call.method === "thread/start"), true,
+  "actual Codex start reaches held native thread/start");
+const crossFileClient = await new Client(await pendingActualApp.listening).opened();
+crossFileClient.send({ kind: "hello", protocolVersion: 3, fileId: "pending-other", fileName: "Pending Other" });
+await crossFileClient.next(message => message.kind === "connection");
+await crossFileClient.next(message => message.kind === "health");
+assert.deepEqual([pendingActualClients.length, pendingActualClients[1]!.disposed], [2, 0],
+  "cross-file advisory preparation preserves an in-progress explicit Codex start");
+pendingActualClient.send({ kind: "settings", requestId: "pending-medium", provider: "codex",
+  settings: { model: "codex-cheap", effort: "medium" }, selectedProvider: "codex" });
+await pendingActualClient.next(down({ kind: "health",
+  where: message => message.health.settingsResult?.requestId === "pending-medium" }));
+assert.equal(pendingActualClients[1]!.disposed, 0,
+  "Codex settings persistence preserves matching pending-start provider ownership");
+heldThreadStart.resolve();
+await pendingActualClient.next(down({ kind: "started", where: message => message.session.provider === "codex" }));
+assert.equal(pendingActualClients[1]!.calls.some(call => call.method === "thread/settings/update"), true,
+  "pending-start reconciliation applies settings saved while native start was held");
+const actualNullPermissions = { fileSystem: { read: null, write: null, entries: [{ access: "write",
+  path: { type: "path", path: join(pendingActualClients[1]!.args.policy.notesDir, "actual.txt") } }] } };
+const routedActualPermission = pendingActualClients[1]!.server("item/permissions/requestApproval", {
+  threadId: "actual-thread", turnId: "actual-turn-1", itemId: "actual-permission", startedAtMs: 1,
+  cwd: pendingActualClients[1]!.args.policy.notesDir, reason: "actual callback", permissions: actualNullPermissions,
+}, 77);
+const actualPermissionCard = await pendingActualClient.next(message => message.kind === "permission");
+pendingActualClient.send({ kind: "reply", id: actualPermissionCard.id, result: { behavior: "allow" } });
+assert.deepEqual(await routedActualPermission, { permissions: actualNullPermissions, scope: "turn" },
+  "actual-provider fixture forwards numeric native permission requests through bridge callback ownership");
+pendingActualClients[1]!.terminate(new Error("actual fixture terminal"));
+await pendingActualClient.next(message => message.kind === "error");
+const pendingTerminalDeadline = Date.now() + 2_000;
+while (pendingActualClients[1]!.disposed < 1 && Date.now() < pendingTerminalDeadline) {
+  await new Promise(resolve => setImmediate(resolve));
+}
+assert.equal(pendingActualClients[1]!.disposed, 1,
+  "actual-provider fixture forwards terminal callbacks into runtime retirement");
+pendingActualClient.close(); crossFileClient.close(); await pendingActualApp.shutdown();
+
 const transportApp = createReviewBridge({ version: "test", port: 0, log: () => {},
   createProviders: () => ({ claude: undefined, codex: undefined }) });
 const transportClient = await new Client(await transportApp.listening).opened();

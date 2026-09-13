@@ -22,7 +22,8 @@ export type ProviderOutput =
   | { kind: "initialized"; sessionId: string; health: ProviderHealth; servers?: { name: string; status: string; error?: string }[] }
   | { kind: "event"; event: ReviewEvent }
   /** Cumulative session snapshots including resume baselines. Consumers replace, never add, both usage and cost. */
-  | { kind: "usage"; usage: Usage; cost: { usd: number; status: CostStatus }; turnCompleted: boolean };
+  | { kind: "usage"; usage: Usage; cost: { usd: number; status: CostStatus }; turnCompleted: boolean;
+      accountingCheckpoint?: boolean };
 
 export interface ReviewSession {
   readonly provider: ProviderId;
@@ -32,6 +33,12 @@ export interface ReviewSession {
   applySettings(args: { settings: ProviderSettings }): Promise<void>;
   close(): void;
 }
+
+export type ProviderHistory = {
+  messages: HistoryItem[];
+  usage?: Usage;
+  cost?: { usd: number; status: CostStatus };
+};
 
 export interface ReviewProvider {
   readonly id: ProviderId;
@@ -45,6 +52,13 @@ export interface ReviewProvider {
     boundary: ProviderRequestBoundary;
     baseRecord: ProviderSessionRecord;
   }): Promise<ReviewSession>;
-  readHistory(args: { dir: string; sessionId: string }): HistoryItem[];
+  readHistory(args: {
+    fileId: string;
+    dir: string;
+    sessionId: string;
+    settings: ProviderSettings;
+    boundary: ProviderRequestBoundary;
+    baseRecord: ProviderSessionRecord;
+  }): Promise<ProviderHistory>;
   dispose(): void;
 }
