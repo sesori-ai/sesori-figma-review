@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DownMsg, HistoryItem, ProviderHealth, ProviderSessionRecord, ProviderSettings } from "../../shared/protocol.ts";
 import { decodeBridgeMessage } from "../../plugin/src/wire.ts";
-import type { ProviderOutput, ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
+import type { ProviderHistory, ProviderOutput, ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
 
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "review-bridge-check-"));
 const { createReviewBridge } = await import("./review-bridge.ts");
-const { readSettings } = await import("./workspace.ts");
+const { readSessions, readSettings } = await import("./workspace.ts");
 
 class OutputQueue implements AsyncIterable<ProviderOutput> {
   private values: ProviderOutput[] = [];
@@ -71,11 +71,14 @@ const deferred = <T>() => {
 class FakeProvider implements ReviewProvider {
   prepareCount = 0;
   readonly startCalls = new ObservedCalls();
+  readonly historyCalls = new ObservedCalls();
   disposeCount = 0;
   throwOnPrepare = false;
   throwOnHistory = false;
   starts: { deferred: ReturnType<typeof deferred<ReviewSession>>; boundary: ProviderRequestBoundary }[] = [];
   history: HistoryItem[] = [{ role: "assistant", text: "native history" }];
+  historyGate?: Promise<void>;
+  historyResult?: ProviderHistory;
   constructor(readonly id: "claude" | "codex") {}
   health(args: { settings: ProviderSettings }): ProviderHealth {
     return { provider: this.id, status: "ready", model: args.settings.model, models: [] };
@@ -85,8 +88,10 @@ class FakeProvider implements ReviewProvider {
     const pending = deferred<ReviewSession>(); this.starts.push({ deferred: pending, boundary: args.boundary }); this.startCalls.hit(); return pending.promise;
   }
   async readHistory() {
+    this.historyCalls.hit();
     if (this.throwOnHistory) throw new Error("history rejected");
-    return { messages: this.history };
+    await this.historyGate;
+    return this.historyResult ?? { messages: this.history };
   }
   dispose() { this.disposeCount++; }
 }
@@ -444,7 +449,22 @@ codex.history = [{ role: "tool", name: "ask_user", input: { question: "Q" } }, {
 codexClient.send({ kind: "open", intentId: "codex-history", fileId: "codex-file", fileName: "Codex",
   session: { provider: "codex", sessionId: "codex-owned" } });
 assert.deepEqual((await codexClient.next(message => message.kind === "history")).messages, codex.history);
+const historyGate = deferred<void>(); codex.historyGate = historyGate.promise;
+codex.historyResult = { messages: codex.history, cost: { usd: 9, status: "estimated" } };
+codexClient.send({ kind: "open", intentId: "codex-history-race", fileId: "codex-file", fileName: "Codex",
+  session: { provider: "codex", sessionId: "codex-owned" } });
+await codex.historyCalls.waitFor({ count: 2 });
+codexSession.output.push({ kind: "usage", usage: { input: 6, output: 7, cacheRead: 1, cacheWrite: 0 },
+  cost: { usd: 2, status: "estimated" }, turnCompleted: true });
+await codexClient.next(down({ kind: "session", where: message => message.session.turns === 2 }));
 codexClient.send({ kind: "close", reason: "fixture complete" }); await codexSession.closeCalls.waitFor({ count: 1 });
+historyGate.resolve();
+const racedHistory = await codexClient.next(down({ kind: "history", where: message => message.intentId === "codex-history-race" }));
+assert.deepEqual([racedHistory.attached, racedHistory.session.turns, racedHistory.session.usage.input,
+  racedHistory.session.costUsd], [false, 2, 6, 9],
+"history revalidates attachment and merges cost into latest completed-turn record");
+assert.deepEqual(readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]?.usage,
+  { input: 6, output: 7, cacheRead: 1, cacheWrite: 0 });
 codexSession.output.reject(new Error("fixture complete")); codexClient.close(); await codexApp.shutdown();
 const transportApp = createReviewBridge({ version: "test", port: 0, log: () => {},
   createProviders: () => ({ claude: undefined, codex: undefined }) });

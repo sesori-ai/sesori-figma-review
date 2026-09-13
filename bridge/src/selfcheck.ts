@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "figma-review-"));
-const { installPlugin, readAllow, readSessions, readSettings, resolveHome, saveSession, saveSettings, workspaceFor, zeroUsage } = await import("./workspace.ts");
+const { installPlugin, readAllow, readSessions, readSettings, readSettingsAdvisory, resolveHome, saveSession, saveSettings,
+  workspaceFor, zeroUsage } = await import("./workspace.ts");
 const { FIGMA_TOOLS } = await import("./figma-tools.ts");
 
 // join() everywhere, so the expectations hold on Windows separators too.
@@ -27,8 +28,14 @@ writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.string
 assert.deepEqual(readSettings(), { ...defaults, providers: { ...defaults.providers, claude: { model: "opus", effort: "low" } } });
 saveSettings({ settings: { ...defaults, providers: { ...defaults.providers, claude: { model: "haiku", effort: "low" } } } });
 assert.equal(readSettings().providers.claude.model, "haiku");
+const settingsErrors: unknown[] = [];
 writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ ...defaults, provider: "future" }));
 assert.throws(readSettings, /Unsupported provider "future"/);
+assert.equal(readSettingsAdvisory({ onError: error => settingsErrors.push(error) }), undefined);
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), "{");
+assert.equal(readSettingsAdvisory({ onError: error => settingsErrors.push(error) }), undefined);
+assert.deepEqual(settingsErrors.map(error => error instanceof Error), [true, true],
+  "advisory credential warning reports malformed settings without inventing a provider");
 saveSettings({ settings: defaults });
 
 const dir = workspaceFor("file1", "Checkout redesign");

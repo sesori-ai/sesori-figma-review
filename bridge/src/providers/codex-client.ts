@@ -21,9 +21,9 @@ export type CodexChild = {
   stdout: OutputStream;
   stderr: OutputStream;
   on(event: "error", listener: (error: Error) => void): unknown;
-  on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+  on(event: "exit" | "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
   off(event: "error", listener: (error: Error) => void): unknown;
-  off(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+  off(event: "exit" | "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
   kill(signal?: NodeJS.Signals): boolean;
 };
 export type CodexChildFactory = (args: { command: string; args: string[]; cwd: string }) => CodexChild;
@@ -90,7 +90,7 @@ export class CodexClient {
   private stderrBuffer = Buffer.alloc(0);
   private terminalError?: Error;
   private nativeOutputBytes = 0;
-  private exitObserved = false;
+  private closeObserved = false;
   private readonly exited: Promise<void>;
   private resolveExited!: () => void;
 
@@ -143,6 +143,7 @@ export class CodexClient {
       child.stderr.on("end", this.onStderrEnd);
       child.on("error", this.onChildError);
       child.on("exit", this.onChildExit);
+      child.on("close", this.onChildClose);
       const initialized = await this.rawRequest({
         method: "initialize",
         params: {
@@ -305,8 +306,13 @@ export class CodexClient {
   private readonly onChildError = (error: Error) =>
     this.terminate(new Error(`Codex App Server failed: ${error.message}`));
   private readonly onChildExit = (code: number | null, signal: NodeJS.Signals | null) => {
-    this.exitObserved = true; this.resolveExited();
     this.terminate(new Error(`Codex App Server exited unexpectedly (${signal ?? `code ${code ?? "unknown"}`})`), false);
+  };
+  private readonly onChildClose = (code: number | null, signal: NodeJS.Signals | null) => {
+    this.closeObserved = true; this.resolveExited();
+    if (!this.terminalError) {
+      this.terminate(new Error(`Codex App Server closed unexpectedly (${signal ?? `code ${code ?? "unknown"}`})`), false);
+    }
   };
 
   private error(value: unknown): Error { return value instanceof Error ? value : new Error(String(value)); }
@@ -331,7 +337,7 @@ export class CodexClient {
   dispose() { this.terminate(new Error("Codex App Server client disposed")); }
   async disposeAndWait(args: { timeoutMs?: number } = {}) {
     this.dispose();
-    if (!this.child || this.exitObserved) return;
+    if (!this.child || this.closeObserved) return;
     const timeoutMs = args.timeoutMs ?? 5_000;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type {
   HistoryItem, NodeRef, ProviderHealth, ProviderSessionRecord, ProviderSettings, ReviewEvent, ToolResult, Usage,
@@ -29,8 +30,13 @@ const containedBy = (parent: string, child: string) => {
   const path = relative(parent, child);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 };
-const canonicalRequested = (path: string) => {
-  const absolute = resolve(path), suffix: string[] = [];
+const canonicalRequested = (path: string, cwd: string): string | undefined => {
+  let requested = path;
+  if (requested.startsWith("file:")) {
+    try { requested = fileURLToPath(requested); } catch { return; }
+  }
+  const absolute = isAbsolute(requested) ? resolve(requested) : resolve(cwd, requested);
+  const suffix: string[] = [];
   let cursor = absolute;
   for (;;) {
     try { return join(realpathSync(cursor), ...suffix.reverse()); }
@@ -41,7 +47,6 @@ const canonicalRequested = (path: string) => {
     }
   }
 };
-const overlaps = (left: string, right: string) => containedBy(left, right) || containedBy(right, left);
 const selectionText = (nodes: NodeRef[]) => nodes.length
   ? nodes.map(node => `${node.name} (${node.type} ${node.id})`).join(", ") : "none";
 const userText = (args: { text: string; selection: NodeRef[]; context?: string }) => [
@@ -223,6 +228,7 @@ class CodexSession implements ReviewSession {
   private closed = false;
   private generation = 0;
   private readonly completedTurns = new Set<string>();
+  private costReadSequence = 0;
   private readonly changes = new Map<string, unknown[]>();
   private futureSettings?: {
     model: string; effort: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>;
@@ -410,16 +416,17 @@ class CodexSession implements ReviewSession {
     const outcome = turn.status === "interrupted" ? "interrupted" : turn.status === "failed" ? "failed" : "completed";
     this.emit({ type: "turn_end", session: this.ref(), itemId: turn.id, outcome,
       ...(turn.error?.message ? { message: turn.error.message } : {}) });
-    const generation = this.generation;
+    this.queue.push({ kind: "usage", usage: this.usage, cost: this.cost, turnCompleted: true });
+    const generation = this.generation, sequence = ++this.costReadSequence;
     void this.readCost().then(cost => {
-      if (this.closed || generation !== this.generation) return;
+      if (this.closed || generation !== this.generation || sequence !== this.costReadSequence) return;
       this.cost = cost;
-      this.queue.push({ kind: "usage", usage: this.usage, cost, turnCompleted: true });
+      this.queue.push({ kind: "usage", usage: this.usage, cost, turnCompleted: false });
     }, error => {
       this.args.log("Codex thread cost read failed", error);
-      if (this.closed || generation !== this.generation) return;
+      if (this.closed || generation !== this.generation || sequence !== this.costReadSequence) return;
       this.cost = { usd: this.cost.usd, status: "unavailable" };
-      this.queue.push({ kind: "usage", usage: this.usage, cost: this.cost, turnCompleted: true });
+      this.queue.push({ kind: "usage", usage: this.usage, cost: this.cost, turnCompleted: false });
     });
   }
   private async readCost() {
@@ -445,8 +452,11 @@ class CodexSession implements ReviewSession {
     if (request.method === "item/commandExecution/requestApproval") {
       const params = parseCommandApprovalRequest(request.params); this.assertOwner(params);
       if (!params.command || !params.cwd || params.kind !== "command") return { decision: "decline" };
-      const unsafe = this.requestsAppWrite(params.additionalPermissions);
-      if (unsafe) return { decision: "decline" };
+      const network = params.proposedNetworkPolicyAmendments;
+      const networkEscalation = network != null && (!Array.isArray(network) || network.length > 0);
+      if (networkEscalation || this.unsafePermissions(params.additionalPermissions, params.cwd)) {
+        return { decision: "decline" };
+      }
       const decision = await this.args.boundary.permission({ tool: "codex_command", input: {
         command: params.command, cwd: params.cwd, reason: params.reason,
         additionalPermissions: params.additionalPermissions,
@@ -456,7 +466,7 @@ class CodexSession implements ReviewSession {
     if (request.method === "item/fileChange/requestApproval") {
       const params = parseFileApprovalRequest(request.params); this.assertOwner(params);
       const changes = this.changes.get(params.itemId);
-      if (params.grantRoot || !changes || this.changesWriteApp(changes)) return { decision: "decline" };
+      if (params.grantRoot || !changes || !this.changesStayInNotes(changes)) return { decision: "decline" };
       const decision = await this.args.boundary.permission({ tool: "codex_file_change", input: {
         cwd: this.args.policy.dir, reason: params.reason, changes,
       } });
@@ -464,7 +474,7 @@ class CodexSession implements ReviewSession {
     }
     if (request.method === "item/permissions/requestApproval") {
       const params = parsePermissionsApprovalRequest(request.params); this.assertOwner(params);
-      if (this.requestsAppWrite(params.permissions)) return { permissions: {}, scope: "turn" };
+      if (this.unsafePermissions(params.permissions, params.cwd)) return { permissions: {}, scope: "turn" };
       const decision = await this.args.boundary.permission({ tool: "codex_permission_scope", input: {
         cwd: params.cwd, reason: params.reason, permissions: params.permissions, scope: "turn",
       } });
@@ -490,39 +500,55 @@ class CodexSession implements ReviewSession {
       throw new Error("Codex request no longer belongs to the active thread/turn");
     }
   }
-  private requestsAppWrite(value: unknown): boolean {
-    if (!value || typeof value !== "object") return false;
+  private unsafePermissions(value: unknown, requestCwd: string): boolean {
+    if (value == null) return false;
+    if (typeof value !== "object" || Array.isArray(value) || !isAbsolute(requestCwd)) return true;
     const permissions = value as Record<string, unknown>;
-    if (permissions.network != null) return true;
-    if (!this.args.policy.appRepo) return false;
+    if (Object.keys(permissions).some(key => !["fileSystem", "network"].includes(key)) || permissions.network != null) {
+      return true;
+    }
     const fileSystem = permissions.fileSystem;
-    if (!fileSystem || typeof fileSystem !== "object") return false;
-    const filesystem = fileSystem as Record<string, unknown>, writes = filesystem.write;
-    if (Array.isArray(writes) && writes.some(path => typeof path === "string"
-      && overlaps(this.args.policy.appRepo!, canonicalRequested(path)))) return true;
-    if (!Array.isArray(filesystem.entries)) return false;
+    if (fileSystem == null) return false;
+    if (typeof fileSystem !== "object" || Array.isArray(fileSystem)) return true;
+    const filesystem = fileSystem as Record<string, unknown>;
+    if (Object.keys(filesystem).some(key => !["write", "read", "entries"].includes(key))) return true;
+    const allowed = (path: unknown, access: "read" | "write") => {
+      if (typeof path !== "string") return false;
+      const canonical = canonicalRequested(path, requestCwd);
+      if (!canonical) return false;
+      if (access === "write") return containedBy(this.args.policy.notesDir, canonical);
+      return containedBy(this.args.policy.dir, canonical)
+        || !!this.args.policy.appRepo && containedBy(this.args.policy.appRepo, canonical);
+    };
+    for (const access of ["write", "read"] as const) {
+      const paths = filesystem[access];
+      if (paths !== undefined && (!Array.isArray(paths) || paths.some(path => !allowed(path, access)))) return true;
+    }
+    if (filesystem.entries === undefined) return false;
+    if (!Array.isArray(filesystem.entries)) return true;
     return filesystem.entries.some(value => {
-      if (!value || typeof value !== "object") return true;
+      if (!value || typeof value !== "object" || Array.isArray(value)) return true;
       const entry = value as Record<string, unknown>;
-      if (entry.access !== "write") return false;
-      const path = entry.path;
-      if (!path || typeof path !== "object") return true;
-      const descriptor = path as Record<string, unknown>;
-      return descriptor.type !== "path" || typeof descriptor.path !== "string"
-        || overlaps(this.args.policy.appRepo!, canonicalRequested(descriptor.path));
+      if (!Object.keys(entry).every(key => ["access", "path"].includes(key))
+        || (entry.access !== "read" && entry.access !== "write")
+        || !entry.path || typeof entry.path !== "object" || Array.isArray(entry.path)) return true;
+      const descriptor = entry.path as Record<string, unknown>;
+      return !Object.keys(descriptor).every(key => ["type", "path"].includes(key))
+        || descriptor.type !== "path" || !allowed(descriptor.path, entry.access);
     });
   }
-  private changesWriteApp(changes: unknown[]): boolean {
-    if (!this.args.policy.appRepo) return false;
-    return changes.some(change => {
-      if (!change || typeof change !== "object" || typeof (change as { path?: unknown }).path !== "string") return true;
+  private changesStayInNotes(changes: unknown[]): boolean {
+    return changes.every(change => {
+      if (!change || typeof change !== "object" || typeof (change as { path?: unknown }).path !== "string") return false;
       const typed = change as { path: string; kind?: unknown };
-      const path = resolve(this.args.policy.dir, typed.path);
-      if (overlaps(this.args.policy.appRepo!, canonicalRequested(path))) return true;
-      if (!typed.kind || typeof typed.kind !== "object") return false;
-      const movePath = (typed.kind as Record<string, unknown>).movePath;
-      return typeof movePath === "string"
-        && overlaps(this.args.policy.appRepo!, canonicalRequested(resolve(this.args.policy.dir, movePath)));
+      const path = canonicalRequested(typed.path, this.args.policy.dir);
+      if (!path || !containedBy(this.args.policy.notesDir, path)) return false;
+      if (!typed.kind || typeof typed.kind !== "object") return true;
+      const kind = typed.kind as Record<string, unknown>;
+      if (!Object.hasOwn(kind, "movePath")) return true;
+      const movePath = typeof kind.movePath === "string"
+        ? canonicalRequested(kind.movePath, this.args.policy.dir) : undefined;
+      return !!movePath && containedBy(this.args.policy.notesDir, movePath);
     });
   }
   private ref() { return { provider: "codex" as const, sessionId: this.args.threadId }; }
@@ -572,6 +598,7 @@ export class CodexProvider implements ReviewProvider {
   }
 
   prepare(args: { fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary }) {
+    if (this.active) return;
     void this.ensurePrepared(args).catch(() => {});
   }
 
@@ -631,7 +658,7 @@ export class CodexProvider implements ReviewProvider {
     fileId: string; dir: string; sessionId: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
     baseRecord: ProviderSessionRecord;
   }): Promise<ProviderHistory> {
-    const prepared = await this.ensurePrepared(args);
+    const prepared = await this.ensurePrepared(args, { advisory: true });
     const result = await prepared.client.request({
       method: "thread/read", params: { threadId: args.sessionId, includeTurns: true }, parse: parseThreadReadResult,
     });
@@ -659,10 +686,11 @@ export class CodexProvider implements ReviewProvider {
 
   private ensurePrepared(args: {
     fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
-  }): Promise<Prepared> {
+  }, options: { advisory?: boolean } = {}): Promise<Prepared> {
     provisionCodexWorkspace({ dir: args.dir });
     const key = JSON.stringify([args.fileId, args.dir, process.env.APP_REPO ?? "", args.settings]);
-    if (this.prepared && this.preparedKey === key) return this.prepared;
+    if (this.prepared && (this.preparedKey === key || options.advisory && this.active)) return this.prepared;
+    if (options.advisory && this.active) return Promise.reject(new Error("Active Codex runtime is unavailable"));
     this.disposeRuntime();
     const generation = ++this.generation;
     this.preparedKey = key; this.runtime = { status: "starting" }; this.notify();
@@ -701,6 +729,8 @@ export class CodexProvider implements ReviewProvider {
       onTerminal: error => {
         if (client !== this.client || args.generation !== this.generation) return;
         this.active?.fail(error);
+        this.client = undefined; this.prepared = undefined; this.preparedKey = undefined; this.generation++;
+        void this.retire(client).catch(retirementError => this.args.log("Codex terminal retirement uncertain", retirementError));
         this.runtime = { status: "unavailable", error: `Codex App Server failed: ${error.message}` }; this.notify();
       },
     }));
@@ -714,8 +744,8 @@ export class CodexProvider implements ReviewProvider {
   private retire(client: RpcClient): Promise<void> {
     if (this.retiredClients.has(client as object)) return this.retirement;
     this.retiredClients.add(client as object); this.ownedClients.delete(client);
-    const retirement = client.disposeAndWait({ timeoutMs: 5_000 });
-    this.retirement = this.retirement.then(() => retirement);
+    const retirement = this.retirement.catch(() => {}).then(() => client.disposeAndWait({ timeoutMs: 5_000 }));
+    this.retirement = retirement.catch(() => {});
     return retirement;
   }
   private notify() { try { this.args.onPrepared(); } catch (error) { this.args.log("Codex readiness notification failed", error); } }

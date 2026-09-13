@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Quick start and the bridge banner recommend importing the plugin already bundled with npm while Figma Community review is pending. Manual setup docs cover the stable manifest path, standalone release ZIPs, matching bridge versions, and the different update steps for bridge-managed, ZIP and Community installs.
 - Architecture and contributor docs describe manual-install release assets and the `zip`/`unzip` tooling used to package and check them.
 
+### Fixed
+
+- Codex approvals now confine writes to notes and reject network escalation; session preparation, history, accounting, terminal recovery,
+  malformed items, spawn retirement, and startup credential warnings remain safe across asynchronous races and invalid inputs.
+
 ## [0.3.2]
 
 ### Added

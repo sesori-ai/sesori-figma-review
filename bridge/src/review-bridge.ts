@@ -426,7 +426,8 @@ export function createReviewBridge(args: {
           const dir = workspaceFor(message.fileId, message.fileName);
           const session = readSessions(dir).find(item => item.provider === message.session.provider && item.sessionId === message.session.sessionId);
           if (!session) throw new Error("Unknown provider-qualified session");
-          const attached = conv?.record.provider === message.session.provider && conv.record.sessionId === message.session.sessionId;
+          const attachedConversation = conv?.record.provider === message.session.provider
+            && conv.record.sessionId === message.session.sessionId ? conv : undefined;
           const provider = providers[session.provider];
           if (!provider) throw new Error(`${session.provider} is unavailable; cannot read its native history.`);
           const history = await provider.readHistory({
@@ -437,12 +438,21 @@ export function createReviewBridge(args: {
             boundary: dormantBoundary,
             baseRecord: session,
           });
-          if (history.usage) session.usage = history.usage;
-          if (history.cost) { session.costUsd = history.cost.usd; session.costStatus = history.cost.status; }
-          if (history.usage || history.cost) saveSession(dir, session);
+          const attached = attachedConversation !== undefined && conv === attachedConversation;
+          const latest = attached ? attachedConversation.record : readSessions(dir)
+            .find(item => item.provider === session.provider && item.sessionId === session.sessionId);
+          if (!latest) throw new Error("Provider-qualified session changed while native history was loading");
+          const merged = {
+            ...latest,
+            ...(history.usage ? { usage: history.usage } : {}),
+            ...(history.cost ? { costUsd: history.cost.usd, costStatus: history.cost.status } : {}),
+          };
+          if (history.usage || history.cost) {
+            if (attached) attachedConversation.record = merged;
+            saveSession(dir, merged);
+          }
           return send(message.fileId, {
-            kind: "history", intentId: message.intentId, session: attached ? conv!.record : session,
-            messages: history.messages, attached,
+            kind: "history", intentId: message.intentId, session: merged, messages: history.messages, attached,
           });
         } catch (error) {
           return send(message.fileId, { kind: "error", intentId: message.intentId, message: error instanceof Error ? error.message : String(error) });

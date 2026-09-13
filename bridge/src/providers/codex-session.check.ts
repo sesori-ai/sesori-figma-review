@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ProviderOutput, ProviderRequestBoundary } from "./types.ts";
 import type { ProviderSettings, ToolResult } from "../../../shared/protocol.ts";
 import { CodexRpcError } from "./codex-client.ts";
 import { assertCodexLocalDefaults, CODEX_PERMISSION_PROFILE, type CodexExecutionPolicy } from "./codex-execution.ts";
 import {
-  codexUsageAvailability, parseAccountUsageResult, parseCodexNotification, parseDynamicToolRequest,
+  codexThreadItem, codexUsageAvailability, parseAccountUsageResult, parseCodexNotification, parseDynamicToolRequest,
   parseThreadStartResult, type CodexNotification,
   type CodexServerRequest, type CodexThreadStartResult,
 } from "./codex-protocol.ts";
@@ -22,6 +23,10 @@ assert.doesNotThrow(() => parseDynamicToolRequest({ threadId: "thread", turnId: 
 assert.doesNotThrow(() => parseCodexNotification({ method: "turn/started", params: {
   threadId: "thread", turn: { id: "turn", items: [], status: "inProgress" },
 } }), "native turn lifecycle notifications carry turn id inside turn");
+assert.throws(() => codexThreadItem.parse({ type: "agentMessage", id: "malformed" }),
+  "malformed known items cannot fall through to ignored history");
+assert.deepEqual(codexThreadItem.parse({ type: "futureItem", id: "forward-compatible", private: true }),
+  { type: "ignored", id: "forward-compatible" });
 
 const root = mkdtempSync(join(tmpdir(), "codex-session-"));
 process.once("exit", () => rmSync(root, { recursive: true, force: true }));
@@ -69,6 +74,7 @@ class FakeClient {
   calls: Call[] = [];
   disposed = 0;
   responses = new Map<string, unknown>();
+  responseQueues = new Map<string, Promise<unknown>[]>();
   failures = new Map<string, Error>();
   confirmSettings = true;
   retirementGate?: Promise<void>;
@@ -86,7 +92,8 @@ class FakeClient {
     this.calls.push({ method: args.method, params: args.params });
     const failure = this.failures.get(args.method);
     if (failure) { this.failures.delete(args.method); throw failure; }
-    let response = this.responses.get(args.method);
+    const queued = this.responseQueues.get(args.method)?.shift();
+    let response = queued ? await queued : this.responses.get(args.method);
     if (response === undefined) response = this.defaultResponse(args.method, args.params);
     if (args.method === "thread/settings/update" && this.confirmSettings) {
       const settings = args.params as { threadId: string; model: string; effort: string };
@@ -128,6 +135,7 @@ class FakeClient {
   dispose() { this.disposed++; }
   async disposeAndWait() { this.dispose(); await this.retirementGate; }
   notify(method: string, params: unknown) { this.args.onNotification?.({ method, params }); }
+  terminate(error: Error) { this.args.onTerminal?.(error); }
   server(method: string, params: unknown, id: number = 1) {
     assert.ok(this.args.onRequest); return this.args.onRequest!({ id, method, params });
   }
@@ -149,6 +157,16 @@ const boundary: ProviderRequestBoundary = {
   permission: async request => { permissionCalls.push(request); return permissionBehavior === "allow"
     ? { behavior: "allow" } : { behavior: "deny", message: "fixture denial" }; },
 };
+const deferred = <T>() => {
+  let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+  const promise = new Promise<T>((accept, decline) => { resolve = accept; reject = decline; });
+  return { promise, resolve, reject };
+};
+async function waitUntil(args: { predicate: () => boolean; label: string; timeoutMs?: number }) {
+  const deadline = Date.now() + (args.timeoutMs ?? 2_000);
+  while (!args.predicate() && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(args.predicate(), true, `${args.label} timed out`);
+}
 const logs: string[] = [], prepared: string[] = [];
 const provider = new CodexProvider({
   version: "test", log: (...values) => logs.push(values.map(String).join(" ")), onPrepared: () => prepared.push("changed"),
@@ -158,7 +176,7 @@ const provider = new CodexProvider({
 });
 const settings: ProviderSettings = { model: "codex-cheap", effort: "low" };
 provider.prepare({ fileId: "file", dir, settings, boundary });
-while (provider.health({ settings }).status === "starting") await new Promise(resolve => setImmediate(resolve));
+await waitUntil({ predicate: () => provider.health({ settings }).status !== "starting", label: "Codex preparation" });
 assert.equal(provider.health({ settings }).status, "ready", JSON.stringify(provider.health({ settings })));
 assert.equal(clients.length, 2);
 assert.equal(clients[0].disposed, 1, "discovery process retires before isolated runtime");
@@ -266,6 +284,15 @@ assert.deepEqual(await runtime.server("item/commandExecution/requestApproval", {
 assert.deepEqual(permissionCalls.at(-1), { tool: "codex_command", input: {
   command: "ls", cwd: dir, reason: "inspect", additionalPermissions: undefined,
 } });
+const callsBeforeNetworkAmendments = permissionCalls.length;
+for (const proposedNetworkPolicyAmendments of [[{ host: "example.com" }], { enabled: true }]) {
+  assert.deepEqual(await runtime.server("item/commandExecution/requestApproval", {
+    threadId: "thread-new", turnId: "turn-new", itemId: "network-command", startedAtMs: 1, kind: "command",
+    command: "curl example.com", cwd: dir, proposedNetworkPolicyAmendments, availableDecisions: ["accept", "decline"],
+  }), { decision: "decline" });
+}
+assert.equal(permissionCalls.length, callsBeforeNetworkAmendments,
+  "network policy amendments are declined before publishing a permission card");
 const notesGrant = { fileSystem: { entries: [{ path: { type: "path", path: join(dir, "notes", "proof.txt") },
   access: "write" }] } };
 assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
@@ -281,24 +308,38 @@ assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
   reason: "deny extra grant", permissions: notesGrant,
 }), { permissions: {}, scope: "turn" }, "denial withholds only the requested extra grant");
 permissionBehavior = "allow";
-for (const write of [appRepo, join(appRepo, "new", "file"), join(appRepo, "..")]) {
+for (const write of ["./relative.txt", pathToFileURL(join(dir, "notes", "uri.txt")).href]) {
+  const grant = { fileSystem: { write: [write] } };
   assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
-    threadId: "thread-new", turnId: "turn-new", itemId: "scope", startedAtMs: 1, cwd: dir, reason: "write app",
-    permissions: { fileSystem: { write: [write] } },
-  }), { permissions: {}, scope: "turn" }, "APP_REPO and overlapping ancestor write escalation are denied");
+    threadId: "thread-new", turnId: "turn-new", itemId: "notes-relative", startedAtMs: 1,
+    cwd: join(dir, "notes"), reason: "write notes", permissions: grant,
+  }), { permissions: grant, scope: "turn" }, "relative and local-file URI writes resolve inside request cwd");
 }
-assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
-  threadId: "thread-new", turnId: "turn-new", itemId: "entry-scope", startedAtMs: 1, cwd: dir, reason: "write app",
-  permissions: { fileSystem: { entries: [{ path: { type: "path", path: appRepo }, access: "write" }] } },
-}), { permissions: {}, scope: "turn" }, "source-shaped local-path entry cannot widen APP_REPO access");
 const configuredPolicyAppRepo = runtime.args.policy.appRepo;
 for (const configuredAppRepo of [configuredPolicyAppRepo, undefined]) {
   runtime.args.policy.appRepo = configuredAppRepo;
+  for (const [cwd, write] of [
+    [dir, appRepo], [dir, join(appRepo, "new", "file")], [dir, join(appRepo, "..")],
+    [appRepo, "./relative-app.ts"], [dir, pathToFileURL(join(appRepo, "uri.ts")).href],
+    [dir, join(root, "outside.ts")],
+  ]) {
+    assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
+      threadId: "thread-new", turnId: "turn-new", itemId: "scope", startedAtMs: 1, cwd, reason: "write outside notes",
+      permissions: { fileSystem: { write: [write] } },
+    }), { permissions: {}, scope: "turn" }, "all writes outside notes are denied even without APP_REPO");
+  }
   assert.deepEqual(await runtime.server("item/permissions/requestApproval", { threadId: "thread-new", turnId: "turn-new",
     itemId: "network-scope", startedAtMs: 1, cwd: dir, reason: "network", permissions: { network: { enabled: true } } }),
   { permissions: {}, scope: "turn" }, "disabled network cannot be widened with or without APP_REPO");
 }
 runtime.args.policy.appRepo = configuredPolicyAppRepo;
+for (const permissions of [{ futureGrant: true }, { fileSystem: { write: "not-an-array" } },
+  { fileSystem: { entries: [{ access: "write", path: { type: "future", path: join(dir, "notes") } }] } }]) {
+  assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
+    threadId: "thread-new", turnId: "turn-new", itemId: "malformed-scope", startedAtMs: 1,
+    cwd: dir, reason: "unknown", permissions,
+  }), { permissions: {}, scope: "turn" }, "malformed or unknown permission grants fail closed");
+}
 runtime.notify("item/started", { threadId: "thread-new", turnId: "turn-new", item: {
   type: "fileChange", id: "patch", status: "inProgress", changes: [{ path: join(appRepo, "owned.ts"), kind: "add", diff: "+bad" }],
 } });
@@ -306,6 +347,28 @@ assert.equal(((await iterator.next()).value as { event: { name: string } }).even
 assert.deepEqual(await runtime.server("item/fileChange/requestApproval", {
   threadId: "thread-new", turnId: "turn-new", itemId: "patch", startedAtMs: 1, reason: "write",
 }), { decision: "decline" });
+runtime.args.policy.appRepo = undefined;
+runtime.notify("item/started", { threadId: "thread-new", turnId: "turn-new", item: {
+  type: "fileChange", id: "patch-without-app", status: "inProgress",
+  changes: [{ path: join(appRepo, "without-app.ts"), kind: "add", diff: "+bad" }],
+} });
+assert.equal(((await iterator.next()).value as { event: { name: string } }).event.name, "file_change");
+assert.deepEqual(await runtime.server("item/fileChange/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "patch-without-app", startedAtMs: 1, reason: "write",
+}), { decision: "decline" }, "file changes outside notes are denied without APP_REPO");
+runtime.args.policy.appRepo = configuredPolicyAppRepo;
+for (const [itemId, changes, decision] of [
+  ["notes-patch", [{ path: "notes/owned.ts", kind: { movePath: "notes/moved.ts" }, diff: "+ok" }], "accept"],
+  ["outside-patch", [{ path: join(root, "outside.ts"), kind: "add", diff: "+bad" }], "decline"],
+  ["outside-move", [{ path: "notes/owned.ts", kind: { movePath: join(appRepo, "moved.ts") }, diff: "+bad" }], "decline"],
+] as const) {
+  runtime.notify("item/started", { threadId: "thread-new", turnId: "turn-new",
+    item: { type: "fileChange", id: itemId, status: "inProgress", changes } });
+  assert.equal(((await iterator.next()).value as { event: { name: string } }).event.name, "file_change");
+  assert.deepEqual(await runtime.server("item/fileChange/requestApproval", {
+    threadId: "thread-new", turnId: "turn-new", itemId, startedAtMs: 1, reason: "write",
+  }), { decision });
+}
 
 const slow = new Promise<ToolResult>(resolve => setImmediate(() => resolve({ content: [{ type: "text", text: "Free text" }] })));
 toolGate = slow;
@@ -357,7 +420,43 @@ runtime.notify("turn/completed", { threadId: "thread-new", turnId: "turn-new",
   turn: { id: "turn-new", items: [], status: "interrupted" } });
 assert.equal(((await iterator.next()).value as { event: { outcome: string } }).event.outcome, "interrupted");
 const completed = (await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
-assert.deepEqual([completed.turnCompleted, completed.cost], [true, { usd: 0.125, status: "estimated" }]);
+assert.deepEqual([completed.turnCompleted, completed.cost], [true, { usd: 0, status: "unavailable" }],
+  "turn completion is committed before optional cost lookup");
+const completedCost = (await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
+assert.deepEqual([completedCost.turnCompleted, completedCost.cost], [false, { usd: 0.125, status: "estimated" }],
+  "delayed cost update cannot increment turns twice");
+
+const olderCost = deferred<unknown>(), newerCost = deferred<unknown>();
+runtime.responseQueues.set("account/usage/read", [olderCost.promise, newerCost.promise]);
+for (const turnId of ["cost-older", "cost-newer"]) {
+  runtime.notify("turn/started", { threadId: "thread-new", turnId,
+    turn: { id: turnId, items: [], status: "inProgress" } });
+  runtime.notify("turn/completed", { threadId: "thread-new", turnId,
+    turn: { id: turnId, items: [], status: "completed" } });
+  assert.equal(((await iterator.next()).value as { event: { type: string } }).event.type, "turn_end");
+  assert.equal(((await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>).turnCompleted, true);
+}
+newerCost.resolve({ threadUsage: { threadId: "thread-new", estimatedUsageUsdMicros: 300_000 } });
+const newestCost = (await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
+assert.deepEqual([newestCost.turnCompleted, newestCost.cost], [false, { usd: 0.3, status: "estimated" }]);
+olderCost.resolve({ threadUsage: { threadId: "thread-new", estimatedUsageUsdMicros: 100_000 } });
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(Reflect.get(session, "cost"), { usd: 0.3, status: "estimated" },
+  "older cost reply cannot regress newer completed-turn accounting");
+assert.deepEqual(Reflect.get(Reflect.get(session, "queue"), "values"), []);
+const advisoryDir = join(root, "advisory-workspace");
+mkdirSync(join(advisoryDir, "notes"), { recursive: true });
+writeFileSync(join(advisoryDir, "CLAUDE.md"), "instructions");
+provider.prepare({ fileId: "other-file", dir: advisoryDir, settings: { model: "codex-cheap", effort: "medium" }, boundary });
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual([clients.length, runtime.disposed, Reflect.get(session, "closed")], [2, 0, false],
+  "other-file advisory preparation cannot replace an active runtime");
+runtime.responses.set("thread/read", { thread: { id: "thread-new", turns: [] } });
+await provider.readHistory({ fileId: "other-file", dir: advisoryDir, sessionId: "thread-new",
+  settings: { model: "codex-cheap", effort: "medium" }, boundary, baseRecord: { ...baseRecord, sessionId: "thread-new" } });
+assert.deepEqual([clients.length, runtime.disposed, Reflect.get(session, "closed")], [2, 0, false],
+  "advisory history reuses the suitable active runtime after live settings change");
+runtime.responses.delete("thread/read");
 
 runtime.failures.set("turn/steer", new CodexRpcError(-32602, "expected turn id is stale"));
 runtime.notify("turn/started", { threadId: "thread-new", turnId: "turn-stale",
@@ -414,7 +513,7 @@ for (const unsupported of ["environments", "selectedCapabilityRoots", "allowProv
   assert.equal(unsupported in resumeParams, false);
 }
 resumed.close(); provider.dispose();
-assert.equal(runtime.disposed, 1);
+await waitUntil({ predicate: () => runtime.disposed === 1, label: "runtime disposal" });
 assert.ok(prepared.length >= 2);
 
 const retirementDir = join(root, "retirement");
@@ -430,11 +529,51 @@ const retirementProvider = new CodexProvider({ version: "test", log: () => {}, o
     retirementClients.push(client); return client;
   } });
 retirementProvider.prepare({ fileId: "retire", dir: retirementDir, settings, boundary });
-while (!retirementClients[0]?.disposed) await new Promise(resolve => setImmediate(resolve));
+await waitUntil({ predicate: () => !!retirementClients[0]?.disposed, label: "Codex discovery retirement" });
 assert.equal(retirementClients.length, 1, "isolated runtime waits for observed discovery retirement");
 retirementProvider.dispose();
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(retirementClients.length, 1, "dispose captures in-progress discovery owner");
 releaseRetirement(); await new Promise(resolve => setImmediate(resolve));
 assert.equal(retirementClients.length, 1, "superseded preparation never spawns an isolated owner");
+
+const failedRetirementDir = join(root, "failed-retirement");
+mkdirSync(join(failedRetirementDir, "notes"), { recursive: true });
+writeFileSync(join(failedRetirementDir, "CLAUDE.md"), "instructions");
+const failedRetirementClients: FakeClient[] = [];
+const failedRetirementProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, failedRetirementClients.length === 2 ? "runtime" : "discovery");
+    if (failedRetirementClients.length === 0) client.retirementGate = new Promise((_, reject) =>
+      setImmediate(() => reject(new Error("retirement rejected"))));
+    failedRetirementClients.push(client); return client;
+  } });
+failedRetirementProvider.prepare({ fileId: "failed-retirement", dir: failedRetirementDir, settings, boundary });
+await waitUntil({ predicate: () => failedRetirementProvider.health({ settings }).status === "unavailable",
+  label: "failed retirement preparation" });
+failedRetirementProvider.prepare({ fileId: "recovered-retirement", dir: failedRetirementDir, settings, boundary });
+await waitUntil({ predicate: () => failedRetirementProvider.health({ settings }).status === "ready",
+  label: "preparation after rejected retirement" });
+assert.equal(failedRetirementClients.length, 3,
+  "a rejected retirement remains visible to its caller without poisoning subsequent preparation");
+failedRetirementProvider.dispose();
+
+const terminalDir = join(root, "terminal-recovery");
+mkdirSync(join(terminalDir, "notes"), { recursive: true });
+writeFileSync(join(terminalDir, "CLAUDE.md"), "instructions");
+const terminalClients: FakeClient[] = [];
+const terminalProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, terminalClients.length % 2 === 0 ? "discovery" : "runtime");
+    terminalClients.push(client); return client;
+  } });
+terminalProvider.prepare({ fileId: "terminal", dir: terminalDir, settings, boundary });
+await waitUntil({ predicate: () => terminalProvider.health({ settings }).status === "ready", label: "terminal fixture preparation" });
+const terminalSession = await terminalProvider.start({ fileId: "terminal", dir: terminalDir, settings, boundary, baseRecord });
+terminalClients[1]!.terminate(new Error("native terminated"));
+assert.equal(terminalProvider.health({ settings }).status, "unavailable");
+const recoveredSession = await terminalProvider.start({ fileId: "terminal", dir: terminalDir, settings, boundary, baseRecord });
+assert.equal(terminalClients.length, 4, "explicit start creates a fresh discovery/runtime pair after terminal invalidation");
+assert.notEqual(recoveredSession, terminalSession);
+recoveredSession.close(); terminalProvider.dispose();
 console.log("codex session, replay, controls and accounting check ok");

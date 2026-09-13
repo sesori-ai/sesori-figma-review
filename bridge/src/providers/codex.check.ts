@@ -273,6 +273,16 @@ const exited = await connectedFixture();
 const exitPending = exited.fixtureClient.request({ method: "pending", params: {}, parse: String }); await wait();
 exited.fixture.emit("exit", 9, null);
 await assert.rejects(exitPending, /exited unexpectedly \(code 9\)/);
+const spawnFailedChild = new FakeChild();
+const spawnFailedClient = new CodexClient({
+  policy, clientVersion: "test", log: () => {}, childFactory: () => spawnFailedChild,
+});
+const spawnFailedConnect = spawnFailedClient.connect(); await wait();
+spawnFailedChild.emit("error", new Error("fixture ENOENT"));
+spawnFailedChild.emit("close", -2, null);
+await assert.rejects(spawnFailedConnect, /Codex App Server failed: fixture ENOENT/);
+await assert.doesNotReject(spawnFailedClient.disposeAndWait({ timeoutMs: 20 }),
+  "spawn error plus close retires without replacing the original failure");
 const timeoutFixture = new FakeChild((message, server) => {
   if (message.method === "initialize") server.send({
     id: message.id,

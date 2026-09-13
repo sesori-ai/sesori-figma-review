@@ -97,6 +97,9 @@ const dynamicContent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("inputImage"), imageUrl: z.string() }),
   z.object({ type: z.literal("inputAudio"), audioUrl: z.string() }),
 ]);
+const knownThreadItemTypes = new Set([
+  "userMessage", "agentMessage", "dynamicToolCall", "commandExecution", "fileChange", "mcpToolCall", "contextCompaction",
+]);
 const knownThreadItem = z.discriminatedUnion("type", [
   z.object({ type: z.literal("userMessage"), id: identifier, content: z.array(userInput) }).passthrough(),
   z.object({ type: z.literal("agentMessage"), id: identifier, text: z.string() }).passthrough(),
@@ -111,7 +114,8 @@ const knownThreadItem = z.discriminatedUnion("type", [
 ]);
 export const codexThreadItem = z.union([
   knownThreadItem,
-  z.object({ type: z.string(), id: identifier }).passthrough().transform(value => ({ type: "ignored" as const, id: value.id })),
+  z.object({ type: z.string().refine(type => !knownThreadItemTypes.has(type)), id: identifier }).passthrough()
+    .transform(value => ({ type: "ignored" as const, id: value.id })),
 ]);
 export type CodexThreadItem = z.infer<typeof codexThreadItem>;
 const turn = z.object({ id: identifier, items: z.array(codexThreadItem), status: z.enum([
