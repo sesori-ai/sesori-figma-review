@@ -240,6 +240,7 @@ class CodexSession implements ReviewSession {
   private cost: { usd: number; status: "reported" | "estimated" | "unavailable" };
   private firstInput: boolean;
   private turnStartPending = false;
+  private turnInitialSettingsObserved = false;
   private closed = false;
   private generation = 0;
   private readonly completedTurns = new Set<string>();
@@ -344,6 +345,7 @@ class CodexSession implements ReviewSession {
     return resolveCodexSettings({ qualification: this.args.qualification, settings });
   }
   private async startTurn(input: Record<string, unknown>[]) {
+    this.turnInitialSettingsObserved = false;
     this.turnStartPending = true;
     try {
       const started = await this.args.client.request({
@@ -384,12 +386,32 @@ class CodexSession implements ReviewSession {
     if (this.closed) return;
     let parsed: ReturnType<typeof parseCodexNotification>;
     try { parsed = parseCodexNotification(notification); }
-    catch (error) { this.fail(new Error(`Invalid Codex ${notification.method} notification`, { cause: error })); return; }
-    if (!parsed || parsed.params.threadId !== this.args.threadId) return;
+    catch (error) {
+      this.fail(new Error(`Invalid Codex ${notification.method} notification`, { cause: error })); this.close(); return;
+    }
+    if (!parsed) return;
+    if (parsed.params.threadId !== this.args.threadId) {
+      if (parsed.method === "thread/settings/updated") {
+        this.fail(new Error("Codex settings notification belongs to another thread")); this.close();
+      }
+      return;
+    }
     if (parsed.method === "turn/started") this.activeTurn = parsed.params.turn.id;
     if (parsed.method === "thread/settings/updated") {
       const pending = this.futureSettings, applied = parsed.params.threadSettings;
-      if (pending && applied.model === pending.model && applied.effort === pending.effort) pending.resolve();
+      if (pending) {
+        if (applied.model === pending.model && applied.effort === pending.effort && applied.serviceTier === "default") {
+          pending.resolve();
+        } else pending.reject(new CodexSettingsError("confirmation"));
+      } else if (this.turnStartPending && this.activeTurn === undefined && !this.turnInitialSettingsObserved) {
+        if (applied.model !== this.settings.model || applied.effort !== this.settings.effort
+          || applied.serviceTier !== "default") {
+          this.fail(new Error("Codex initial turn settings differ from the selected settings")); this.close(); return;
+        }
+        this.turnInitialSettingsObserved = true;
+      } else {
+        this.fail(new Error("Unexpected Codex settings notification")); this.close(); return;
+      }
     }
     if (parsed.method === "item/started" || parsed.method === "item/completed") {
       const item = parsed.params.item;

@@ -89,6 +89,8 @@ class FakeClient {
   responseQueues = new Map<string, Promise<unknown>[]>();
   failures = new Map<string, Error>();
   confirmSettings = true;
+  initialSettingsNotifications = 0;
+  nativeSettings = { model: "codex-cheap", effort: "low", serviceTier: "default" as const };
   retirementGate?: Promise<void>;
   constructor(readonly args: {
     policy: CodexExecutionPolicy;
@@ -109,8 +111,13 @@ class FakeClient {
     if (response === undefined) response = this.defaultResponse(args.method, args.params);
     if (args.method === "thread/settings/update" && this.confirmSettings) {
       const settings = args.params as { threadId: string; model: string; effort: string };
-      this.notify("thread/settings/updated", { threadId: settings.threadId,
-        threadSettings: { model: settings.model, effort: settings.effort, serviceTier: "default" } });
+      this.nativeSettings = { model: settings.model, effort: settings.effort, serviceTier: "default" };
+      this.notify("thread/settings/updated", { threadId: settings.threadId, threadSettings: this.nativeSettings });
+    }
+    if (args.method === "turn/start") {
+      const turn = args.params as { threadId: string };
+      this.initialSettingsNotifications++;
+      this.notify("thread/settings/updated", { threadId: turn.threadId, threadSettings: this.nativeSettings });
     }
     return args.parse(response);
   }
@@ -258,6 +265,9 @@ assert.equal(safeMismatch.message.includes("medium"), false, "diagnostic contain
 
 session.send({ text: "Review this", selection: [{ id: "1:2", name: "Screen", type: "FRAME" }], context: "Figma file X" });
 await new Promise(resolve => setImmediate(resolve));
+assert.equal(runtime.initialSettingsNotifications, 1,
+  "source-supported settings snapshot before turn/start response is accepted without a pending settings update");
+assert.equal(Reflect.get(session, "closed"), false);
 const firstTurn = runtime.calls.find(call => call.method === "turn/start")!;
 const firstInput = (firstTurn.params as { input: { type: string; text?: string }[] }).input;
 assert.match(firstInput[0].text!, /Review this[\s\S]*Current selection: Screen \(FRAME 1:2\)/);
@@ -414,12 +424,15 @@ const settingsUpdate = session.applySettings({ settings: { model: "codex-cheap",
   .then(() => { settingsSettled = true; });
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(settingsSettled, false, "queued thread ACK is not an applied future-settings confirmation");
+runtime.confirmSettings = true;
 runtime.notify("thread/settings/updated", { threadId: "thread-new",
   threadSettings: { model: "codex-cheap", effort: "low", serviceTier: "default" } });
-await new Promise(resolve => setImmediate(resolve)); assert.equal(settingsSettled, false, "stale settings event is ignored");
-runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
-await settingsUpdate;
+await assert.rejects(settingsUpdate,
+  error => error instanceof CodexSettingsError && error.category === "confirmation");
+assert.equal(settingsSettled, false, "incorrect explicit settings confirmation is rejected");
+assert.deepEqual(runtime.calls.slice(-2).map(call => call.method), ["thread/settings/update", "thread/settings/update"],
+  "incorrect explicit confirmation restores the last confirmed settings");
+await session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
 assert.deepEqual(runtime.calls.slice(-2).map(call => call.method), ["thread/settings/update", "turn/settings/update"]);
 const callsAfterSettings = runtime.calls.length;
 await session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
