@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -80,13 +80,14 @@ const effectiveConfig = (policy: CodexExecutionPolicy) => ({
   } },
 });
 
-type RpcArgs<T> = { method: string; params: unknown; parse: (value: unknown) => T };
+type RpcArgs<T> = { method: string; params: unknown; parse: (value: unknown) => T; waitForSlot?: boolean };
 type Call = { method: string; params: unknown };
 class FakeClient {
   calls: Call[] = [];
   disposed = 0;
   responses = new Map<string, unknown>();
   responseQueues = new Map<string, Promise<unknown>[]>();
+  ackGates = new Map<string, Promise<void>>();
   failures = new Map<string, Error>();
   confirmSettings = true;
   initialSettingsNotifications = 0;
@@ -133,14 +134,25 @@ class FakeClient {
       if (this.turnStartOrder === "response-settings-started") setImmediate(() => { settings(); started(); });
       if (this.turnStartOrder === "response-started-settings") setImmediate(() => { started(); settings(); });
     }
+    await this.ackGates.get(args.method);
     return args.parse(response);
   }
   private optionalAccountingPending = false;
+  private optionalAccountingDrain?: Promise<void>;
+  private resolveOptionalAccounting?: () => void;
   async requestOptionalAccounting<T>(args: RpcArgs<T>): Promise<T | undefined> {
-    if (this.optionalAccountingPending) return undefined;
+    if (this.optionalAccountingPending) {
+      if (!args.waitForSlot || !this.optionalAccountingDrain) return undefined;
+      await this.optionalAccountingDrain;
+      if (this.optionalAccountingPending) return undefined;
+    }
     this.optionalAccountingPending = true;
+    this.optionalAccountingDrain = new Promise(resolve => { this.resolveOptionalAccounting = resolve; });
     try { return await this.request(args); }
-    finally { this.optionalAccountingPending = false; }
+    finally {
+      this.optionalAccountingPending = false; this.resolveOptionalAccounting?.();
+      this.optionalAccountingDrain = undefined; this.resolveOptionalAccounting = undefined;
+    }
   }
   private defaultResponse(method: string, params: unknown): unknown {
     if (method === "config/read") {
@@ -212,6 +224,19 @@ async function waitUntil(args: { predicate: () => boolean; label: string; timeou
   while (!args.predicate() && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve));
   assert.equal(args.predicate(), true, `${args.label} timed out`);
 }
+const unsafeDir = join(root, "unsafe-workspace"), unsafeTarget = join(root, "unsafe-target");
+mkdirSync(unsafeDir); mkdirSync(unsafeTarget); symlinkSync(unsafeTarget, join(unsafeDir, ".agents"));
+let unsafeClients = 0, unsafeNotifications = 0;
+const unsafeProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => unsafeNotifications++,
+  clientFactory: args => { unsafeClients++; return new FakeClient(args, "discovery"); } });
+unsafeProvider.prepare({ fileId: "unsafe", dir: unsafeDir,
+  settings: { model: "codex-cheap", effort: "low" }, boundary });
+await waitUntil({ predicate: () => unsafeProvider.health({ settings: { model: "", effort: "" } }).status === "unavailable",
+  label: "unsafe workspace readiness" });
+assert.deepEqual([unsafeClients, unsafeNotifications, unsafeProvider.health({ settings: { model: "", effort: "" } }).status],
+  [0, 1, "unavailable"], "synchronous unsafe-workspace failure publishes unavailable health without spawning");
+unsafeProvider.dispose();
+
 const logs: string[] = [], prepared: string[] = [];
 const provider = new CodexProvider({
   version: "test", log: (...values) => logs.push(values.map(String).join(" ")), onPrepared: () => prepared.push("changed"),
@@ -565,11 +590,13 @@ const historyTurns = [{ id: "h1", status: "completed", items: [
   { type: "dynamicToolCall", id: "q", tool: "ask_user", arguments: { question: "Next?" }, status: "completed",
     contentItems: [{ type: "inputText", text: "Next\n[Current selection: Screen (FRAME 1:2)]" }], success: true },
   { type: "reasoning", id: "hidden", summary: ["secret"], content: ["secret"] },
-], error: null }, { id: "h2", status: "interrupted", items: [], error: null }];
+], error: null }, { id: "h2", status: "interrupted", items: [], error: null },
+{ id: "h3", status: "failed", items: [], error: null }];
 assert.deepEqual(projectCodexHistory(historyTurns as Parameters<typeof projectCodexHistory>[0]), [
   { role: "user", text: "Question" }, { role: "assistant", text: "Answer", itemId: "a" },
   { role: "tool", name: "ask_user", input: { question: "Next?" }, itemId: "q" },
   { role: "answer", text: "Next" }, { role: "tool", name: "stopped", input: {}, itemId: "h2" },
+  { role: "tool", name: "error", input: { message: "Turn failed" }, itemId: "h3" },
 ]);
 runtime.responses.set("thread/read", { thread: { id: "thread-new", turns: historyTurns } });
 runtime.responses.set("account/usage/read", { threadUsage: {
@@ -757,6 +784,43 @@ for (const order of ["settings-response-started", "response-settings-started", "
   await waitUntil({ predicate: () => reciprocal.runtime.disposed === 1, label: `${order} reciprocal retirement` });
 }
 
+const pendingStartStop = await orderingFixture("stop-pending-turn-start-ack");
+pendingStartStop.runtime.turnStartOrder = "settings-started-response";
+const startAck = deferred<void>(); pendingStartStop.runtime.ackGates.set("turn/start", startAck.promise);
+pendingStartStop.session.send({ text: "start before stop", selection: [] });
+await waitUntil({ predicate: () => Reflect.get(pendingStartStop.session, "activeTurn") === "turn-new",
+  label: "started turn before delayed start ACK" });
+await pendingStartStop.session.interrupt();
+assert.deepEqual(pendingStartStop.runtime.calls.filter(call => call.method === "turn/interrupt").map(call => call.params), [{
+  threadId: "thread-new", turnId: "turn-new",
+}], "Stop interrupts exact started turn without waiting for turn/start ACK");
+startAck.resolve();
+await waitUntil({ predicate: () => Reflect.get(pendingStartStop.session, "turnStart") === undefined,
+  label: "delayed start ACK settlement" });
+pendingStartStop.session.close(); pendingStartStop.provider.dispose();
+await waitUntil({ predicate: () => pendingStartStop.runtime.disposed === 1, label: "pending-start Stop retirement" });
+
+const pendingSteerStop = await orderingFixture("stop-pending-steer-ack");
+pendingSteerStop.runtime.turnStartOrder = "settings-response-started";
+pendingSteerStop.session.send({ text: "initial", selection: [] });
+await waitUntil({ predicate: () => Reflect.get(pendingSteerStop.session, "turnStart") === undefined,
+  label: "pending-steer initial turn" });
+const steerAck = deferred<unknown>(); pendingSteerStop.runtime.responseQueues.set("turn/steer", [steerAck.promise]);
+pendingSteerStop.session.send({ text: "held steer", selection: [] });
+await waitUntil({ predicate: () => pendingSteerStop.runtime.calls.some(call => call.method === "turn/steer"),
+  label: "held steer admission" });
+await pendingSteerStop.session.interrupt();
+assert.equal(pendingSteerStop.runtime.calls.filter(call => call.method === "turn/interrupt").length, 1,
+  "Stop bypasses pending turn/steer ACK");
+pendingSteerStop.runtime.notify("turn/completed", { threadId: "thread-new",
+  turn: { id: "turn-new", items: [], status: "interrupted" } });
+steerAck.reject(new CodexRpcError(-32602, "no active turn matches expected turn"));
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(pendingSteerStop.runtime.calls.filter(call => call.method === "turn/start").length, 1,
+  "Stop generation fences stale steer retry after interruption");
+pendingSteerStop.session.close(); pendingSteerStop.provider.dispose();
+await waitUntil({ predicate: () => pendingSteerStop.runtime.disposed === 1, label: "pending-steer Stop retirement" });
+
 const completedBeforeResponse = await orderingFixture("turn-completed-before-response");
 completedBeforeResponse.runtime.turnStartOrder = "settings-started-completed-response";
 completedBeforeResponse.session.send({ text: "fast completion", selection: [] });
@@ -803,6 +867,76 @@ assert.deepEqual([completionSteer.runtime.calls.filter(call => call.method === "
 completionSteer.session.close(); completionSteer.provider.dispose();
 await waitUntil({ predicate: () => completionSteer.runtime.disposed === 1,
   label: "completion-before-stale retry retirement" });
+
+const crossThreadCost = await orderingFixture("cross-thread-accounting");
+crossThreadCost.runtime.turnStartOrder = "settings-response-started";
+crossThreadCost.session.send({ text: "active A", selection: [] });
+await waitUntil({ predicate: () => Reflect.get(crossThreadCost.session, "turnStart") === undefined,
+  label: "cross-thread accounting active turn" });
+const historyDir = join(root, "cross-thread-history"); mkdirSync(join(historyDir, "notes"), { recursive: true });
+writeFileSync(join(historyDir, "CLAUDE.md"), "instructions");
+crossThreadCost.runtime.responses.set("thread/read", { thread: { id: "history-b", turns: [] } });
+const historyCost = deferred<unknown>(), activeCost = deferred<unknown>();
+crossThreadCost.runtime.responseQueues.set("account/usage/read", [historyCost.promise, activeCost.promise]);
+const historyRead = crossThreadCost.provider.readHistory({ fileId: "history-b", dir: historyDir, sessionId: "history-b",
+  settings, boundary, baseRecord: { ...baseRecord, sessionId: "history-b" } });
+await waitUntil({ predicate: () => crossThreadCost.runtime.calls.filter(call => call.method === "account/usage/read").length === 1,
+  label: "history B accounting request" });
+crossThreadCost.runtime.notify("turn/completed", { threadId: "thread-new",
+  turn: { id: "turn-new", items: [], status: "completed" } });
+assert.equal(((await crossThreadCost.iterator.next()).value as { event: { type: string } }).event.type, "turn_end");
+assert.equal(((await crossThreadCost.iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>).turnCompleted,
+  true, "active A completion does not wait for history B accounting");
+assert.equal(crossThreadCost.runtime.calls.filter(call => call.method === "account/usage/read").length, 1,
+  "active A cannot overlap history B wire accounting request");
+historyCost.resolve({ threadUsage: { threadId: "history-b", estimatedUsageUsdMicros: 900_000 } });
+assert.deepEqual((await historyRead).cost, { usd: 0.9, status: "estimated" });
+await waitUntil({ predicate: () => crossThreadCost.runtime.calls.filter(call => call.method === "account/usage/read").length === 2,
+  label: "trailing active A accounting request" });
+assert.deepEqual(Reflect.get(crossThreadCost.session, "cost"), { usd: 0, status: "unavailable" },
+  "history B USD cannot substitute for active A accounting");
+activeCost.resolve({ threadUsage: { threadId: "thread-new", estimatedUsageUsdMicros: 400_000 } });
+const activeCheckpoint = (await crossThreadCost.iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
+assert.deepEqual([activeCheckpoint.cost, activeCheckpoint.turnCompleted, activeCheckpoint.accountingCheckpoint],
+  [{ usd: 0.4, status: "estimated" }, false, true], "active A gets its exact trailing accounting checkpoint");
+crossThreadCost.session.close(); crossThreadCost.provider.dispose();
+await waitUntil({ predicate: () => crossThreadCost.runtime.disposed === 1, label: "cross-thread accounting retirement" });
+
+const idleSettingsClose = await orderingFixture("idle-settings-close");
+idleSettingsClose.runtime.turnStartOrder = "settings-response-started";
+idleSettingsClose.session.send({ text: "become idle", selection: [] });
+await waitUntil({ predicate: () => Reflect.get(idleSettingsClose.session, "turnStart") === undefined,
+  label: "idle-settings initial turn" });
+idleSettingsClose.runtime.notify("turn/completed", { threadId: "thread-new",
+  turn: { id: "turn-new", items: [], status: "completed" } });
+await idleSettingsClose.iterator.next(); await idleSettingsClose.iterator.next(); await idleSettingsClose.iterator.next();
+const settingsAck = deferred<unknown>(), retirement = deferred<void>();
+idleSettingsClose.runtime.responseQueues.set("thread/settings/update", [settingsAck.promise]);
+idleSettingsClose.runtime.retirementGate = retirement.promise; idleSettingsClose.runtime.confirmSettings = false;
+const pendingSettings = idleSettingsClose.session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
+await waitUntil({ predicate: () => idleSettingsClose.runtime.calls.some(call => call.method === "thread/settings/update"),
+  label: "idle pending settings RPC" });
+idleSettingsClose.session.close();
+await assert.rejects(pendingSettings, error => error instanceof CodexSettingsError && error.category === "closed");
+await waitUntil({ predicate: () => idleSettingsClose.runtime.disposed === 1, label: "idle settings retirement admission" });
+idleSettingsClose.provider.prepare({ fileId: "idle-settings-close", dir: idleSettingsClose.dir, settings, boundary });
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(idleSettingsClose.clients.length, 2, "replacement preparation waits for pending-settings runtime retirement");
+idleSettingsClose.runtime.notify("thread/settings/updated", { threadId: "thread-new",
+  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
+retirement.resolve();
+await waitUntil({ predicate: () => idleSettingsClose.clients.length === 4
+    && idleSettingsClose.provider.health({ settings }).status === "ready",
+  label: "replacement after idle settings retirement" });
+const idleReplacement = await idleSettingsClose.provider.start({ fileId: "idle-settings-close", dir: idleSettingsClose.dir,
+  settings, boundary, baseRecord });
+idleSettingsClose.runtime.notify("thread/settings/updated", { threadId: "thread-new",
+  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
+assert.equal(Reflect.get(idleReplacement, "closed"), false,
+  "late notification from retired settings runtime cannot close replacement");
+settingsAck.resolve({}); idleReplacement.close(); idleSettingsClose.provider.dispose();
+await waitUntil({ predicate: () => idleSettingsClose.clients[3]!.disposed === 1,
+  label: "idle settings replacement retirement" });
 
 const reversedStartDir = join(root, "reversed-provider-starts");
 mkdirSync(join(reversedStartDir, "notes"), { recursive: true }); writeFileSync(join(reversedStartDir, "CLAUDE.md"), "instructions");

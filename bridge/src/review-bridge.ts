@@ -375,7 +375,8 @@ export function createReviewBridge(args: {
     if (preferenceChanged && !(nativeChanged && target?.record.provider === message.provider)) {
       providers[message.provider]?.dispose();
     }
-    if (selectedChanged && (!preferenceChanged || before.provider !== message.provider)) providers[before.provider]?.dispose();
+    if (selectedChanged && target?.record.provider !== before.provider
+      && (!preferenceChanged || before.provider !== message.provider)) providers[before.provider]?.dispose();
     const activeProviderUpdated = nativeChanged && target?.record.provider === next.provider;
     if (ws.fileId && !activeProviderUpdated
       && (selectedChanged || (preferenceChanged && next.provider === message.provider))) {
@@ -484,13 +485,13 @@ export function createReviewBridge(args: {
       case "interrupt": {
         const target = conv;
         if (!target || target.fileId !== ws.fileId) return;
+        cancelRequests({ owner: target.owner, reason: "Turn stopped" });
         try { await target.session.interrupt(); }
         catch (error) {
           if (conv === target) send(target.fileId, { kind: "error", message: `Stop failed: ${error instanceof Error ? error.message : String(error)}` });
           else args.log("stale interrupt failed", error);
           return;
         }
-        cancelRequests({ owner: target.owner, reason: "Turn stopped" });
         return;
       }
       case "close":

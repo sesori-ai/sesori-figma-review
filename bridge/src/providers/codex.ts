@@ -223,8 +223,8 @@ export function projectCodexHistory(turns: { id: string; items: CodexThreadItem[
       }
     }
     if (turn.status === "interrupted") out.push({ role: "tool", name: "stopped", input: {}, itemId: turn.id });
-    if (turn.status === "failed" && turn.error?.message) {
-      out.push({ role: "tool", name: "error", input: { message: turn.error.message }, itemId: turn.id });
+    if (turn.status === "failed") {
+      out.push({ role: "tool", name: "error", input: { message: turn.error?.message ?? "Turn failed" }, itemId: turn.id });
     }
   }
   return out;
@@ -290,10 +290,11 @@ class CodexSession implements ReviewSession {
     const input: Record<string, unknown>[] = [{ type: "text", text: userText(args), textElements: [] }];
     if (this.firstInput) input.push({ type: "skill", name: "review-flow", path: this.args.skillPath });
     this.firstInput = false;
-    const settingsBarrier = this.settingsQueue;
+    const settingsBarrier = this.settingsQueue, interruptionGeneration = this.interruptionGeneration;
     const dispatch = this.sendQueue.then(async () => {
       await settingsBarrier;
       if (this.closed) throw new Error("Codex session is closed");
+      if (interruptionGeneration !== this.interruptionGeneration) return;
       const turnId = this.activeTurn;
       if (!turnId) { await this.startTurn(input); return; }
       try {
@@ -308,6 +309,7 @@ class CodexSession implements ReviewSession {
         if (!explicitStale || this.closed
           || (replacementTurn !== undefined && replacementTurn !== turnId)) throw error;
         this.activeTurn = undefined;
+        if (interruptionGeneration !== this.interruptionGeneration) return;
         await this.startTurn(input);
       }
     });
@@ -315,10 +317,17 @@ class CodexSession implements ReviewSession {
   }
 
   async interrupt() {
-    await this.sendQueue;
-    const turnId = this.activeTurn;
-    if (this.closed || !turnId) return;
     this.interruptionGeneration++;
+    let turnId = this.activeTurn;
+    const starting = this.turnStart;
+    if (!turnId && starting) {
+      try { await starting.startedEvent; } catch { return; }
+      turnId = this.activeTurn;
+    } else if (!turnId) {
+      await this.sendQueue;
+      turnId = this.activeTurn;
+    }
+    if (this.closed || !turnId) return;
     await this.args.client.request({
       method: "turn/interrupt", params: { threadId: this.args.threadId, turnId }, parse: parseEmptyResult,
     });
@@ -510,7 +519,8 @@ class CodexSession implements ReviewSession {
     let pending!: Promise<{ usd: number; status: "reported" | "estimated" | "unavailable" }>;
     pending = this.args.client.requestOptionalAccounting({ method: "account/usage/read", params: {
       threadId: this.args.threadId,
-    }, parse: parseAccountUsageResult }).then(result => result ? costFrom(result, this.cost.usd, this.args.threadId)
+    }, parse: parseAccountUsageResult, waitForSlot: true }).then(result => result
+      ? costFrom(result, this.cost.usd, this.args.threadId)
       : { usd: this.cost.usd, status: "unavailable" as const }).finally(() => {
       if (this.costRead === pending) this.costRead = undefined;
     });
@@ -646,7 +656,8 @@ class CodexSession implements ReviewSession {
   fail(error: unknown) { this.queue.finish(error); }
   close() {
     if (this.closed) return;
-    const nativeTurnPending = this.turnStart !== undefined || this.activeTurn !== undefined;
+    const nativeTurnPending = this.turnStart !== undefined || this.activeTurn !== undefined
+      || this.futureSettings !== undefined;
     const lifecycle = this.turnStart;
     this.closed = true; this.generation++; this.turnStart = undefined;
     if (lifecycle) { clearTimeout(lifecycle.timer); lifecycle.resolveStarted(); }
@@ -787,7 +798,14 @@ export class CodexProvider implements ReviewProvider {
   private ensurePrepared(args: {
     fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
   }, options: { advisory?: boolean } = {}): Promise<Prepared> {
-    provisionCodexWorkspace({ dir: args.dir });
+    try { provisionCodexWorkspace({ dir: args.dir }); }
+    catch (error) {
+      this.disposeRuntime(); this.generation++;
+      this.runtime = { status: "unavailable",
+        error: `Codex failed to prepare: ${error instanceof Error ? error.message : String(error)}` };
+      this.notify();
+      return Promise.reject(error);
+    }
     const key = JSON.stringify([args.fileId, args.dir, process.env.APP_REPO ?? "", args.settings]);
     if (this.prepared && (this.preparedKey === key || options.advisory && this.active)) return this.prepared;
     if (options.advisory && this.active) return Promise.reject(new Error("Active Codex runtime is unavailable"));
@@ -825,8 +843,12 @@ export class CodexProvider implements ReviewProvider {
     let client!: RpcClient;
     client = this.own(this.createClient({
       policy,
-      onNotification: notification => this.active?.notification(notification),
-      onRequest: request => this.active?.request(request) ?? Promise.reject(new Error("No active Codex session")),
+      onNotification: notification => {
+        if (client === this.client && args.generation === this.generation) this.active?.notification(notification);
+      },
+      onRequest: request => client === this.client && args.generation === this.generation
+        ? this.active?.request(request) ?? Promise.reject(new Error("No active Codex session"))
+        : Promise.reject(new Error("Codex request belongs to a retired runtime")),
       onTerminal: error => {
         if (client !== this.client || args.generation !== this.generation) return;
         const active = this.active; this.active = undefined;

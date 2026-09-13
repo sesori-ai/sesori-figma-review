@@ -88,6 +88,7 @@ export class CodexClient {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, Pending>();
   private optionalAccountingId?: JsonRpcId;
+  private optionalAccountingDrain?: { id: JsonRpcId; promise: Promise<void>; resolve: () => void };
   private readonly stdoutBuffer = new LineAccumulator();
   private stderrBuffer = Buffer.alloc(0);
   private terminalError?: Error;
@@ -125,10 +126,21 @@ export class CodexClient {
   }
 
   async requestOptionalAccounting<T>(args: {
-    method: "account/usage/read"; params: unknown; parse: (value: unknown) => T;
+    method: "account/usage/read"; params: unknown; parse: (value: unknown) => T; waitForSlot?: boolean;
   }): Promise<T | undefined> {
     await this.connect();
-    if (this.optionalAccountingId !== undefined) return;
+    if (this.optionalAccountingId !== undefined) {
+      if (!args.waitForSlot || !this.optionalAccountingDrain) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutMs = this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+      const available = await Promise.race([
+        this.optionalAccountingDrain.promise.then(() => true),
+        new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (!available || this.optionalAccountingId !== undefined) return;
+      if (this.terminalError) throw this.terminalError;
+    }
     return this.rawRequest(args, { optionalAccounting: true });
   }
 
@@ -178,7 +190,12 @@ export class CodexClient {
     options: { optionalAccounting?: boolean } = {}): Promise<T | undefined> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.nextId++;
-    if (options.optionalAccounting) this.optionalAccountingId = id;
+    if (options.optionalAccounting) {
+      this.optionalAccountingId = id;
+      let resolve!: () => void;
+      const promise = new Promise<void>(accept => { resolve = accept; });
+      this.optionalAccountingDrain = { id, promise, resolve };
+    }
     return new Promise<T | undefined>((resolve, reject) => {
       const timeoutMs = this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
       const timer = setTimeout(() => {
@@ -198,7 +215,7 @@ export class CodexClient {
       try { this.send({ id, method: args.method, params: args.params }); }
       catch (error) {
         clearTimeout(timer); this.pending.delete(id);
-        if (this.optionalAccountingId === id) this.optionalAccountingId = undefined;
+        this.clearOptionalAccounting(id);
         reject(error);
       }
     });
@@ -263,7 +280,7 @@ export class CodexClient {
     const pending = this.pending.get(message.id);
     if (!pending) throw new Error(`response has unknown id ${JSON.stringify(message.id)}`);
     this.pending.delete(message.id); clearTimeout(pending.timer);
-    if (this.optionalAccountingId === message.id) this.optionalAccountingId = undefined;
+    this.clearOptionalAccounting(message.id);
     if (message.error) {
       if (!pending.timedOut) pending.reject(new CodexRpcError(message.error.code, message.error.message, message.error.data));
       return;
@@ -274,6 +291,14 @@ export class CodexClient {
     } catch (error) {
       if (!pending.timedOut) pending.reject(new Error(`Invalid Codex ${pending.method} response: ${this.error(error).message}`));
     }
+  }
+
+  private clearOptionalAccounting(id: JsonRpcId) {
+    if (this.optionalAccountingId !== id) return;
+    this.optionalAccountingId = undefined;
+    const drain = this.optionalAccountingDrain;
+    this.optionalAccountingDrain = undefined;
+    if (drain?.id === id) drain.resolve();
   }
 
   private async respondToServer(request: CodexServerRequest) {
@@ -348,7 +373,8 @@ export class CodexClient {
     try { this.args.onTerminal?.(error); }
     catch (callbackError) { this.args.log("Codex terminal callback failed", callbackError); }
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
-    this.pending.clear(); this.optionalAccountingId = undefined;
+    this.pending.clear();
+    if (this.optionalAccountingId !== undefined) this.clearOptionalAccounting(this.optionalAccountingId);
     const child = this.child;
     if (!child) return;
     this.flushStderr();

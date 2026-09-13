@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DownMsg, HistoryItem, ProviderHealth, ProviderSessionRecord, ProviderSettings } from "../../shared/protocol.ts";
 import { decodeBridgeMessage } from "../../plugin/src/wire.ts";
+import { CODEX_PERMISSION_PROFILE, type CodexExecutionPolicy } from "./providers/codex-execution.ts";
+import type { CodexNotification, CodexServerRequest } from "./providers/codex-protocol.ts";
 import type { ProviderHistory, ProviderOutput, ProviderRequestBoundary, ReviewProvider, ReviewSession } from "./providers/types.ts";
 
 process.env.SESORI_REVIEW_HOME = mkdtempSync(join(tmpdir(), "review-bridge-check-"));
 const { createReviewBridge } = await import("./review-bridge.ts");
 const { readSessions, readSettings } = await import("./workspace.ts");
+const { CodexProvider } = await import("./providers/codex.ts");
 
 class OutputQueue implements AsyncIterable<ProviderOutput> {
   private values: ProviderOutput[] = [];
@@ -68,6 +71,68 @@ const deferred = <T>() => {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
+type ActualClientArgs = {
+  policy: CodexExecutionPolicy;
+  onNotification?: (notification: CodexNotification) => void;
+  onRequest?: (request: CodexServerRequest) => Promise<unknown>;
+};
+const codexConfig = (policy: CodexExecutionPolicy, runtime: boolean) => ({
+  default_permissions: CODEX_PERMISSION_PROFILE, approvals_reviewer: "user", web_search: "disabled",
+  approval_policy: { granular: { sandbox_approval: false, rules: true, mcp_elicitations: false,
+    request_permissions: true, skill_approval: false } },
+  features: { apps: false, plugins: false, multi_agent: false, remote_plugin: false, hooks: false, goals: false,
+    memories: false, web_search: false, web_search_cached: false, web_search_request: false,
+    skill_mcp_dependency_install: false, request_permissions_tool: true, step_model_switching: true },
+  agents: { enabled: false }, feedback: { enabled: false }, apps: { _default: { enabled: false } }, plugins: {},
+  mcp_servers: runtime ? { "figma-desktop": { enabled: true, url: "http://127.0.0.1:3845/mcp" } } : {},
+  permissions: { [CODEX_PERMISSION_PROFILE]: {
+    description: "Sesori Review: workspace read-only, notes write-only",
+    filesystem: { ":minimal": "read", [policy.dir]: "read", [policy.notesDir]: "write",
+      ...(policy.appRepo ? { [policy.appRepo]: "read" } : {}) },
+    network: { enabled: false },
+  } },
+});
+class ActualCodexClient {
+  calls: { method: string; params: unknown }[] = [];
+  disposed = 0;
+  constructor(readonly args: ActualClientArgs, readonly runtime: boolean) {}
+  async connect() {
+    return { userAgent: "codex_app_server/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "macos" };
+  }
+  async request<T>(args: { method: string; params: unknown; parse: (value: unknown) => T }): Promise<T> {
+    this.calls.push({ method: args.method, params: args.params });
+    const params = args.params as Record<string, unknown>;
+    let response: unknown = {};
+    if (args.method === "config/read") response = { config: codexConfig(this.args.policy, this.runtime), origins: {} };
+    if (args.method === "account/read") response = { requiresOpenaiAuth: true, account: { type: "chatgpt" } };
+    if (args.method === "model/list") response = { data: [{ id: "codex-cheap", model: "codex-cheap",
+      displayName: "Codex Cheap", hidden: false, isDefault: true, defaultReasoningEffort: "low",
+      inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low" }] }] };
+    if (args.method === "permissionProfile/list") response = { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] };
+    if (args.method === "thread/start") response = { thread: { id: "actual-thread", turns: [],
+      environments: [this.args.policy.thread.defaultEnvironment] }, model: "codex-cheap", cwd: params.cwd,
+      runtimeWorkspaceRoots: params.runtimeWorkspaceRoots, approvalsReviewer: "user",
+      approvalPolicy: this.args.policy.thread.approvalPolicy, activePermissionProfile: { id: CODEX_PERMISSION_PROFILE },
+      reasoningEffort: "low", serviceTier: "default" };
+    if (args.method === "turn/start") {
+      response = { turn: { id: `actual-turn-${this.calls.filter(call => call.method === "turn/start").length}`,
+        items: [], status: "inProgress" } };
+      const turnId = (response as { turn: { id: string } }).turn.id, threadId = String(params.threadId);
+      this.notify("thread/settings/updated", { threadId,
+        threadSettings: { model: "codex-cheap", effort: "low", serviceTier: "default" } });
+      this.notify("turn/started", { threadId, turn: { id: turnId, items: [], status: "inProgress" } });
+    }
+    if (args.method === "turn/steer") response = { turnId: params.expectedTurnId };
+    if (args.method === "account/usage/read") response = { threadUsage: null };
+    return args.parse(response);
+  }
+  requestOptionalAccounting<T>(args: { method: "account/usage/read"; params: unknown;
+    parse: (value: unknown) => T }): Promise<T | undefined> { return this.request(args); }
+  notify(method: string, params: unknown) { this.args.onNotification?.({ method, params }); }
+  dispose() { this.disposed++; }
+  disposeAndWait() { this.dispose(); return Promise.resolve(); }
+}
+
 class FakeProvider implements ReviewProvider {
   prepareCount = 0;
   readonly startCalls = new ObservedCalls();
@@ -239,13 +304,14 @@ assert.deepEqual(currentSession.sent, ["prompt-current", "steer"]);
 const heldTool = claude.starts[2].boundary.tool({ tool: "focus", args: { nodeId: "1:2" } });
 const heldCard = await fresh.next(message => message.kind === "tool");
 const rejectedStop = deferred<void>(); currentSession.interruptGate = rejectedStop.promise;
-fresh.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 1 }); rejectedStop.reject(new Error("interrupt rejected"));
+fresh.send({ kind: "interrupt" }); await currentSession.interruptCalls.waitFor({ count: 1 });
+assert.equal((await fresh.next(message => message.kind === "cancel_request")).id, heldCard.id,
+  "Stop revokes pending cards before native interrupt settles");
+assert.equal((await heldTool).isError, true);
+rejectedStop.reject(new Error("interrupt rejected"));
 assert.match((await fresh.next(message => message.kind === "error")).message, /Stop failed: interrupt rejected/);
-assert.deepEqual(fresh.matching(message => message.kind === "cancel_request"), []);
 currentSession.interruptGate = undefined; fresh.send({ kind: "interrupt" });
 await currentSession.interruptSuccesses.waitFor({ count: 1 });
-assert.equal((await fresh.next(message => message.kind === "cancel_request")).id, heldCard.id);
-assert.equal((await heldTool).isError, true);
 
 currentSession.output.push(usage(10, 5, "estimated"));
 assert.deepEqual((await fresh.next(down({ kind: "session", where: message => message.session.usage.input === 10 && message.session.turns === 0 }))).session,
@@ -498,7 +564,46 @@ assert.deepEqual([racedHistory.attached, racedHistory.session.turns, racedHistor
 "history revalidates attachment and merges cost into latest completed-turn record");
 assert.deepEqual(readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]?.usage,
   { input: 6, output: 7, cacheRead: 1, cacheWrite: 0 });
+
 codexSession.output.reject(new Error("fixture complete")); codexClient.close(); await codexApp.shutdown();
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ provider: "codex",
+  providers: { claude: { model: "", effort: "" }, codex: { model: "codex-cheap", effort: "low" } } }));
+const actualClients: ActualCodexClient[] = [];
+let actualCodex!: InstanceType<typeof CodexProvider>;
+const defaultClaude = new FakeProvider("claude");
+const actualApp = createReviewBridge({ version: "test", port: 0, log: () => {}, createProviders: ({ onChanged }) => {
+  actualCodex = new CodexProvider({ version: "test", log: () => {}, onPrepared: onChanged,
+    clientFactory: args => { const client = new ActualCodexClient(args, actualClients.length % 2 === 1);
+      actualClients.push(client); return client; } });
+  return { claude: defaultClaude, codex: actualCodex };
+} });
+const actualClient = await new Client(await actualApp.listening).opened();
+actualClient.send({ kind: "hello", protocolVersion: 3, fileId: "actual-codex", fileName: "Actual Codex" });
+await actualClient.next(message => message.kind === "connection"); await actualClient.next(message => message.kind === "health");
+actualClient.send(startMessage("actual-codex-start", "actual-codex"));
+await actualClient.next(down({ kind: "started", where: message => message.session.provider === "codex" }));
+assert.equal(actualClients.length, 2); const actualRuntime = actualClients[1]!;
+actualRuntime.notify("turn/completed", { threadId: "actual-thread",
+  turn: { id: "actual-turn-1", items: [], status: "completed", error: null } });
+await actualClient.next(down({ kind: "busy", where: message => !message.busy }));
+actualClient.send({ kind: "settings", requestId: "future-claude", provider: "claude",
+  settings: { model: "", effort: "" }, selectedProvider: "claude" });
+await actualClient.next(down({ kind: "health", where: message => message.health.settingsResult?.requestId === "future-claude" }));
+const attachedActual = Reflect.get(actualCodex, "active") as { close: () => void } | undefined;
+assert.ok(attachedActual, "default-provider switch preserves actual CodexProvider attached session");
+assert.equal(actualRuntime.disposed, 0, "default-provider switch cannot retire attached Codex runtime");
+actualClient.send({ kind: "user", text: "still attached", selection: [] });
+await actualClient.next(down({ kind: "busy", where: message => message.busy }));
+const reuseDeadline = Date.now() + 2_000;
+while (actualRuntime.calls.filter(call => call.method === "turn/start").length < 2 && Date.now() < reuseDeadline) {
+  await new Promise(resolve => setImmediate(resolve));
+}
+assert.equal(actualRuntime.calls.filter(call => call.method === "turn/start").length, 2,
+  "preserved Codex session remains usable after future default changes to Claude");
+actualClient.close(); await actualApp.shutdown();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(actualRuntime.disposed, 1, "bridge shutdown eventually retires preserved actual Codex runtime");
+
 const transportApp = createReviewBridge({ version: "test", port: 0, log: () => {},
   createProviders: () => ({ claude: undefined, codex: undefined }) });
 const transportClient = await new Client(await transportApp.listening).opened();

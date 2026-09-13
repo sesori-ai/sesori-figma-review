@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the owned turn-start lifecycle across native response/event ordering. Delayed accounting also refreshes History rows.
 - Codex serializes settings and sends through the owned turn-start event barrier, fences superseded starts and interrupted
   question batches, preserves early turn completion, retries explicit stale steering after normal completion, and coalesces
-  per-session optional accounting so fast completions retain the latest valid checkpoint without extra native reads.
+  accounting across active/history threads without overlapping native reads. Stop bypasses pending start/steer ACKs.
+- Codex preserves attached sessions when future provider defaults change, retires pending settings work before replacement,
+  publishes synchronous unsafe-workspace preparation failures, and retains failed replay turns without native error text.
 
 ## [0.3.2]
 
