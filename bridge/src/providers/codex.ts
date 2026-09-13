@@ -216,7 +216,8 @@ export function projectCodexHistory(turns: { id: string; items: CodexThreadItem[
       const tool = itemToolName(item);
       if (tool) out.push({ role: "tool", name: tool, input: itemInput(item), itemId: item.id });
       if (item.type === "dynamicToolCall" && item.tool === "ask_user") {
-        const answer = item.contentItems?.flatMap(content => content.type === "inputText" ? [content.text] : []).join("\n").trim();
+        const answer = stripUserContext(item.contentItems
+          ?.flatMap(content => content.type === "inputText" ? [content.text] : []).join("\n") ?? "");
         if (answer) out.push({ role: "answer", text: answer });
       }
     }
@@ -227,6 +228,10 @@ export function projectCodexHistory(turns: { id: string; items: CodexThreadItem[
   }
   return out;
 }
+
+type TurnStartLifecycle = {
+  responseSettled: boolean; started: boolean; settingsObserved: boolean; turnId?: string; model: string; effort: string;
+};
 
 class CodexSession implements ReviewSession {
   readonly provider = "codex" as const;
@@ -239,8 +244,7 @@ class CodexSession implements ReviewSession {
   private usage: Usage;
   private cost: { usd: number; status: "reported" | "estimated" | "unavailable" };
   private firstInput: boolean;
-  private turnStartPending = false;
-  private turnInitialSettingsObserved = false;
+  private turnStart?: TurnStartLifecycle;
   private closed = false;
   private generation = 0;
   private readonly completedTurns = new Set<string>();
@@ -297,7 +301,7 @@ class CodexSession implements ReviewSession {
         await this.startTurn(input);
       }
     });
-    this.sendQueue = dispatch.catch(error => this.fail(error));
+    this.sendQueue = dispatch.catch(error => { this.fail(error); this.close(); });
   }
 
   async interrupt() {
@@ -345,17 +349,20 @@ class CodexSession implements ReviewSession {
     return resolveCodexSettings({ qualification: this.args.qualification, settings });
   }
   private async startTurn(input: Record<string, unknown>[]) {
-    this.turnInitialSettingsObserved = false;
-    this.turnStartPending = true;
-    try {
-      const started = await this.args.client.request({
-        method: "turn/start", params: {
-          threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
-        }, parse: parseTurnStartResult,
-      });
-      if (this.closed) throw new Error("Codex session is closed");
-      this.activeTurn = started.turn.id;
-    } finally { this.turnStartPending = false; }
+    if (this.turnStart) throw new Error("Codex turn start is already pending");
+    const lifecycle: TurnStartLifecycle = this.turnStart = { responseSettled: false, started: false, settingsObserved: false,
+      model: this.settings.model, effort: this.settings.effort };
+    const started = await this.args.client.request({
+      method: "turn/start", params: {
+        threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
+      }, parse: parseTurnStartResult,
+    });
+    if (this.closed) throw new Error("Codex session is closed");
+    if (lifecycle.turnId && lifecycle.turnId !== started.turn.id) {
+      throw new Error("Codex turn start response does not match the started turn");
+    }
+    lifecycle.turnId = started.turn.id; lifecycle.responseSettled = true; this.activeTurn = started.turn.id;
+    if (lifecycle.started && this.turnStart === lifecycle) this.turnStart = undefined;
   }
   private async updateFuture(settings: ProviderSettings) {
     if (this.futureSettings) throw new Error("Codex future settings update is already pending");
@@ -396,19 +403,29 @@ class CodexSession implements ReviewSession {
       }
       return;
     }
-    if (parsed.method === "turn/started") this.activeTurn = parsed.params.turn.id;
+    if (parsed.method === "turn/started") {
+      const lifecycle = this.turnStart;
+      if (lifecycle) {
+        if (lifecycle.turnId && lifecycle.turnId !== parsed.params.turn.id) {
+          this.fail(new Error("Codex started a different turn than requested")); this.close(); return;
+        }
+        lifecycle.turnId = parsed.params.turn.id; lifecycle.started = true;
+        if (lifecycle.responseSettled && this.turnStart === lifecycle) this.turnStart = undefined;
+      }
+      this.activeTurn = parsed.params.turn.id;
+    }
     if (parsed.method === "thread/settings/updated") {
-      const pending = this.futureSettings, applied = parsed.params.threadSettings;
-      if (pending) {
-        if (applied.model === pending.model && applied.effort === pending.effort && applied.serviceTier === "default") {
-          pending.resolve();
-        } else pending.reject(new CodexSettingsError("confirmation"));
-      } else if (this.turnStartPending && this.activeTurn === undefined && !this.turnInitialSettingsObserved) {
-        if (applied.model !== this.settings.model || applied.effort !== this.settings.effort
+      const lifecycle = this.turnStart, pending = this.futureSettings, applied = parsed.params.threadSettings;
+      if (lifecycle && !lifecycle.started && !lifecycle.settingsObserved) {
+        if (applied.model !== lifecycle.model || applied.effort !== lifecycle.effort
           || applied.serviceTier !== "default") {
           this.fail(new Error("Codex initial turn settings differ from the selected settings")); this.close(); return;
         }
-        this.turnInitialSettingsObserved = true;
+        lifecycle.settingsObserved = true;
+      } else if (pending) {
+        if (applied.model === pending.model && applied.effort === pending.effort && applied.serviceTier === "default") {
+          pending.resolve();
+        } else pending.reject(new CodexSettingsError("confirmation"));
       } else {
         this.fail(new Error("Unexpected Codex settings notification")); this.close(); return;
       }
@@ -589,8 +606,8 @@ class CodexSession implements ReviewSession {
   fail(error: unknown) { this.queue.finish(error); }
   close() {
     if (this.closed) return;
-    const nativeTurnPending = this.turnStartPending || this.activeTurn !== undefined;
-    this.closed = true; this.generation++;
+    const nativeTurnPending = this.turnStart !== undefined || this.activeTurn !== undefined;
+    this.closed = true; this.generation++; this.turnStart = undefined;
     this.futureSettings?.reject(new CodexSettingsError("closed"));
     this.args.onClose(this, nativeTurnPending); this.queue.finish();
   }

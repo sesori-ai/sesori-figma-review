@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Codex approvals now confine writes to notes and reject network escalation; session preparation, history, accounting, terminal recovery,
   malformed items, spawn retirement, latched retirement uncertainty, and startup warnings remain safe across races and invalid inputs.
 - Codex now honors native catalog defaults, rejects one-shot network and snake-case move escapes, persists delayed cost checkpoints,
-  preserves newer unavailable-cost history, retires runtimes when active turns close, and accepts exact turn-start settings snapshots.
+  preserves newer unavailable-cost history, strips replay-only selection metadata, retires failed sends, and binds exact settings snapshots
+  to the owned turn-start lifecycle across native response/event ordering.
 
 ## [0.3.2]
 
