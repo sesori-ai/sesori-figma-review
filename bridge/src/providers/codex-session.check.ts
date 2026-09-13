@@ -534,6 +534,9 @@ runtime.notify("turn/started", { threadId: "thread-new", turnId: "turn-stale",
   turn: { id: "turn-stale", items: [], status: "inProgress" } });
 session.send({ text: "Race", selection: [] }); await new Promise(resolve => setImmediate(resolve));
 assert.equal(runtime.calls.at(-1)?.method, "turn/start", "explicit stale steer retries once as a new turn");
+runtime.notify("turn/started", { threadId: "thread-new",
+  turn: { id: "turn-new", items: [], status: "inProgress" } });
+await waitUntil({ predicate: () => Reflect.get(session, "turnStart") === undefined, label: "stale retry start event" });
 
 runtime.confirmSettings = false;
 const closingSettings = session.applySettings({ settings: { model: "codex-cheap", effort: "low" } });
@@ -692,11 +695,11 @@ assert.deepEqual([pendingCloseClients.length, Reflect.get(pendingCloseSession, "
 pendingCloseProvider.dispose();
 
 type TurnStartOrder = FakeClient["turnStartOrder"];
-async function orderingFixture(label: string) {
+async function orderingFixture(label: string, options: { turnStartEventTimeoutMs?: number } = {}) {
   const fixtureDir = join(root, label); mkdirSync(join(fixtureDir, "notes"), { recursive: true });
   writeFileSync(join(fixtureDir, "CLAUDE.md"), "instructions");
   const fixtureClients: FakeClient[] = [];
-  const fixtureProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  const fixtureProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {}, ...options,
     clientFactory: args => { const client = new FakeClient(args, fixtureClients.length % 2 === 0 ? "discovery" : "runtime");
       fixtureClients.push(client); return client; } });
   fixtureProvider.prepare({ fileId: label, dir: fixtureDir, settings, boundary });
@@ -726,23 +729,26 @@ assert.equal(Reflect.get(rapidSettings.session, "closed"), false,
 rapidSettings.session.close(); rapidSettings.provider.dispose();
 await waitUntil({ predicate: () => rapidSettings.runtime.disposed === 1, label: "rapid settings retirement" });
 
-const reciprocal = await orderingFixture("send-settings-interleave");
-reciprocal.runtime.turnStartOrder = "settings-started-response";
-const reciprocalStart = deferred<unknown>(); reciprocal.runtime.responseQueues.set("turn/start", [reciprocalStart.promise]);
-reciprocal.session.send({ text: "before settings", selection: [] });
-await waitUntil({ predicate: () => reciprocal.runtime.calls.some(call => call.method === "turn/start"),
-  label: "reciprocal turn request" });
-const reciprocalUpdate = reciprocal.session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
-await new Promise(resolve => setImmediate(resolve));
-assert.equal(reciprocal.runtime.calls.some(call => call.method === "thread/settings/update"), false,
-  "settings admitted after send waits for the owned turn start");
-reciprocalStart.resolve({ turn: { id: "turn-new", items: [], status: "inProgress" } });
-await reciprocalUpdate;
-assert.deepEqual(reciprocal.runtime.calls.filter(call =>
-  ["turn/start", "thread/settings/update", "turn/settings/update"].includes(call.method)).map(call => call.method),
-["turn/start", "thread/settings/update", "turn/settings/update"]);
-reciprocal.session.close(); reciprocal.provider.dispose();
-await waitUntil({ predicate: () => reciprocal.runtime.disposed === 1, label: "reciprocal retirement" });
+for (const order of ["settings-response-started", "response-settings-started", "settings-started-response"] as const) {
+  const reciprocal = await orderingFixture(`send-settings-interleave-${order}`);
+  reciprocal.runtime.turnStartOrder = order;
+  const reciprocalStart = deferred<unknown>(); reciprocal.runtime.responseQueues.set("turn/start", [reciprocalStart.promise]);
+  reciprocal.session.send({ text: "before settings", selection: [] });
+  await waitUntil({ predicate: () => reciprocal.runtime.calls.some(call => call.method === "turn/start"),
+    label: `${order} reciprocal turn request` });
+  const reciprocalUpdate = reciprocal.session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reciprocal.runtime.calls.some(call => call.method === "thread/settings/update"), false,
+    `${order} settings admitted after send wait for complete owned turn-start lifecycle`);
+  reciprocalStart.resolve({ turn: { id: "turn-new", items: [], status: "inProgress" } });
+  await reciprocalUpdate;
+  assert.deepEqual(reciprocal.runtime.calls.filter(call =>
+    ["turn/start", "thread/settings/update", "turn/settings/update"].includes(call.method)).map(call => call.method),
+  ["turn/start", "thread/settings/update", "turn/settings/update"], `${order} preserves reciprocal operation order`);
+  assert.equal(Reflect.get(reciprocal.session, "closed"), false);
+  reciprocal.session.close(); reciprocal.provider.dispose();
+  await waitUntil({ predicate: () => reciprocal.runtime.disposed === 1, label: `${order} reciprocal retirement` });
+}
 
 const completedBeforeResponse = await orderingFixture("turn-completed-before-response");
 completedBeforeResponse.runtime.turnStartOrder = "settings-started-completed-response";
@@ -850,18 +856,20 @@ initialCannotConfirm.runtime.turnStartOrder = "none";
 initialCannotConfirm.session.send({ text: "start", selection: [] });
 await waitUntil({ predicate: () => Reflect.get(initialCannotConfirm.session, "turnStart") !== undefined,
   label: "initial-not-confirm lifecycle" });
-initialCannotConfirm.runtime.confirmSettings = false;
 const concurrentSettings = initialCannotConfirm.session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
-await waitUntil({ predicate: () => initialCannotConfirm.runtime.calls.some(call => call.method === "thread/settings/update"),
-  label: "concurrent explicit settings request" });
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(initialCannotConfirm.runtime.calls.some(call => call.method === "thread/settings/update"), false,
+  "explicit settings cannot enter the initial-snapshot window");
 initialCannotConfirm.runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
-await assert.rejects(concurrentSettings, error => error instanceof CodexSettingsError && error.category === "closed",
-  "turn-start snapshot cannot satisfy a concurrent explicit settings confirmation");
-await assert.rejects(initialCannotConfirm.iterator.next(), /initial turn settings differ/);
+  threadSettings: { model: "codex-cheap", effort: "low", serviceTier: "default" } });
+initialCannotConfirm.runtime.notify("turn/started", { threadId: "thread-new",
+  turn: { id: "turn-new", items: [], status: "inProgress" } });
+await concurrentSettings;
+assert.deepEqual(Reflect.get(initialCannotConfirm.session, "settings"), { model: "codex-cheap", effort: "medium" },
+  "initial snapshot and later explicit confirmation remain distinct");
+initialCannotConfirm.session.close(); initialCannotConfirm.provider.dispose();
 await waitUntil({ predicate: () => initialCannotConfirm.runtime.disposed === 1,
   label: "initial-not-confirm retirement" });
-initialCannotConfirm.provider.dispose();
 const failedStart = await orderingFixture("failed-turn-start");
 const failedStartError = new Error("turn start failed"); failedStart.runtime.failures.set("turn/start", failedStartError);
 const failedStartOutput = failedStart.iterator.next(); failedStart.session.send({ text: "fail", selection: [] });
@@ -870,6 +878,14 @@ await waitUntil({ predicate: () => failedStart.runtime.disposed === 1, label: "f
 failedStart.runtime.notify("thread/settings/updated", { threadId: "thread-new", threadSettings: validInitialSettings });
 assert.equal(Reflect.get(failedStart.session, "closed"), true, "failed/closed start cannot admit a late initial snapshot");
 failedStart.provider.dispose();
+const missingStarted = await orderingFixture("missing-turn-started", { turnStartEventTimeoutMs: 5 });
+missingStarted.runtime.turnStartOrder = "settings-before-response";
+const missingStartedOutput = missingStarted.iterator.next(); missingStarted.session.send({ text: "missing event", selection: [] });
+await assert.rejects(missingStartedOutput, /turn start event timed out after 5ms/,
+  "missing native turn/started event fails within the bounded lifecycle window");
+await waitUntil({ predicate: () => missingStarted.runtime.disposed === 1, label: "missing event retirement" });
+assert.equal(Reflect.get(missingStarted.session, "closed"), true);
+missingStarted.provider.dispose();
 
 const sendFailure = await orderingFixture("queued-send-failure");
 sendFailure.runtime.turnStartOrder = "response-settings-started";

@@ -26,6 +26,7 @@ const SYSTEM = `You are a senior product designer and front-end lead reviewing a
 canvas while you talk. Focus each node before discussing it, cover one screen per message, keep chat brief, put
 implementation detail in annotations, and ask the user instead of guessing.`;
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+const TURN_START_EVENT_TIMEOUT_MS = 10_000;
 const containedBy = (parent: string, child: string) => {
   const path = relative(parent, child);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
@@ -231,7 +232,8 @@ export function projectCodexHistory(turns: { id: string; items: CodexThreadItem[
 
 type TurnStartLifecycle = {
   responseSettled: boolean; started: boolean; completed: boolean; settingsObserved: boolean;
-  turnId?: string; model: string; effort: string;
+  turnId?: string; model: string; effort: string; startedEvent: Promise<void>;
+  resolveStarted: () => void; rejectStarted: (error: Error) => void; timer: ReturnType<typeof setTimeout>;
 };
 
 class CodexSession implements ReviewSession {
@@ -269,6 +271,7 @@ class CodexSession implements ReviewSession {
     baseRecord: ProviderSessionRecord;
     health: ProviderHealth;
     onClose: (session: CodexSession, nativeTurnPending: boolean) => void;
+    turnStartEventTimeoutMs?: number;
     log: (...values: unknown[]) => void;
   }) {
     this.output = this.queue;
@@ -357,22 +360,34 @@ class CodexSession implements ReviewSession {
   }
   private async startTurn(input: Record<string, unknown>[]) {
     if (this.turnStart) throw new Error("Codex turn start is already pending");
+    let resolveStarted!: () => void, rejectStarted!: (error: Error) => void;
+    const startedEvent = new Promise<void>((resolve, reject) => { resolveStarted = resolve; rejectStarted = reject; });
+    void startedEvent.catch(() => {});
+    const timeoutMs = this.args.turnStartEventTimeoutMs ?? TURN_START_EVENT_TIMEOUT_MS;
+    const timer = setTimeout(() => rejectStarted(new Error(`Codex turn start event timed out after ${timeoutMs}ms`)), timeoutMs);
     const lifecycle: TurnStartLifecycle = this.turnStart = {
       responseSettled: false, started: false, completed: false, settingsObserved: false,
-      model: this.settings.model, effort: this.settings.effort,
+      model: this.settings.model, effort: this.settings.effort, startedEvent, resolveStarted, rejectStarted, timer,
     };
-    const started = await this.args.client.request({
-      method: "turn/start", params: {
-        threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
-      }, parse: parseTurnStartResult,
-    });
-    if (this.closed) throw new Error("Codex session is closed");
-    if (lifecycle.turnId && lifecycle.turnId !== started.turn.id) {
-      throw new Error("Codex turn start response does not match the started turn");
+    try {
+      const started = await this.args.client.request({
+        method: "turn/start", params: {
+          threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
+        }, parse: parseTurnStartResult,
+      });
+      if (this.closed) throw new Error("Codex session is closed");
+      if (lifecycle.turnId && lifecycle.turnId !== started.turn.id) {
+        throw new Error("Codex turn start response does not match the started turn");
+      }
+      lifecycle.turnId = started.turn.id; lifecycle.responseSettled = true;
+      if (!lifecycle.completed) this.activeTurn = started.turn.id;
+      if (lifecycle.started && this.turnStart === lifecycle) this.turnStart = undefined;
+      await startedEvent;
+      if (this.closed) throw new Error("Codex session is closed");
+    } finally {
+      clearTimeout(timer); resolveStarted();
+      if (lifecycle.responseSettled && lifecycle.started && this.turnStart === lifecycle) this.turnStart = undefined;
     }
-    lifecycle.turnId = started.turn.id; lifecycle.responseSettled = true;
-    if (!lifecycle.completed) this.activeTurn = started.turn.id;
-    if (lifecycle.started && this.turnStart === lifecycle) this.turnStart = undefined;
   }
   private async updateFuture(settings: ProviderSettings) {
     if (this.futureSettings) throw new Error("Codex future settings update is already pending");
@@ -419,7 +434,7 @@ class CodexSession implements ReviewSession {
         if (lifecycle.turnId && lifecycle.turnId !== parsed.params.turn.id) {
           this.fail(new Error("Codex started a different turn than requested")); this.close(); return;
         }
-        lifecycle.turnId = parsed.params.turn.id; lifecycle.started = true;
+        lifecycle.turnId = parsed.params.turn.id; lifecycle.started = true; lifecycle.resolveStarted();
         if (lifecycle.responseSettled && this.turnStart === lifecycle) this.turnStart = undefined;
       }
       this.activeTurn = parsed.params.turn.id;
@@ -624,7 +639,9 @@ class CodexSession implements ReviewSession {
   close() {
     if (this.closed) return;
     const nativeTurnPending = this.turnStart !== undefined || this.activeTurn !== undefined;
+    const lifecycle = this.turnStart;
     this.closed = true; this.generation++; this.turnStart = undefined;
+    if (lifecycle) { clearTimeout(lifecycle.timer); lifecycle.resolveStarted(); }
     this.futureSettings?.reject(new CodexSettingsError("closed"));
     this.args.onClose(this, nativeTurnPending); this.queue.finish();
   }
@@ -652,6 +669,7 @@ export class CodexProvider implements ReviewProvider {
     command?: string;
     childFactory?: CodexChildFactory;
     clientFactory?: ClientFactory;
+    turnStartEventTimeoutMs?: number;
   }) {
     this.createClient = args.clientFactory ?? (clientArgs => new CodexClient({
       ...clientArgs, clientVersion: args.version, childFactory: args.childFactory, log: args.log,
@@ -722,7 +740,8 @@ export class CodexProvider implements ReviewProvider {
       client: prepared.client, policy: prepared.policy, qualification: prepared.qualification,
       threadId: result.thread.id, model: result.model, effort: result.reasoningEffort ?? selected.effort,
       fresh: !args.resume, skillPath: scaffold.skillPath, boundary: args.boundary, baseRecord: args.baseRecord, health,
-      onClose: (target, nativeTurnPending) => this.sessionClosed(target, nativeTurnPending), log: this.args.log,
+      onClose: (target, nativeTurnPending) => this.sessionClosed(target, nativeTurnPending),
+      turnStartEventTimeoutMs: this.args.turnStartEventTimeoutMs, log: this.args.log,
     });
     if (startSequence !== this.startSequence) {
       session.close();
