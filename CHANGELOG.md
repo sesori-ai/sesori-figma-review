@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preserves newer unavailable-cost history, strips replay-only selection metadata, retires failed sends, and binds exact settings snapshots
   to the owned turn-start lifecycle across native response/event ordering. Delayed accounting also refreshes History rows.
 - Codex serializes settings and sends through the owned turn-start event barrier, fences superseded starts and interrupted
-  question batches, preserves early turn completion, and treats timed-out optional accounting as unavailable without terminating later work.
+  question batches, preserves early turn completion, retries explicit stale steering after normal completion, and coalesces
+  per-session optional accounting so fast completions retain the latest valid checkpoint without extra native reads.
 
 ## [0.3.2]
 

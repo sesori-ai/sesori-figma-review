@@ -253,6 +253,7 @@ class CodexSession implements ReviewSession {
   private interruptionGeneration = 0;
   private readonly completedTurns = new Set<string>();
   private costReadSequence = 0;
+  private costRead?: Promise<{ usd: number; status: "reported" | "estimated" | "unavailable" }>;
   private readonly changes = new Map<string, unknown[]>();
   private futureSettings?: {
     model: string; effort: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>;
@@ -303,7 +304,9 @@ class CodexSession implements ReviewSession {
       } catch (error) {
         const explicitStale = error instanceof CodexRpcError
           && /stale|no (?:matching |)active turn|does not match|target.*unavailable/i.test(error.message);
-        if (!explicitStale || this.activeTurn !== turnId) throw error;
+        const replacementTurn = this.activeTurn;
+        if (!explicitStale || this.closed
+          || (replacementTurn !== undefined && replacementTurn !== turnId)) throw error;
         this.activeTurn = undefined;
         await this.startTurn(input);
       }
@@ -502,12 +505,17 @@ class CodexSession implements ReviewSession {
         accountingCheckpoint: true });
     });
   }
-  private async readCost() {
-    const result = await this.args.client.requestOptionalAccounting({ method: "account/usage/read", params: {
+  private readCost() {
+    if (this.costRead) return this.costRead;
+    let pending!: Promise<{ usd: number; status: "reported" | "estimated" | "unavailable" }>;
+    pending = this.args.client.requestOptionalAccounting({ method: "account/usage/read", params: {
       threadId: this.args.threadId,
-    }, parse: parseAccountUsageResult });
-    return result ? costFrom(result, this.cost.usd, this.args.threadId)
-      : { usd: this.cost.usd, status: "unavailable" as const };
+    }, parse: parseAccountUsageResult }).then(result => result ? costFrom(result, this.cost.usd, this.args.threadId)
+      : { usd: this.cost.usd, status: "unavailable" as const }).finally(() => {
+      if (this.costRead === pending) this.costRead = undefined;
+    });
+    this.costRead = pending;
+    return pending;
   }
 
   async request(request: CodexServerRequest): Promise<unknown> {

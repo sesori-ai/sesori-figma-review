@@ -135,7 +135,13 @@ class FakeClient {
     }
     return args.parse(response);
   }
-  requestOptionalAccounting<T>(args: RpcArgs<T>): Promise<T | undefined> { return this.request(args); }
+  private optionalAccountingPending = false;
+  async requestOptionalAccounting<T>(args: RpcArgs<T>): Promise<T | undefined> {
+    if (this.optionalAccountingPending) return undefined;
+    this.optionalAccountingPending = true;
+    try { return await this.request(args); }
+    finally { this.optionalAccountingPending = false; }
+  }
   private defaultResponse(method: string, params: unknown): unknown {
     if (method === "config/read") {
       const config = effectiveConfig(this.args.policy);
@@ -496,8 +502,9 @@ const completedCost = (await iterator.next()).value as Extract<ProviderOutput, {
 assert.deepEqual([completedCost.turnCompleted, completedCost.cost, completedCost.accountingCheckpoint],
   [false, { usd: 0.125, status: "estimated" }, true], "delayed cost checkpoint cannot increment turns twice");
 
-const olderCost = deferred<unknown>(), newerCost = deferred<unknown>();
-runtime.responseQueues.set("account/usage/read", [olderCost.promise, newerCost.promise]);
+const coalescedCost = deferred<unknown>();
+const costCallsBeforeCoalescing = runtime.calls.filter(call => call.method === "account/usage/read").length;
+runtime.responseQueues.set("account/usage/read", [coalescedCost.promise]);
 for (const turnId of ["cost-older", "cost-newer"]) {
   runtime.notify("turn/started", { threadId: "thread-new", turnId,
     turn: { id: turnId, items: [], status: "inProgress" } });
@@ -506,15 +513,15 @@ for (const turnId of ["cost-older", "cost-newer"]) {
   assert.equal(((await iterator.next()).value as { event: { type: string } }).event.type, "turn_end");
   assert.equal(((await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>).turnCompleted, true);
 }
-newerCost.resolve({ threadUsage: { threadId: "thread-new", estimatedUsageUsdMicros: 300_000 } });
+assert.equal(runtime.calls.filter(call => call.method === "account/usage/read").length, costCallsBeforeCoalescing + 1,
+  "fast completions share the session's one optional-accounting request");
+coalescedCost.resolve({ threadUsage: { threadId: "thread-new", estimatedUsageUsdMicros: 300_000 } });
 const newestCost = (await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
 assert.deepEqual([newestCost.turnCompleted, newestCost.cost, newestCost.accountingCheckpoint],
-  [false, { usd: 0.3, status: "estimated" }, true]);
-olderCost.resolve({ threadUsage: { threadId: "thread-new", estimatedUsageUsdMicros: 100_000 } });
+  [false, { usd: 0.3, status: "estimated" }, true], "latest completion consumes the shared valid accounting reply");
 await new Promise(resolve => setImmediate(resolve));
-assert.deepEqual(Reflect.get(session, "cost"), { usd: 0.3, status: "estimated" },
-  "older cost reply cannot regress newer completed-turn accounting");
-assert.deepEqual(Reflect.get(Reflect.get(session, "queue"), "values"), []);
+assert.deepEqual([Reflect.get(session, "cost"), Reflect.get(Reflect.get(session, "queue"), "values")],
+  [{ usd: 0.3, status: "estimated" }, []], "shared accounting emits one latest checkpoint without stale regression");
 const advisoryDir = join(root, "advisory-workspace");
 mkdirSync(join(advisoryDir, "notes"), { recursive: true });
 writeFileSync(join(advisoryDir, "CLAUDE.md"), "instructions");
@@ -767,6 +774,35 @@ assert.equal(completedBeforeResponse.runtime.calls.filter(call => call.method ==
 completedBeforeResponse.session.close(); completedBeforeResponse.provider.dispose();
 await waitUntil({ predicate: () => completedBeforeResponse.runtime.disposed === 1,
   label: "completed-before-response retirement" });
+
+const completionSteer = await orderingFixture("turn-completes-during-steer");
+completionSteer.runtime.turnStartOrder = "settings-response-started";
+completionSteer.session.send({ text: "initial turn", selection: [] });
+await waitUntil({ predicate: () => Reflect.get(completionSteer.session, "turnStart") === undefined,
+  label: "steering boundary initial turn" });
+const staleSteer = deferred<unknown>();
+completionSteer.runtime.responseQueues.set("turn/steer", [staleSteer.promise]);
+completionSteer.session.send({ text: "preserve this input", selection: [{ id: "1:2", name: "Frame", type: "FRAME" }] });
+await waitUntil({ predicate: () => completionSteer.runtime.calls.some(call => call.method === "turn/steer"),
+  label: "pending stale steer" });
+completionSteer.runtime.notify("turn/completed", { threadId: "thread-new",
+  turn: { id: "turn-new", items: [], status: "completed" } });
+completionSteer.runtime.responses.set("turn/start", { turn: { id: "turn-retry", items: [], status: "inProgress" } });
+staleSteer.reject(new CodexRpcError(-32602, "no active turn matches expected turn"));
+await waitUntil({ predicate: () => Reflect.get(completionSteer.session, "turnStart") === undefined
+    && Reflect.get(completionSteer.session, "activeTurn") === "turn-retry",
+  label: "completion-before-stale steering retry" });
+const steerCall = completionSteer.runtime.calls.find(call => call.method === "turn/steer")!;
+const retryCall = completionSteer.runtime.calls.filter(call => call.method === "turn/start").at(-1)!;
+assert.deepEqual((retryCall.params as { input: unknown }).input, (steerCall.params as { input: unknown }).input,
+  "completion-before-stale retry preserves exact user input");
+assert.deepEqual([completionSteer.runtime.calls.filter(call => call.method === "turn/steer").length,
+  completionSteer.runtime.calls.filter(call => call.method === "turn/start").length,
+  Reflect.get(completionSteer.session, "closed")], [1, 2, false],
+"explicit stale rejection after normal completion retries once without duplicate steer admission");
+completionSteer.session.close(); completionSteer.provider.dispose();
+await waitUntil({ predicate: () => completionSteer.runtime.disposed === 1,
+  label: "completion-before-stale retry retirement" });
 
 const reversedStartDir = join(root, "reversed-provider-starts");
 mkdirSync(join(reversedStartDir, "notes"), { recursive: true }); writeFileSync(join(reversedStartDir, "CLAUDE.md"), "instructions");
