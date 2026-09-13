@@ -137,8 +137,10 @@ const initialized = (sessionId: string): ProviderOutput => ({
   kind: "initialized", sessionId,
   health: { provider: "claude", status: "ready", model: "haiku", models: [] },
 });
-const usage = (input: number, cost: number, status: "reported" | "estimated", turnCompleted = false): ProviderOutput => ({
-  kind: "usage", usage: { input, output: input + 1, cacheRead: 0, cacheWrite: 0 }, cost: { usd: cost, status }, turnCompleted,
+const usage = (input: number, cost: number, status: "reported" | "estimated", turnCompleted = false,
+  accountingCheckpoint = false): ProviderOutput => ({
+  kind: "usage", usage: { input, output: input + 1, cacheRead: 0, cacheWrite: 0 }, cost: { usd: cost, status },
+  turnCompleted, accountingCheckpoint,
 });
 
 const claude = new FakeProvider("claude"), codex = new FakeProvider("codex");
@@ -445,15 +447,38 @@ codexSession.output.push({ kind: "usage", usage: { input: 2, output: 1, cacheRea
 const codexRecord = await codexClient.next(down({ kind: "session", where: message => message.session.turns === 1 }));
 assert.deepEqual([codexRecord.session.provider, codexRecord.session.costUsd, codexRecord.session.costStatus],
   ["codex", 0, "unavailable"]);
+const completionTimestamp = codexRecord.session.updatedAt;
+codexSession.output.push(usage(2, 0.75, "estimated", false, true));
+await codexClient.next(down({ kind: "session", where: message => message.session.costUsd === 0.75 }));
+const checkpointed = readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!;
+assert.deepEqual([checkpointed.turns, checkpointed.updatedAt, checkpointed.costUsd, checkpointed.costStatus],
+  [1, completionTimestamp, 0.75, "estimated"],
+  "delayed cost checkpoints persist without incrementing turns or changing completion time");
 codex.history = [{ role: "tool", name: "ask_user", input: { question: "Q" } }, { role: "answer", text: "A" }];
 codexClient.send({ kind: "open", intentId: "codex-history", fileId: "codex-file", fileName: "Codex",
   session: { provider: "codex", sessionId: "codex-owned" } });
 assert.deepEqual((await codexClient.next(message => message.kind === "history")).messages, codex.history);
+const unavailableGate = deferred<void>(); codex.historyGate = unavailableGate.promise;
+codex.historyResult = { messages: codex.history, cost: { usd: 0, status: "unavailable" } };
+codexClient.send({ kind: "open", intentId: "codex-history-unavailable", fileId: "codex-file", fileName: "Codex",
+  session: { provider: "codex", sessionId: "codex-owned" } });
+await codex.historyCalls.waitFor({ count: 2 });
+codexSession.output.push(usage(4, 7, "estimated"));
+await codexClient.next(down({ kind: "session", where: message => message.session.costUsd === 7 }));
+assert.equal(readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!.costUsd, 0.75,
+  "non-checkpoint in-memory accounting remains newer than disk during attached history");
+unavailableGate.resolve();
+const unavailableHistory = await codexClient.next(down({ kind: "history",
+  where: message => message.intentId === "codex-history-unavailable" }));
+assert.deepEqual([unavailableHistory.attached, unavailableHistory.session.costUsd, unavailableHistory.session.costStatus],
+  [true, 7, "unavailable"], "unavailable history preserves newer attached USD while marking provenance unavailable");
+assert.deepEqual([readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!.costUsd,
+  readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!.costStatus], [7, "unavailable"]);
 const historyGate = deferred<void>(); codex.historyGate = historyGate.promise;
 codex.historyResult = { messages: codex.history, cost: { usd: 9, status: "estimated" } };
 codexClient.send({ kind: "open", intentId: "codex-history-race", fileId: "codex-file", fileName: "Codex",
   session: { provider: "codex", sessionId: "codex-owned" } });
-await codex.historyCalls.waitFor({ count: 2 });
+await codex.historyCalls.waitFor({ count: 3 });
 codexSession.output.push({ kind: "usage", usage: { input: 6, output: 7, cacheRead: 1, cacheWrite: 0 },
   cost: { usd: 2, status: "estimated" }, turnCompleted: true });
 await codexClient.next(down({ kind: "session", where: message => message.session.turns === 2 }));

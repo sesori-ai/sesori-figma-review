@@ -9,12 +9,12 @@ import { CodexRpcError } from "./codex-client.ts";
 import { assertCodexLocalDefaults, CODEX_PERMISSION_PROFILE, type CodexExecutionPolicy } from "./codex-execution.ts";
 import {
   codexThreadItem, codexUsageAvailability, parseAccountUsageResult, parseCodexNotification, parseDynamicToolRequest,
-  parseThreadStartResult, type CodexNotification,
+  parseModelListResult, parseThreadStartResult, projectCodexModels, type CodexNotification,
   type CodexServerRequest, type CodexThreadStartResult,
 } from "./codex-protocol.ts";
 import {
   CodexProvider, CodexResumeError, CodexSettingsError, CodexThreadPolicyMismatchError, diagnoseCodexThreadPolicy,
-  projectCodexHistory,
+  projectCodexHistory, resolveCodexSettings,
   type CodexThreadPolicyField,
 } from "./codex.ts";
 
@@ -27,6 +27,18 @@ assert.throws(() => codexThreadItem.parse({ type: "agentMessage", id: "malformed
   "malformed known items cannot fall through to ignored history");
 assert.deepEqual(codexThreadItem.parse({ type: "futureItem", id: "forward-compatible", private: true }),
   { type: "ignored", id: "forward-compatible" });
+const reorderedModels = projectCodexModels(parseModelListResult({ data: [{
+  id: "first", model: "first", displayName: "First", hidden: false, isDefault: false,
+  defaultReasoningEffort: "low", inputModalities: ["text", "image"],
+  supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+}, {
+  id: "default", model: "default", displayName: "Default", hidden: false, isDefault: true,
+  defaultReasoningEffort: "medium", inputModalities: ["text", "image"],
+  supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }],
+}] }));
+assert.deepEqual(resolveCodexSettings({ qualification: { version: "test", auth: "chatgpt", models: reorderedModels },
+  settings: { model: "", effort: "" } }), { model: "default", effort: "medium" },
+"blank Codex settings honor advertised model and effort defaults rather than catalog order");
 
 const root = mkdtempSync(join(tmpdir(), "codex-session-"));
 process.once("exit", () => rmSync(root, { recursive: true, force: true }));
@@ -98,7 +110,7 @@ class FakeClient {
     if (args.method === "thread/settings/update" && this.confirmSettings) {
       const settings = args.params as { threadId: string; model: string; effort: string };
       this.notify("thread/settings/updated", { threadId: settings.threadId,
-        threadSettings: { model: settings.model, effort: settings.effort } });
+        threadSettings: { model: settings.model, effort: settings.effort, serviceTier: "default" } });
     }
     return args.parse(response);
   }
@@ -109,8 +121,13 @@ class FakeClient {
     }
     if (method === "account/read") return { requiresOpenaiAuth: true, account: { type: "chatgpt" } };
     if (method === "model/list") return { data: [{
+      id: "catalog-first", model: "catalog-first", displayName: "Catalog First", hidden: false, isDefault: false,
+      defaultReasoningEffort: "low", inputModalities: ["text", "image"],
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+    }, {
       id: "codex-cheap", model: "codex-cheap", displayName: "Codex Cheap", hidden: false, isDefault: true,
-      inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }],
+      defaultReasoningEffort: "medium", inputModalities: ["text", "image"],
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }],
     }] };
     if (method === "permissionProfile/list") return { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] };
     if (method === "thread/start" || method === "thread/resume") {
@@ -171,13 +188,14 @@ const logs: string[] = [], prepared: string[] = [];
 const provider = new CodexProvider({
   version: "test", log: (...values) => logs.push(values.map(String).join(" ")), onPrepared: () => prepared.push("changed"),
   clientFactory: args => {
-    const client = new FakeClient(args, clients.length === 0 ? "discovery" : "runtime"); clients.push(client); return client;
+    const client = new FakeClient(args, clients.length % 2 === 0 ? "discovery" : "runtime"); clients.push(client); return client;
   },
 });
 const settings: ProviderSettings = { model: "codex-cheap", effort: "low" };
 provider.prepare({ fileId: "file", dir, settings, boundary });
 await waitUntil({ predicate: () => provider.health({ settings }).status !== "starting", label: "Codex preparation" });
 assert.equal(provider.health({ settings }).status, "ready", JSON.stringify(provider.health({ settings })));
+assert.equal(provider.health({ settings: { model: "", effort: "" } }).model, "codex-cheap");
 assert.equal(clients.length, 2);
 assert.equal(clients[0].disposed, 1, "discovery process retires before isolated runtime");
 assert.deepEqual(clients[0].calls.map(call => call.method), ["initialize", "config/read"]);
@@ -189,7 +207,7 @@ const baseRecord = {
   costUsd: 0, costStatus: "unavailable" as const, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 };
 const session = await provider.start({ fileId: "file", dir, settings, boundary, baseRecord });
-const runtime = clients[1];
+let runtime = clients[1];
 const iterator = session.output[Symbol.asyncIterator]();
 const initialized = (await iterator.next()).value as ProviderOutput;
 assert.equal(initialized.kind === "initialized" && initialized.sessionId, "thread-new");
@@ -285,14 +303,18 @@ assert.deepEqual(permissionCalls.at(-1), { tool: "codex_command", input: {
   command: "ls", cwd: dir, reason: "inspect", additionalPermissions: undefined,
 } });
 const callsBeforeNetworkAmendments = permissionCalls.length;
-for (const proposedNetworkPolicyAmendments of [[{ host: "example.com" }], { enabled: true }]) {
+for (const escalation of [
+  { proposedNetworkPolicyAmendments: [{ host: "example.com" }] },
+  { proposedNetworkPolicyAmendments: { enabled: true } },
+  { networkApprovalContext: { host: "example.com", protocol: "https" } },
+]) {
   assert.deepEqual(await runtime.server("item/commandExecution/requestApproval", {
     threadId: "thread-new", turnId: "turn-new", itemId: "network-command", startedAtMs: 1, kind: "command",
-    command: "curl example.com", cwd: dir, proposedNetworkPolicyAmendments, availableDecisions: ["accept", "decline"],
+    command: "curl example.com", cwd: dir, ...escalation, availableDecisions: ["accept", "decline"],
   }), { decision: "decline" });
 }
 assert.equal(permissionCalls.length, callsBeforeNetworkAmendments,
-  "network policy amendments are declined before publishing a permission card");
+  "network amendments and one-shot contexts are declined before publishing a permission card");
 const notesGrant = { fileSystem: { entries: [{ path: { type: "path", path: join(dir, "notes", "proof.txt") },
   access: "write" }] } };
 assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
@@ -341,7 +363,8 @@ for (const permissions of [{ futureGrant: true }, { fileSystem: { write: "not-an
   }), { permissions: {}, scope: "turn" }, "malformed or unknown permission grants fail closed");
 }
 runtime.notify("item/started", { threadId: "thread-new", turnId: "turn-new", item: {
-  type: "fileChange", id: "patch", status: "inProgress", changes: [{ path: join(appRepo, "owned.ts"), kind: "add", diff: "+bad" }],
+  type: "fileChange", id: "patch", status: "inProgress",
+  changes: [{ path: join(appRepo, "owned.ts"), kind: { type: "add" }, diff: "+bad" }],
 } });
 assert.equal(((await iterator.next()).value as { event: { name: string } }).event.name, "file_change");
 assert.deepEqual(await runtime.server("item/fileChange/requestApproval", {
@@ -350,7 +373,7 @@ assert.deepEqual(await runtime.server("item/fileChange/requestApproval", {
 runtime.args.policy.appRepo = undefined;
 runtime.notify("item/started", { threadId: "thread-new", turnId: "turn-new", item: {
   type: "fileChange", id: "patch-without-app", status: "inProgress",
-  changes: [{ path: join(appRepo, "without-app.ts"), kind: "add", diff: "+bad" }],
+  changes: [{ path: join(appRepo, "without-app.ts"), kind: { type: "add" }, diff: "+bad" }],
 } });
 assert.equal(((await iterator.next()).value as { event: { name: string } }).event.name, "file_change");
 assert.deepEqual(await runtime.server("item/fileChange/requestApproval", {
@@ -358,9 +381,13 @@ assert.deepEqual(await runtime.server("item/fileChange/requestApproval", {
 }), { decision: "decline" }, "file changes outside notes are denied without APP_REPO");
 runtime.args.policy.appRepo = configuredPolicyAppRepo;
 for (const [itemId, changes, decision] of [
-  ["notes-patch", [{ path: "notes/owned.ts", kind: { movePath: "notes/moved.ts" }, diff: "+ok" }], "accept"],
-  ["outside-patch", [{ path: join(root, "outside.ts"), kind: "add", diff: "+bad" }], "decline"],
-  ["outside-move", [{ path: "notes/owned.ts", kind: { movePath: join(appRepo, "moved.ts") }, diff: "+bad" }], "decline"],
+  ["notes-patch", [{ path: "notes/owned.ts", kind: { type: "update", move_path: "notes/moved.ts" }, diff: "+ok" }],
+    "accept"],
+  ["outside-patch", [{ path: join(root, "outside.ts"), kind: { type: "add" }, diff: "+bad" }], "decline"],
+  ["outside-move", [{ path: "notes/owned.ts", kind: { type: "update", move_path: join(appRepo, "moved.ts") },
+    diff: "+bad" }], "decline"],
+  ["fabricated-move", [{ path: "notes/owned.ts", kind: { type: "update", movePath: "notes/moved.ts" }, diff: "+bad" }],
+    "decline"],
 ] as const) {
   runtime.notify("item/started", { threadId: "thread-new", turnId: "turn-new",
     item: { type: "fileChange", id: itemId, status: "inProgress", changes } });
@@ -388,10 +415,10 @@ const settingsUpdate = session.applySettings({ settings: { model: "codex-cheap",
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(settingsSettled, false, "queued thread ACK is not an applied future-settings confirmation");
 runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "low" } });
+  threadSettings: { model: "codex-cheap", effort: "low", serviceTier: "default" } });
 await new Promise(resolve => setImmediate(resolve)); assert.equal(settingsSettled, false, "stale settings event is ignored");
 runtime.notify("thread/settings/updated", { threadId: "thread-new",
-  threadSettings: { model: "codex-cheap", effort: "medium" } });
+  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
 await settingsUpdate;
 assert.deepEqual(runtime.calls.slice(-2).map(call => call.method), ["thread/settings/update", "turn/settings/update"]);
 const callsAfterSettings = runtime.calls.length;
@@ -423,8 +450,8 @@ const completed = (await iterator.next()).value as Extract<ProviderOutput, { kin
 assert.deepEqual([completed.turnCompleted, completed.cost], [true, { usd: 0, status: "unavailable" }],
   "turn completion is committed before optional cost lookup");
 const completedCost = (await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
-assert.deepEqual([completedCost.turnCompleted, completedCost.cost], [false, { usd: 0.125, status: "estimated" }],
-  "delayed cost update cannot increment turns twice");
+assert.deepEqual([completedCost.turnCompleted, completedCost.cost, completedCost.accountingCheckpoint],
+  [false, { usd: 0.125, status: "estimated" }, true], "delayed cost checkpoint cannot increment turns twice");
 
 const olderCost = deferred<unknown>(), newerCost = deferred<unknown>();
 runtime.responseQueues.set("account/usage/read", [olderCost.promise, newerCost.promise]);
@@ -438,7 +465,8 @@ for (const turnId of ["cost-older", "cost-newer"]) {
 }
 newerCost.resolve({ threadUsage: { threadId: "thread-new", estimatedUsageUsdMicros: 300_000 } });
 const newestCost = (await iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>;
-assert.deepEqual([newestCost.turnCompleted, newestCost.cost], [false, { usd: 0.3, status: "estimated" }]);
+assert.deepEqual([newestCost.turnCompleted, newestCost.cost, newestCost.accountingCheckpoint],
+  [false, { usd: 0.3, status: "estimated" }, true]);
 olderCost.resolve({ threadUsage: { threadId: "thread-new", estimatedUsageUsdMicros: 100_000 } });
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(Reflect.get(session, "cost"), { usd: 0.3, status: "estimated" },
@@ -472,6 +500,12 @@ session.close();
 await assert.rejects(closingSettings,
   error => error instanceof CodexSettingsError && error.category === "closed");
 assert.equal(runtime.calls.length, callsBeforeClose, "session close cannot dispatch a rollback RPC after terminal fencing");
+await waitUntil({ predicate: () => runtime.disposed === 1, label: "active-turn runtime retirement" });
+provider.prepare({ fileId: "file", dir, settings, boundary });
+await waitUntil({ predicate: () => clients.length === 4 && provider.health({ settings }).status === "ready",
+  label: "preparation after active-turn close" });
+runtime = clients[3];
+assert.equal(clients[1]?.disposed, 1, "closing an active native turn retires its runtime before advisory recovery");
 const historyTurns = [{ id: "h1", status: "completed", items: [
   { type: "userMessage", id: "u", content: [{ type: "text", text: "[Figma file X]\nQuestion\n[Current selection: none]" }] },
   { type: "agentMessage", id: "a", text: "Answer" },
@@ -572,9 +606,45 @@ terminalProvider.prepare({ fileId: "terminal", dir: terminalDir, settings, bound
 await waitUntil({ predicate: () => terminalProvider.health({ settings }).status === "ready", label: "terminal fixture preparation" });
 const terminalSession = await terminalProvider.start({ fileId: "terminal", dir: terminalDir, settings, boundary, baseRecord });
 terminalClients[1]!.terminate(new Error("native terminated"));
-assert.equal(terminalProvider.health({ settings }).status, "unavailable");
+assert.deepEqual([terminalProvider.health({ settings }).status, Reflect.get(terminalSession, "closed")], ["unavailable", true]);
+terminalProvider.prepare({ fileId: "terminal", dir: terminalDir, settings, boundary });
+await waitUntil({ predicate: () => terminalProvider.health({ settings }).status === "ready",
+  label: "advisory preparation after terminal retirement" });
+assert.equal(terminalClients.length, 4, "advisory preparation creates a fresh pair after definite terminal retirement");
 const recoveredSession = await terminalProvider.start({ fileId: "terminal", dir: terminalDir, settings, boundary, baseRecord });
-assert.equal(terminalClients.length, 4, "explicit start creates a fresh discovery/runtime pair after terminal invalidation");
+assert.equal(terminalClients.length, 4, "explicit start reuses the recovered runtime");
 assert.notEqual(recoveredSession, terminalSession);
 recoveredSession.close(); terminalProvider.dispose();
+
+const pendingCloseDir = join(root, "pending-close");
+mkdirSync(join(pendingCloseDir, "notes"), { recursive: true });
+writeFileSync(join(pendingCloseDir, "CLAUDE.md"), "instructions");
+const pendingCloseClients: FakeClient[] = [];
+const pendingCloseProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, pendingCloseClients.length % 2 === 0 ? "discovery" : "runtime");
+    pendingCloseClients.push(client); return client;
+  } });
+pendingCloseProvider.prepare({ fileId: "pending-close", dir: pendingCloseDir, settings, boundary });
+await waitUntil({ predicate: () => pendingCloseProvider.health({ settings }).status === "ready",
+  label: "pending-close fixture preparation" });
+const pendingCloseSession = await pendingCloseProvider.start({
+  fileId: "pending-close", dir: pendingCloseDir, settings, boundary, baseRecord,
+});
+const pendingTurn = deferred<unknown>();
+pendingCloseClients[1]!.responseQueues.set("turn/start", [pendingTurn.promise]);
+pendingCloseSession.send({ text: "pending native turn", selection: [] });
+await waitUntil({ predicate: () => pendingCloseClients[1]!.calls.some(call => call.method === "turn/start"),
+  label: "pending turn/start request" });
+pendingCloseSession.close();
+await waitUntil({ predicate: () => pendingCloseClients[1]!.disposed === 1, label: "pending turn runtime retirement" });
+pendingCloseProvider.prepare({ fileId: "pending-close", dir: pendingCloseDir, settings, boundary });
+await waitUntil({ predicate: () => pendingCloseProvider.health({ settings }).status === "ready",
+  label: "replacement preparation after pending turn close" });
+pendingTurn.resolve({ turn: { id: "late-old-turn", items: [], status: "inProgress" } });
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual([pendingCloseClients.length, Reflect.get(pendingCloseSession, "closed"),
+  Reflect.get(pendingCloseSession, "activeTurn"), pendingCloseClients[3]!.disposed], [4, true, undefined, 0],
+"late predecessor turn/start cannot continue into the replacement runtime");
+pendingCloseProvider.dispose();
 console.log("codex session, replay, controls and accounting check ok");

@@ -52,6 +52,7 @@ const model = z.object({
   displayName: z.string().min(1),
   hidden: z.boolean(),
   isDefault: z.boolean(),
+  defaultReasoningEffort: z.string().min(1),
   inputModalities: z.array(z.enum(["text", "image", "audio"])).default(["text", "image"]),
   supportedReasoningEfforts: z.array(z.object({ reasoningEffort: z.string().min(1) }).passthrough()),
 }).passthrough();
@@ -77,11 +78,13 @@ export const parseConfigReadResult = (value: unknown): CodexConfigReadResult => 
 
 export const projectCodexModels = (result: CodexModelListResult): ModelDescriptor[] => result.data
   .filter(item => !item.hidden && item.inputModalities.includes("text") && item.inputModalities.includes("image")
-    && item.supportedReasoningEfforts.length > 0)
+    && item.supportedReasoningEfforts.some(option => option.reasoningEffort === item.defaultReasoningEffort))
   .map(item => ({
     value: item.model,
     label: item.displayName,
     efforts: item.supportedReasoningEfforts.map(option => option.reasoningEffort),
+    isDefault: item.isDefault,
+    defaultEffort: item.defaultReasoningEffort,
   }));
 
 const identifier = z.string().min(1);
@@ -148,7 +151,9 @@ const turnNotification = z.object({ threadId: identifier, turn });
 const itemNotification = z.object({ ...envelope, item: codexThreadItem });
 const deltaNotification = z.object({ ...envelope, itemId: identifier, delta: z.string() });
 const threadSettingsNotification = z.object({
-  threadId: identifier, threadSettings: z.object({ model: identifier, effort: z.string().nullable() }).passthrough(),
+  threadId: identifier, threadSettings: z.object({
+    model: identifier, effort: z.string().nullable(), serviceTier: z.string().nullable(),
+  }).passthrough(),
 });
 const usageNotification = z.object({
   ...envelope,
@@ -188,6 +193,7 @@ export const parseDynamicToolRequest = (value: unknown) => turnRequestBase.exten
 export const parseCommandApprovalRequest = (value: unknown) => requestBase.extend({
   kind: z.enum(["command", "writeStdin"]).default("command"), command: z.string().nullable().optional(),
   cwd: z.string().nullable().optional(), reason: z.string().nullable().optional(),
+  networkApprovalContext: z.unknown().nullable().optional(),
   additionalPermissions: record.nullable().optional(), proposedExecpolicyAmendment: z.unknown().nullable().optional(),
   proposedNetworkPolicyAmendments: z.unknown().nullable().optional(), availableDecisions: z.array(z.string()).nullable().optional(),
 }).parse(value);

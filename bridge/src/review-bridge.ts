@@ -287,7 +287,10 @@ export function createReviewBridge(args: {
             send(current.fileId, { kind: "session", session: current.record });
             send(current.fileId, { kind: "sessions", sessions: readSessions(current.dir) });
             send(current.fileId, { kind: "busy", busy: false });
-          } else send(current.fileId, { kind: "session", session: current.record });
+          } else {
+            if (output.accountingCheckpoint) saveSession(current.dir, current.record);
+            send(current.fileId, { kind: "session", session: current.record });
+          }
         }
       }
     } catch (error) {
@@ -445,7 +448,10 @@ export function createReviewBridge(args: {
           const merged = {
             ...latest,
             ...(history.usage ? { usage: history.usage } : {}),
-            ...(history.cost ? { costUsd: history.cost.usd, costStatus: history.cost.status } : {}),
+            ...(history.cost ? {
+              costUsd: history.cost.status === "unavailable" ? latest.costUsd : history.cost.usd,
+              costStatus: history.cost.status,
+            } : {}),
           };
           if (history.usage || history.cost) {
             if (attached) attachedConversation.record = merged;

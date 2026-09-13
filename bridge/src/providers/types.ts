@@ -22,7 +22,8 @@ export type ProviderOutput =
   | { kind: "initialized"; sessionId: string; health: ProviderHealth; servers?: { name: string; status: string; error?: string }[] }
   | { kind: "event"; event: ReviewEvent }
   /** Cumulative session snapshots including resume baselines. Consumers replace, never add, both usage and cost. */
-  | { kind: "usage"; usage: Usage; cost: { usd: number; status: CostStatus }; turnCompleted: boolean };
+  | { kind: "usage"; usage: Usage; cost: { usd: number; status: CostStatus }; turnCompleted: boolean;
+      accountingCheckpoint?: boolean };
 
 export interface ReviewSession {
   readonly provider: ProviderId;

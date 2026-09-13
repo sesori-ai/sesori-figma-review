@@ -86,7 +86,7 @@ assert.throws(() => parseAccountResult({ requiresOpenaiAuth: "yes", account: nul
 assert.throws(() => parseModelListResult({ data: [{ model: "partial" }] }));
 assert.deepEqual(projectCodexModels(parseModelListResult({ data: [{
   id: "empty", model: "empty", displayName: "Empty", hidden: false, isDefault: true,
-  inputModalities: ["text", "image"], supportedReasoningEfforts: [],
+  defaultReasoningEffort: "low", inputModalities: ["text", "image"], supportedReasoningEfforts: [],
 }] })), []);
 
 const { provisionCodexWorkspace, readReviewFlowSkill } = await import("../workspace.ts");
@@ -460,10 +460,11 @@ const qualificationChild = new FakeChild((message, server) => {
   });
   if (method === "model/list") server.send({ id, result: { data: [{
     id: "qualified", model: "qualified", displayName: "Qualified", hidden: false, isDefault: true,
-    inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Low" }],
+    defaultReasoningEffort: "low", inputModalities: ["text", "image"],
+    supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Low" }],
   }, {
     id: "no-effort", model: "no-effort", displayName: "No effort", hidden: false, isDefault: false,
-    inputModalities: ["text", "image"], supportedReasoningEfforts: [],
+    defaultReasoningEffort: "low", inputModalities: ["text", "image"], supportedReasoningEfforts: [],
   }] } });
   if (method === "permissionProfile/list") server.send({
     id, result: { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] },
@@ -475,7 +476,8 @@ const qualification = await qualifyCodexRuntime({
   client: new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => qualificationChild }),
 });
 assert.deepEqual(qualification, {
-  version: "0.154.0", auth: "chatgpt", models: [{ value: "qualified", label: "Qualified", efforts: ["low"] }],
+  version: "0.154.0", auth: "chatgpt", models: [{ value: "qualified", label: "Qualified", efforts: ["low"],
+    isDefault: true, defaultEffort: "low" }],
 });
 const noEffortChild = new FakeChild((message, server) => {
   if (message.method === "initialize") server.send({ id: message.id,
@@ -484,7 +486,7 @@ const noEffortChild = new FakeChild((message, server) => {
     result: { requiresOpenaiAuth: true, account: { type: "apiKey" } } });
   if (message.method === "model/list") server.send({ id: message.id, result: { data: [{
     id: "empty", model: "empty", displayName: "Empty", hidden: false, isDefault: true,
-    inputModalities: ["text", "image"], supportedReasoningEfforts: [],
+    defaultReasoningEffort: "low", inputModalities: ["text", "image"], supportedReasoningEfforts: [],
   }] } });
 });
 await assert.rejects(qualifyCodexRuntime({ policy,
@@ -501,7 +503,8 @@ const leakingChild = new FakeChild((message, server) => {
   });
   if (method === "model/list") server.send({ id, result: { data: [{
     id: "m", model: "m", displayName: "M", hidden: false, isDefault: true,
-    inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+    defaultReasoningEffort: "low", inputModalities: ["text", "image"],
+    supportedReasoningEfforts: [{ reasoningEffort: "low" }],
   }] } });
   if (method === "permissionProfile/list") server.send({
     id, result: { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] },

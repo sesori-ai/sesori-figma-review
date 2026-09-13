@@ -103,6 +103,20 @@ const mapUsage = (total: {
   cacheWrite: total.cacheWriteInputTokens,
   output: total.outputTokens,
 });
+export const resolveCodexSettings = (args: {
+  qualification: CodexQualification;
+  settings: ProviderSettings;
+}): ProviderSettings => {
+  const fallback = args.qualification.models.find(model => model.isDefault) ?? args.qualification.models[0];
+  const model = args.settings.model || fallback?.value;
+  const descriptor = args.qualification.models.find(item => item.value === model);
+  if (!descriptor) throw new Error(`Codex model ${JSON.stringify(model)} is unavailable`);
+  const effort = args.settings.effort || descriptor.defaultEffort || descriptor.efforts[0];
+  if (!effort || !descriptor.efforts.includes(effort)) {
+    throw new Error(`Codex effort ${JSON.stringify(effort)} is not supported by ${model}`);
+  }
+  return { model, effort };
+};
 const costFrom = (result: ReturnType<typeof parseAccountUsageResult>, previous: number, threadId: string) => {
   const availability = codexUsageAvailability(result, threadId);
   if (availability.threadUsagePresent && !availability.threadMatches) throw new Error("Codex usage response thread mismatch");
@@ -225,6 +239,7 @@ class CodexSession implements ReviewSession {
   private usage: Usage;
   private cost: { usd: number; status: "reported" | "estimated" | "unavailable" };
   private firstInput: boolean;
+  private turnStartPending = false;
   private closed = false;
   private generation = 0;
   private readonly completedTurns = new Set<string>();
@@ -246,7 +261,7 @@ class CodexSession implements ReviewSession {
     boundary: ProviderRequestBoundary;
     baseRecord: ProviderSessionRecord;
     health: ProviderHealth;
-    onClose: (session: CodexSession) => void;
+    onClose: (session: CodexSession, nativeTurnPending: boolean) => void;
     log: (...values: unknown[]) => void;
   }) {
     this.output = this.queue;
@@ -267,15 +282,7 @@ class CodexSession implements ReviewSession {
     const dispatch = this.sendQueue.then(async () => {
       if (this.closed) throw new Error("Codex session is closed");
       const turnId = this.activeTurn;
-      if (!turnId) {
-        const started = await this.args.client.request({
-          method: "turn/start", params: {
-            threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
-          }, parse: parseTurnStartResult,
-        });
-        this.activeTurn = started.turn.id;
-        return;
-      }
+      if (!turnId) { await this.startTurn(input); return; }
       try {
         await this.args.client.request({
           method: "turn/steer", params: { threadId: this.args.threadId, expectedTurnId: turnId, input },
@@ -286,12 +293,7 @@ class CodexSession implements ReviewSession {
           && /stale|no (?:matching |)active turn|does not match|target.*unavailable/i.test(error.message);
         if (!explicitStale || this.activeTurn !== turnId) throw error;
         this.activeTurn = undefined;
-        const started = await this.args.client.request({
-          method: "turn/start", params: {
-            threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
-          }, parse: parseTurnStartResult,
-        });
-        this.activeTurn = started.turn.id;
+        await this.startTurn(input);
       }
     });
     this.sendQueue = dispatch.catch(error => this.fail(error));
@@ -339,14 +341,19 @@ class CodexSession implements ReviewSession {
   }
 
   private resolveSettings(settings: ProviderSettings): ProviderSettings {
-    const model = settings.model || this.args.qualification.models[0]?.value;
-    const descriptor = this.args.qualification.models.find(item => item.value === model);
-    if (!descriptor) throw new Error(`Codex model ${JSON.stringify(model)} is not in the qualified image/tool catalog`);
-    const effort = settings.effort || descriptor.efforts[0];
-    if (!effort || !descriptor.efforts.includes(effort)) {
-      throw new Error(`Codex effort ${JSON.stringify(effort)} is not supported by ${model}`);
-    }
-    return { model, effort };
+    return resolveCodexSettings({ qualification: this.args.qualification, settings });
+  }
+  private async startTurn(input: Record<string, unknown>[]) {
+    this.turnStartPending = true;
+    try {
+      const started = await this.args.client.request({
+        method: "turn/start", params: {
+          threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
+        }, parse: parseTurnStartResult,
+      });
+      if (this.closed) throw new Error("Codex session is closed");
+      this.activeTurn = started.turn.id;
+    } finally { this.turnStartPending = false; }
   }
   private async updateFuture(settings: ProviderSettings) {
     if (this.futureSettings) throw new Error("Codex future settings update is already pending");
@@ -421,12 +428,13 @@ class CodexSession implements ReviewSession {
     void this.readCost().then(cost => {
       if (this.closed || generation !== this.generation || sequence !== this.costReadSequence) return;
       this.cost = cost;
-      this.queue.push({ kind: "usage", usage: this.usage, cost, turnCompleted: false });
+      this.queue.push({ kind: "usage", usage: this.usage, cost, turnCompleted: false, accountingCheckpoint: true });
     }, error => {
       this.args.log("Codex thread cost read failed", error);
       if (this.closed || generation !== this.generation || sequence !== this.costReadSequence) return;
       this.cost = { usd: this.cost.usd, status: "unavailable" };
-      this.queue.push({ kind: "usage", usage: this.usage, cost: this.cost, turnCompleted: false });
+      this.queue.push({ kind: "usage", usage: this.usage, cost: this.cost, turnCompleted: false,
+        accountingCheckpoint: true });
     });
   }
   private async readCost() {
@@ -453,7 +461,8 @@ class CodexSession implements ReviewSession {
       const params = parseCommandApprovalRequest(request.params); this.assertOwner(params);
       if (!params.command || !params.cwd || params.kind !== "command") return { decision: "decline" };
       const network = params.proposedNetworkPolicyAmendments;
-      const networkEscalation = network != null && (!Array.isArray(network) || network.length > 0);
+      const networkEscalation = params.networkApprovalContext != null
+        || network != null && (!Array.isArray(network) || network.length > 0);
       if (networkEscalation || this.unsafePermissions(params.additionalPermissions, params.cwd)) {
         return { decision: "decline" };
       }
@@ -543,11 +552,13 @@ class CodexSession implements ReviewSession {
       const typed = change as { path: string; kind?: unknown };
       const path = canonicalRequested(typed.path, this.args.policy.dir);
       if (!path || !containedBy(this.args.policy.notesDir, path)) return false;
-      if (!typed.kind || typeof typed.kind !== "object") return true;
+      if (!typed.kind || typeof typed.kind !== "object" || Array.isArray(typed.kind)) return false;
       const kind = typed.kind as Record<string, unknown>;
-      if (!Object.hasOwn(kind, "movePath")) return true;
-      const movePath = typeof kind.movePath === "string"
-        ? canonicalRequested(kind.movePath, this.args.policy.dir) : undefined;
+      if (kind.type === "add" || kind.type === "delete") return Object.keys(kind).length === 1;
+      if (kind.type !== "update" || !Object.keys(kind).every(key => ["type", "move_path"].includes(key))) return false;
+      if (kind.move_path == null) return true;
+      const movePath = typeof kind.move_path === "string"
+        ? canonicalRequested(kind.move_path, this.args.policy.dir) : undefined;
       return !!movePath && containedBy(this.args.policy.notesDir, movePath);
     });
   }
@@ -556,9 +567,10 @@ class CodexSession implements ReviewSession {
   fail(error: unknown) { this.queue.finish(error); }
   close() {
     if (this.closed) return;
+    const nativeTurnPending = this.turnStartPending || this.activeTurn !== undefined;
     this.closed = true; this.generation++;
     this.futureSettings?.reject(new CodexSettingsError("closed"));
-    this.args.onClose(this); this.queue.finish();
+    this.args.onClose(this, nativeTurnPending); this.queue.finish();
   }
 }
 
@@ -593,7 +605,8 @@ export class CodexProvider implements ReviewProvider {
     const qualification = this.runtime?.qualification;
     return {
       provider: "codex", status: this.runtime?.status ?? "starting", version: qualification?.version,
-      model: args.settings.model || qualification?.models[0]?.value, models: qualification?.models ?? [],
+      model: args.settings.model || qualification?.models.find(model => model.isDefault)?.value
+        || qualification?.models[0]?.value, models: qualification?.models ?? [],
       error: this.runtime?.error,
     };
   }
@@ -607,6 +620,7 @@ export class CodexProvider implements ReviewProvider {
     fileId: string; dir: string; resume?: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
     baseRecord: ProviderSessionRecord;
   }): Promise<ReviewSession> {
+    this.active?.close();
     const prepared = await this.ensurePrepared(args);
     const selected = this.resolveSettings(prepared.qualification, args.settings);
     const scaffold = provisionCodexWorkspace({ dir: args.dir });
@@ -649,7 +663,7 @@ export class CodexProvider implements ReviewProvider {
       client: prepared.client, policy: prepared.policy, qualification: prepared.qualification,
       threadId: result.thread.id, model: result.model, effort: result.reasoningEffort ?? selected.effort,
       fresh: !args.resume, skillPath: scaffold.skillPath, boundary: args.boundary, baseRecord: args.baseRecord, health,
-      onClose: target => { if (this.active === target) this.active = undefined; }, log: this.args.log,
+      onClose: (target, nativeTurnPending) => this.sessionClosed(target, nativeTurnPending), log: this.args.log,
     });
     this.active?.close(); this.active = session;
     return session;
@@ -677,12 +691,7 @@ export class CodexProvider implements ReviewProvider {
   }
 
   private resolveSettings(qualification: CodexQualification, settings: ProviderSettings) {
-    const model = settings.model || qualification.models[0]?.value;
-    const descriptor = qualification.models.find(item => item.value === model);
-    if (!descriptor) throw new Error(`Codex model ${JSON.stringify(model)} is unavailable`);
-    const effort = settings.effort || descriptor.efforts[0];
-    if (!effort || !descriptor.efforts.includes(effort)) throw new Error(`Codex effort ${JSON.stringify(effort)} is unavailable`);
-    return { model, effort };
+    return resolveCodexSettings({ qualification, settings });
   }
 
   private ensurePrepared(args: {
@@ -730,7 +739,8 @@ export class CodexProvider implements ReviewProvider {
       onRequest: request => this.active?.request(request) ?? Promise.reject(new Error("No active Codex session")),
       onTerminal: error => {
         if (client !== this.client || args.generation !== this.generation) return;
-        this.active?.fail(error);
+        const active = this.active; this.active = undefined;
+        active?.fail(error); active?.close();
         this.client = undefined; this.prepared = undefined; this.preparedKey = undefined; this.generation++;
         void this.retire(client).catch(retirementError => this.args.log("Codex terminal retirement uncertain", retirementError));
         this.runtime = { status: "unavailable", error: `Codex App Server failed: ${error.message}` }; this.notify();
@@ -753,8 +763,17 @@ export class CodexProvider implements ReviewProvider {
     return retirement;
   }
   private notify() { try { this.args.onPrepared(); } catch (error) { this.args.log("Codex readiness notification failed", error); } }
+  private sessionClosed(session: CodexSession, nativeTurnPending: boolean) {
+    if (this.active !== session) return;
+    this.active = undefined;
+    if (!nativeTurnPending) return;
+    const client = this.client;
+    this.client = undefined; this.prepared = undefined; this.preparedKey = undefined; this.runtime = undefined; this.generation++;
+    if (client) void this.retire(client).catch(error => this.args.log("Codex active-turn retirement uncertain", error));
+    this.notify();
+  }
   private disposeRuntime() {
-    this.active?.close(); this.active = undefined;
+    const active = this.active; this.active = undefined; active?.close();
     const clients = new Set(this.ownedClients);
     if (this.client) clients.add(this.client);
     this.client = undefined;
