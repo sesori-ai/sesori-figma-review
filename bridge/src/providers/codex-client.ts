@@ -88,7 +88,7 @@ export class CodexClient {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, Pending>();
   private optionalAccountingId?: JsonRpcId;
-  private optionalAccountingDrain?: { id: JsonRpcId; promise: Promise<void>; resolve: () => void };
+  private optionalAccountingDrain?: { id: JsonRpcId; waiters: Set<() => void> };
   private readonly stdoutBuffer = new LineAccumulator();
   private stderrBuffer = Buffer.alloc(0);
   private terminalError?: Error;
@@ -130,14 +130,18 @@ export class CodexClient {
   }): Promise<T | undefined> {
     await this.connect();
     if (this.optionalAccountingId !== undefined) {
-      if (!args.waitForSlot || !this.optionalAccountingDrain) return;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeoutMs = this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-      const available = await Promise.race([
-        this.optionalAccountingDrain.promise.then(() => true),
-        new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); }),
-      ]);
-      if (timer) clearTimeout(timer);
+      const drain = this.optionalAccountingDrain;
+      if (!args.waitForSlot || !drain) return;
+      const available = await new Promise<boolean>(resolve => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const settle = (value: boolean) => {
+          if (timer === undefined) return;
+          clearTimeout(timer); timer = undefined; drain.waiters.delete(ready); resolve(value);
+        };
+        const ready = () => settle(true);
+        drain.waiters.add(ready);
+        timer = setTimeout(() => settle(false), this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+      });
       if (!available || this.optionalAccountingId !== undefined) return;
       if (this.terminalError) throw this.terminalError;
     }
@@ -192,9 +196,7 @@ export class CodexClient {
     const id = this.nextId++;
     if (options.optionalAccounting) {
       this.optionalAccountingId = id;
-      let resolve!: () => void;
-      const promise = new Promise<void>(accept => { resolve = accept; });
-      this.optionalAccountingDrain = { id, promise, resolve };
+      this.optionalAccountingDrain = { id, waiters: new Set() };
     }
     return new Promise<T | undefined>((resolve, reject) => {
       const timeoutMs = this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -298,7 +300,7 @@ export class CodexClient {
     this.optionalAccountingId = undefined;
     const drain = this.optionalAccountingDrain;
     this.optionalAccountingDrain = undefined;
-    if (drain?.id === id) drain.resolve();
+    if (drain?.id === id) for (const ready of drain.waiters) ready();
   }
 
   private async respondToServer(request: CodexServerRequest) {

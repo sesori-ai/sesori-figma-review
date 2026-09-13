@@ -251,6 +251,7 @@ class CodexSession implements ReviewSession {
   private closed = false;
   private generation = 0;
   private interruptionGeneration = 0;
+  private nativeMutations = 0;
   private readonly completedTurns = new Set<string>();
   private costReadSequence = 0;
   private costRead?: Promise<{ usd: number; status: "reported" | "estimated" | "unavailable" }>;
@@ -287,21 +288,24 @@ class CodexSession implements ReviewSession {
 
   send(args: { text: string; selection: NodeRef[]; context?: string }) {
     if (this.closed) throw new Error("Codex session is closed");
-    const input: Record<string, unknown>[] = [{ type: "text", text: userText(args), textElements: [] }];
-    if (this.firstInput) input.push({ type: "skill", name: "review-flow", path: this.args.skillPath });
-    this.firstInput = false;
+    const text = userText(args);
     const settingsBarrier = this.settingsQueue, interruptionGeneration = this.interruptionGeneration;
     const dispatch = this.sendQueue.then(async () => {
       await settingsBarrier;
       if (this.closed) throw new Error("Codex session is closed");
       if (interruptionGeneration !== this.interruptionGeneration) return;
+      const input: Record<string, unknown>[] = [{ type: "text", text, textElements: [] }];
+      if (this.firstInput) {
+        input.push({ type: "skill", name: "review-flow", path: this.args.skillPath });
+        this.firstInput = false;
+      }
       const turnId = this.activeTurn;
       if (!turnId) { await this.startTurn(input); return; }
       try {
-        await this.args.client.request({
+        await this.mutate(() => this.args.client.request({
           method: "turn/steer", params: { threadId: this.args.threadId, expectedTurnId: turnId, input },
           parse: parseTurnSteerResult,
-        });
+        }));
       } catch (error) {
         const explicitStale = error instanceof CodexRpcError
           && /stale|no (?:matching |)active turn|does not match|target.*unavailable/i.test(error.message);
@@ -328,9 +332,9 @@ class CodexSession implements ReviewSession {
       turnId = this.activeTurn;
     }
     if (this.closed || !turnId) return;
-    await this.args.client.request({
+    await this.mutate(() => this.args.client.request({
       method: "turn/interrupt", params: { threadId: this.args.threadId, turnId }, parse: parseEmptyResult,
-    });
+    }));
   }
 
   applySettings(args: { settings: ProviderSettings }): Promise<void> {
@@ -345,9 +349,9 @@ class CodexSession implements ReviewSession {
         await this.updateFuture(requested);
         const turnId = this.activeTurn;
         if (turnId) {
-          const result = await this.args.client.request({ method: "turn/settings/update", params: {
+          const result = await this.mutate(() => this.args.client.request({ method: "turn/settings/update", params: {
             threadId: this.args.threadId, turnId, model: requested.model, effort: requested.effort,
-          }, parse: parseTurnSettingsResult });
+          }, parse: parseTurnSettingsResult }));
           if (result.status !== "applied") throw new CodexSettingsError("target-unavailable");
         }
         this.settings = requested;
@@ -370,6 +374,11 @@ class CodexSession implements ReviewSession {
   private resolveSettings(settings: ProviderSettings): ProviderSettings {
     return resolveCodexSettings({ qualification: this.args.qualification, settings });
   }
+  private async mutate<T>(operation: () => Promise<T>): Promise<T> {
+    this.nativeMutations++;
+    try { return await operation(); }
+    finally { this.nativeMutations--; }
+  }
   private async startTurn(input: Record<string, unknown>[]) {
     if (this.turnStart) throw new Error("Codex turn start is already pending");
     let resolveStarted!: () => void, rejectStarted!: (error: Error) => void;
@@ -382,11 +391,11 @@ class CodexSession implements ReviewSession {
       model: this.settings.model, effort: this.settings.effort, startedEvent, resolveStarted, rejectStarted, timer,
     };
     try {
-      const started = await this.args.client.request({
+      const started = await this.mutate(() => this.args.client.request({
         method: "turn/start", params: {
           threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
         }, parse: parseTurnStartResult,
-      });
+      }));
       if (this.closed) throw new Error("Codex session is closed");
       if (lifecycle.turnId && lifecycle.turnId !== started.turn.id) {
         throw new Error("Codex turn start response does not match the started turn");
@@ -408,12 +417,12 @@ class CodexSession implements ReviewSession {
     const timer = setTimeout(() => reject(new CodexSettingsError("confirmation")), 10_000);
     const pending = this.futureSettings = { ...settings, resolve, reject, timer };
     try {
-      const request = this.args.client.request({ method: "thread/settings/update", params: {
+      const request = this.mutate(() => this.args.client.request({ method: "thread/settings/update", params: {
         threadId: this.args.threadId, model: settings.model, effort: settings.effort,
         cwd: this.args.policy.thread.cwd, permissions: this.args.policy.thread.permissions,
         approvalsReviewer: this.args.policy.thread.approvalsReviewer,
         approvalPolicy: this.args.policy.thread.approvalPolicy,
-      }, parse: parseEmptyResult }).catch(error => {
+      }, parse: parseEmptyResult })).catch(error => {
         if (error instanceof CodexRpcError && error.code === -32602) {
           throw new CodexSettingsError("native-rejected", true);
         }
@@ -620,7 +629,7 @@ class CodexSession implements ReviewSession {
     };
     for (const access of ["write", "read"] as const) {
       const paths = filesystem[access];
-      if (paths !== undefined && (!Array.isArray(paths) || paths.some(path => !allowed(path, access)))) return true;
+      if (paths != null && (!Array.isArray(paths) || paths.some(path => !allowed(path, access)))) return true;
     }
     if (filesystem.entries === undefined) return false;
     if (!Array.isArray(filesystem.entries)) return true;
@@ -657,7 +666,7 @@ class CodexSession implements ReviewSession {
   close() {
     if (this.closed) return;
     const nativeTurnPending = this.turnStart !== undefined || this.activeTurn !== undefined
-      || this.futureSettings !== undefined;
+      || this.futureSettings !== undefined || this.nativeMutations > 0;
     const lifecycle = this.turnStart;
     this.closed = true; this.generation++; this.turnStart = undefined;
     if (lifecycle) { clearTimeout(lifecycle.timer); lifecycle.resolveStarted(); }
@@ -675,6 +684,7 @@ export class CodexProvider implements ReviewProvider {
   private active?: CodexSession;
   private generation = 0;
   private startSequence = 0;
+  private pendingStartSequence?: number;
   private readonly ownedClients = new Set<RpcClient>();
   private readonly retirements = new WeakMap<object, Promise<void>>();
   private retirement: Promise<void> = Promise.resolve();
@@ -706,7 +716,7 @@ export class CodexProvider implements ReviewProvider {
   }
 
   prepare(args: { fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary }) {
-    if (this.active) return;
+    if (this.active || this.pendingStartSequence !== undefined) return;
     void this.ensurePrepared(args).catch(() => {});
   }
 
@@ -715,6 +725,15 @@ export class CodexProvider implements ReviewProvider {
     baseRecord: ProviderSessionRecord;
   }): Promise<ReviewSession> {
     const startSequence = ++this.startSequence;
+    this.pendingStartSequence = startSequence;
+    try { return await this.startPending(args, startSequence); }
+    finally { if (this.pendingStartSequence === startSequence) this.pendingStartSequence = undefined; }
+  }
+
+  private async startPending(args: {
+    fileId: string; dir: string; resume?: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
+    baseRecord: ProviderSessionRecord;
+  }, startSequence: number): Promise<ReviewSession> {
     this.active?.close();
     const prepared = await this.ensurePrepared(args);
     if (startSequence !== this.startSequence) throw new Error("Codex session start was superseded");
@@ -798,8 +817,10 @@ export class CodexProvider implements ReviewProvider {
   private ensurePrepared(args: {
     fileId: string; dir: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
   }, options: { advisory?: boolean } = {}): Promise<Prepared> {
+    const advisoryOwner = options.advisory && (this.active !== undefined || this.pendingStartSequence !== undefined);
     try { provisionCodexWorkspace({ dir: args.dir }); }
     catch (error) {
+      if (advisoryOwner) return Promise.reject(error);
       this.disposeRuntime(); this.generation++;
       this.runtime = { status: "unavailable",
         error: `Codex failed to prepare: ${error instanceof Error ? error.message : String(error)}` };
@@ -807,8 +828,8 @@ export class CodexProvider implements ReviewProvider {
       return Promise.reject(error);
     }
     const key = JSON.stringify([args.fileId, args.dir, process.env.APP_REPO ?? "", args.settings]);
-    if (this.prepared && (this.preparedKey === key || options.advisory && this.active)) return this.prepared;
-    if (options.advisory && this.active) return Promise.reject(new Error("Active Codex runtime is unavailable"));
+    if (this.prepared && (this.preparedKey === key || advisoryOwner)) return this.prepared;
+    if (advisoryOwner) return Promise.reject(new Error("Owned Codex runtime is unavailable"));
     this.disposeRuntime();
     const generation = ++this.generation;
     this.preparedKey = key; this.runtime = { status: "starting" }; this.notify();

@@ -29,8 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Codex serializes settings and sends through the owned turn-start event barrier, fences superseded starts and interrupted
   question batches, preserves early turn completion, retries explicit stale steering after normal completion, and coalesces
   accounting across active/history threads without overlapping native reads. Stop bypasses pending start/steer ACKs.
-- Codex preserves attached sessions when future provider defaults change, retires pending settings work before replacement,
-  publishes synchronous unsafe-workspace preparation failures, and retains failed replay turns without native error text.
+- Codex preserves attached or starting sessions across future defaults and advisory failures, retains first-turn skills until
+  native admission, retires all in-flight mutations before replacement, and reports unsafe initial workspace preparation.
+- Codex accepts source-defined nullable permission roots, bounds and detaches queued accounting waits, and retains failed replay
+  turns without native error text.
 
 ## [0.3.2]
 

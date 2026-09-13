@@ -138,20 +138,27 @@ class FakeClient {
     return args.parse(response);
   }
   private optionalAccountingPending = false;
-  private optionalAccountingDrain?: Promise<void>;
-  private resolveOptionalAccounting?: () => void;
+  private readonly optionalAccountingWaiters = new Set<() => void>();
   async requestOptionalAccounting<T>(args: RpcArgs<T>): Promise<T | undefined> {
     if (this.optionalAccountingPending) {
-      if (!args.waitForSlot || !this.optionalAccountingDrain) return undefined;
-      await this.optionalAccountingDrain;
-      if (this.optionalAccountingPending) return undefined;
+      if (!args.waitForSlot) return undefined;
+      const available = await new Promise<boolean>(resolve => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const settle = (value: boolean) => {
+          if (timer === undefined) return;
+          clearTimeout(timer); timer = undefined; this.optionalAccountingWaiters.delete(ready); resolve(value);
+        };
+        const ready = () => settle(true);
+        this.optionalAccountingWaiters.add(ready);
+        timer = setTimeout(() => settle(false), 20);
+      });
+      if (!available || this.optionalAccountingPending) return undefined;
     }
     this.optionalAccountingPending = true;
-    this.optionalAccountingDrain = new Promise(resolve => { this.resolveOptionalAccounting = resolve; });
     try { return await this.request(args); }
     finally {
-      this.optionalAccountingPending = false; this.resolveOptionalAccounting?.();
-      this.optionalAccountingDrain = undefined; this.resolveOptionalAccounting = undefined;
+      this.optionalAccountingPending = false;
+      for (const ready of this.optionalAccountingWaiters) ready();
     }
   }
   private defaultResponse(method: string, params: unknown): unknown {
@@ -380,6 +387,14 @@ assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
 assert.deepEqual(permissionCalls.at(-1), { tool: "codex_permission_scope", input: {
   cwd: join(dir, "notes"), reason: "confirm notes", permissions: notesGrant, scope: "turn",
 } });
+const sourceShapedNullGrant = { fileSystem: { read: null, write: [join(dir, "notes", "source-shaped.txt")] } };
+assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "source-shaped-null", startedAtMs: 1,
+  cwd: join(dir, "notes"), reason: "source-shaped nullable absence", permissions: sourceShapedNullGrant,
+}), { permissions: sourceShapedNullGrant, scope: "turn" },
+"documented null legacy read/write absence does not reject an otherwise notes-confined grant");
+assert.deepEqual(permissionCalls.at(-1)?.input.permissions, sourceShapedNullGrant,
+  "nullable absence preserves exact requested permission object at the user boundary");
 permissionBehavior = "deny";
 assert.deepEqual(await runtime.server("item/permissions/requestApproval", {
   threadId: "thread-new", turnId: "turn-new", itemId: "notes-deny", startedAtMs: 1, cwd: join(dir, "notes"),
@@ -560,6 +575,16 @@ await provider.readHistory({ fileId: "other-file", dir: advisoryDir, sessionId: 
 assert.deepEqual([clients.length, runtime.disposed, Reflect.get(session, "closed")], [2, 0, false],
   "advisory history reuses the suitable active runtime after live settings change");
 runtime.responses.delete("thread/read");
+const unsafeAdvisoryDir = join(root, "unsafe-advisory-workspace");
+mkdirSync(join(unsafeAdvisoryDir, "notes"), { recursive: true });
+writeFileSync(join(unsafeAdvisoryDir, "CLAUDE.md"), "instructions");
+const unsafeAdvisoryTarget = join(root, "unsafe-advisory-target"); mkdirSync(unsafeAdvisoryTarget);
+symlinkSync(unsafeAdvisoryTarget, join(unsafeAdvisoryDir, ".agents"));
+await assert.rejects(provider.readHistory({ fileId: "unsafe-other-file", dir: unsafeAdvisoryDir,
+  sessionId: "thread-new", settings, boundary, baseRecord: { ...baseRecord, sessionId: "thread-new" } }),
+/Refusing unsafe Codex skill directory/);
+assert.deepEqual([clients.length, runtime.disposed, Reflect.get(session, "closed"), provider.health({ settings }).status],
+  [2, 0, false, "ready"], "unsafe cross-file advisory rejection cannot retire or corrupt the live runtime");
 
 runtime.failures.set("turn/steer", new CodexRpcError(-32602, "expected turn id is stale"));
 runtime.notify("turn/started", { threadId: "thread-new", turnId: "turn-stale",
@@ -744,6 +769,30 @@ async function orderingFixture(label: string, options: { turnStartEventTimeoutMs
   return { provider: fixtureProvider, session: fixtureSession, runtime: fixtureClients[1]!, clients: fixtureClients,
     iterator: fixtureIterator, dir: fixtureDir };
 }
+const retainedSkill = await orderingFixture("retained-first-skill");
+retainedSkill.runtime.confirmSettings = false;
+const heldInitialSettings = retainedSkill.session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
+await waitUntil({ predicate: () => retainedSkill.runtime.calls.some(call => call.method === "thread/settings/update"),
+  label: "first-input admission barrier" });
+retainedSkill.session.send({ text: "discard before native admission", selection: [] });
+const stopBeforeAdmission = retainedSkill.session.interrupt();
+retainedSkill.runtime.notify("thread/settings/updated", { threadId: "thread-new",
+  threadSettings: { model: "codex-cheap", effort: "medium", serviceTier: "default" } });
+await Promise.all([heldInitialSettings, stopBeforeAdmission]);
+assert.equal(retainedSkill.runtime.calls.filter(call => call.method === "turn/start").length, 0,
+  "Stop discards queued first send before native admission");
+retainedSkill.runtime.turnStartOrder = "settings-response-started";
+retainedSkill.session.send({ text: "first admitted turn", selection: [] });
+await waitUntil({ predicate: () => retainedSkill.runtime.calls.some(call => call.method === "turn/start")
+    && Reflect.get(retainedSkill.session, "turnStart") === undefined,
+  label: "first admitted turn after discarded send" });
+const retainedInput = (retainedSkill.runtime.calls.find(call => call.method === "turn/start")!.params as {
+  input: { type: string }[];
+}).input;
+assert.deepEqual(retainedInput.map(item => item.type), ["text", "skill"],
+  "first actual native admission retains review-flow exactly once after queued send cancellation");
+retainedSkill.session.close(); retainedSkill.provider.dispose();
+
 const rapidSettings = await orderingFixture("rapid-settings-send");
 rapidSettings.runtime.turnStartOrder = "settings-response-started";
 const rapidSettingsResponse = deferred<unknown>();
@@ -868,6 +917,24 @@ completionSteer.session.close(); completionSteer.provider.dispose();
 await waitUntil({ predicate: () => completionSteer.runtime.disposed === 1,
   label: "completion-before-stale retry retirement" });
 
+const boundedFakeAccounting = await orderingFixture("bounded-fake-accounting");
+const neverSettlingAccounting = deferred<unknown>();
+boundedFakeAccounting.runtime.responseQueues.set("account/usage/read", [neverSettlingAccounting.promise]);
+const occupiedFakeAccounting = boundedFakeAccounting.runtime.requestOptionalAccounting({
+  method: "account/usage/read", params: { threadId: "held" }, parse: value => value,
+});
+await waitUntil({ predicate: () => boundedFakeAccounting.runtime.calls.some(call => call.method === "account/usage/read"),
+  label: "never-settling fake accounting slot" });
+for (let attempt = 0; attempt < 3; attempt++) {
+  assert.equal(await boundedFakeAccounting.runtime.requestOptionalAccounting({
+    method: "account/usage/read", params: { threadId: `waiting-${attempt}` }, parse: value => value, waitForSlot: true,
+  }), undefined, "fake trailing accounting wait is bounded when occupied slot never settles");
+  assert.equal(Reflect.get(boundedFakeAccounting.runtime, "optionalAccountingWaiters").size, 0,
+    "timed-out fake accounting waiter detaches immediately");
+}
+neverSettlingAccounting.resolve({ threadUsage: null }); await occupiedFakeAccounting;
+boundedFakeAccounting.session.close(); boundedFakeAccounting.provider.dispose();
+
 const crossThreadCost = await orderingFixture("cross-thread-accounting");
 crossThreadCost.runtime.turnStartOrder = "settings-response-started";
 crossThreadCost.session.send({ text: "active A", selection: [] });
@@ -901,6 +968,35 @@ assert.deepEqual([activeCheckpoint.cost, activeCheckpoint.turnCompleted, activeC
   [{ usd: 0.4, status: "estimated" }, false, true], "active A gets its exact trailing accounting checkpoint");
 crossThreadCost.session.close(); crossThreadCost.provider.dispose();
 await waitUntil({ predicate: () => crossThreadCost.runtime.disposed === 1, label: "cross-thread accounting retirement" });
+
+const pendingSteerClose = await orderingFixture("pending-steer-close");
+pendingSteerClose.runtime.turnStartOrder = "settings-response-started";
+pendingSteerClose.session.send({ text: "active before steer", selection: [] });
+await waitUntil({ predicate: () => Reflect.get(pendingSteerClose.session, "turnStart") === undefined,
+  label: "pending-steer-close active turn" });
+const heldSteerAck = deferred<unknown>(), heldSteerRetirement = deferred<void>();
+pendingSteerClose.runtime.responseQueues.set("turn/steer", [heldSteerAck.promise]);
+pendingSteerClose.runtime.retirementGate = heldSteerRetirement.promise;
+pendingSteerClose.session.send({ text: "held steer", selection: [] });
+await waitUntil({ predicate: () => pendingSteerClose.runtime.calls.some(call => call.method === "turn/steer"),
+  label: "held steer mutation" });
+pendingSteerClose.runtime.notify("turn/completed", { threadId: "thread-new",
+  turn: { id: "turn-new", items: [], status: "completed" } });
+pendingSteerClose.session.close();
+await waitUntil({ predicate: () => pendingSteerClose.runtime.disposed === 1,
+  label: "pending steer retirement admission" });
+pendingSteerClose.provider.prepare({ fileId: "pending-steer-close", dir: pendingSteerClose.dir, settings, boundary });
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(pendingSteerClose.clients.length, 2,
+  "completion followed by close cannot reuse runtime with outstanding steer acknowledgement");
+heldSteerAck.reject(new Error("simulated ordinary steer timeout"));
+heldSteerRetirement.resolve();
+await waitUntil({ predicate: () => pendingSteerClose.clients.length === 4
+    && pendingSteerClose.provider.health({ settings }).status === "ready",
+  label: "replacement after pending steer retirement" });
+assert.equal(pendingSteerClose.clients[3]!.disposed, 0,
+  "late predecessor steer failure cannot terminate replacement runtime");
+pendingSteerClose.provider.dispose();
 
 const idleSettingsClose = await orderingFixture("idle-settings-close");
 idleSettingsClose.runtime.turnStartOrder = "settings-response-started";

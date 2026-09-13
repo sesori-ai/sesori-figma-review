@@ -75,6 +75,7 @@ type ActualClientArgs = {
   policy: CodexExecutionPolicy;
   onNotification?: (notification: CodexNotification) => void;
   onRequest?: (request: CodexServerRequest) => Promise<unknown>;
+  onTerminal?: (error: Error) => void;
 };
 const codexConfig = (policy: CodexExecutionPolicy, runtime: boolean) => ({
   default_permissions: CODEX_PERMISSION_PROFILE, approvals_reviewer: "user", web_search: "disabled",
@@ -95,6 +96,8 @@ const codexConfig = (policy: CodexExecutionPolicy, runtime: boolean) => ({
 class ActualCodexClient {
   calls: { method: string; params: unknown }[] = [];
   disposed = 0;
+  threadStartGate?: Promise<void>;
+  nativeSettings = { model: "codex-cheap", effort: "low", serviceTier: "default" as const };
   constructor(readonly args: ActualClientArgs, readonly runtime: boolean) {}
   async connect() {
     return { userAgent: "codex_app_server/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "macos" };
@@ -107,19 +110,27 @@ class ActualCodexClient {
     if (args.method === "account/read") response = { requiresOpenaiAuth: true, account: { type: "chatgpt" } };
     if (args.method === "model/list") response = { data: [{ id: "codex-cheap", model: "codex-cheap",
       displayName: "Codex Cheap", hidden: false, isDefault: true, defaultReasoningEffort: "low",
-      inputModalities: ["text", "image"], supportedReasoningEfforts: [{ reasoningEffort: "low" }] }] };
+      inputModalities: ["text", "image"], supportedReasoningEfforts: [
+        { reasoningEffort: "low" }, { reasoningEffort: "medium" },
+      ] }] };
     if (args.method === "permissionProfile/list") response = { data: [{ id: CODEX_PERMISSION_PROFILE, allowed: true }] };
-    if (args.method === "thread/start") response = { thread: { id: "actual-thread", turns: [],
-      environments: [this.args.policy.thread.defaultEnvironment] }, model: "codex-cheap", cwd: params.cwd,
-      runtimeWorkspaceRoots: params.runtimeWorkspaceRoots, approvalsReviewer: "user",
-      approvalPolicy: this.args.policy.thread.approvalPolicy, activePermissionProfile: { id: CODEX_PERMISSION_PROFILE },
-      reasoningEffort: "low", serviceTier: "default" };
+    if (args.method === "thread/start") {
+      await this.threadStartGate;
+      response = { thread: { id: "actual-thread", turns: [],
+        environments: [this.args.policy.thread.defaultEnvironment] }, model: "codex-cheap", cwd: params.cwd,
+        runtimeWorkspaceRoots: params.runtimeWorkspaceRoots, approvalsReviewer: "user",
+        approvalPolicy: this.args.policy.thread.approvalPolicy, activePermissionProfile: { id: CODEX_PERMISSION_PROFILE },
+        reasoningEffort: "low", serviceTier: "default" };
+    }
+    if (args.method === "thread/settings/update") {
+      this.nativeSettings = { model: String(params.model), effort: String(params.effort), serviceTier: "default" };
+      this.notify("thread/settings/updated", { threadId: params.threadId, threadSettings: this.nativeSettings });
+    }
     if (args.method === "turn/start") {
       response = { turn: { id: `actual-turn-${this.calls.filter(call => call.method === "turn/start").length}`,
         items: [], status: "inProgress" } };
       const turnId = (response as { turn: { id: string } }).turn.id, threadId = String(params.threadId);
-      this.notify("thread/settings/updated", { threadId,
-        threadSettings: { model: "codex-cheap", effort: "low", serviceTier: "default" } });
+      this.notify("thread/settings/updated", { threadId, threadSettings: this.nativeSettings });
       this.notify("turn/started", { threadId, turn: { id: turnId, items: [], status: "inProgress" } });
     }
     if (args.method === "turn/steer") response = { turnId: params.expectedTurnId };
@@ -129,6 +140,11 @@ class ActualCodexClient {
   requestOptionalAccounting<T>(args: { method: "account/usage/read"; params: unknown;
     parse: (value: unknown) => T }): Promise<T | undefined> { return this.request(args); }
   notify(method: string, params: unknown) { this.args.onNotification?.({ method, params }); }
+  server(method: string, params: unknown, id: string | number = 1) {
+    if (!this.args.onRequest) return Promise.reject(new Error("Actual Codex fixture has no request callback"));
+    return this.args.onRequest({ id, method, params });
+  }
+  terminate(error: Error) { this.args.onTerminal?.(error); }
   dispose() { this.disposed++; }
   disposeAndWait() { this.dispose(); return Promise.resolve(); }
 }
@@ -603,6 +619,56 @@ assert.equal(actualRuntime.calls.filter(call => call.method === "turn/start").le
 actualClient.close(); await actualApp.shutdown();
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(actualRuntime.disposed, 1, "bridge shutdown eventually retires preserved actual Codex runtime");
+
+writeFileSync(join(process.env.SESORI_REVIEW_HOME, "settings.json"), JSON.stringify({ provider: "codex",
+  providers: { claude: { model: "", effort: "" }, codex: { model: "codex-cheap", effort: "low" } } }));
+const pendingActualClients: ActualCodexClient[] = [], heldThreadStart = deferred<void>();
+let pendingActualCodex!: InstanceType<typeof CodexProvider>;
+const pendingActualApp = createReviewBridge({ version: "test", port: 0, log: () => {}, createProviders: ({ onChanged }) => {
+  pendingActualCodex = new CodexProvider({ version: "test", log: () => {}, onPrepared: onChanged,
+    clientFactory: args => {
+      const client = new ActualCodexClient(args, pendingActualClients.length % 2 === 1);
+      if (pendingActualClients.length % 2 === 1) client.threadStartGate = heldThreadStart.promise;
+      pendingActualClients.push(client); return client;
+    } });
+  return { claude: new FakeProvider("claude"), codex: pendingActualCodex };
+} });
+const pendingActualClient = await new Client(await pendingActualApp.listening).opened();
+pendingActualClient.send({ kind: "hello", protocolVersion: 3, fileId: "pending-actual", fileName: "Pending Actual" });
+await pendingActualClient.next(message => message.kind === "connection");
+await pendingActualClient.next(message => message.kind === "health");
+pendingActualClient.send(startMessage("pending-actual-start", "pending-actual"));
+const pendingRuntimeDeadline = Date.now() + 2_000;
+while (!pendingActualClients[1]?.calls.some(call => call.method === "thread/start") && Date.now() < pendingRuntimeDeadline) {
+  await new Promise(resolve => setImmediate(resolve));
+}
+assert.equal(pendingActualClients[1]?.calls.some(call => call.method === "thread/start"), true,
+  "actual Codex start reaches held native thread/start");
+const crossFileClient = await new Client(await pendingActualApp.listening).opened();
+crossFileClient.send({ kind: "hello", protocolVersion: 3, fileId: "pending-other", fileName: "Pending Other" });
+await crossFileClient.next(message => message.kind === "connection");
+await crossFileClient.next(message => message.kind === "health");
+assert.deepEqual([pendingActualClients.length, pendingActualClients[1]!.disposed], [2, 0],
+  "cross-file advisory preparation preserves an in-progress explicit Codex start");
+pendingActualClient.send({ kind: "settings", requestId: "pending-medium", provider: "codex",
+  settings: { model: "codex-cheap", effort: "medium" }, selectedProvider: "codex" });
+await pendingActualClient.next(down({ kind: "health",
+  where: message => message.health.settingsResult?.requestId === "pending-medium" }));
+assert.equal(pendingActualClients[1]!.disposed, 0,
+  "Codex settings persistence preserves matching pending-start provider ownership");
+heldThreadStart.resolve();
+await pendingActualClient.next(down({ kind: "started", where: message => message.session.provider === "codex" }));
+assert.equal(pendingActualClients[1]!.calls.some(call => call.method === "thread/settings/update"), true,
+  "pending-start reconciliation applies settings saved while native start was held");
+pendingActualClients[1]!.terminate(new Error("actual fixture terminal"));
+await pendingActualClient.next(message => message.kind === "error");
+const pendingTerminalDeadline = Date.now() + 2_000;
+while (pendingActualClients[1]!.disposed < 1 && Date.now() < pendingTerminalDeadline) {
+  await new Promise(resolve => setImmediate(resolve));
+}
+assert.equal(pendingActualClients[1]!.disposed, 1,
+  "actual-provider fixture forwards terminal callbacks into runtime retirement");
+pendingActualClient.close(); crossFileClient.close(); await pendingActualApp.shutdown();
 
 const transportApp = createReviewBridge({ version: "test", port: 0, log: () => {},
   createProviders: () => ({ claude: undefined, codex: undefined }) });

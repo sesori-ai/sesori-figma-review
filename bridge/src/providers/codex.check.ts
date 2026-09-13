@@ -316,9 +316,14 @@ const sentAfterTimeout = optionalFixture.sent.length;
 assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {}, parse: value => value }),
   undefined);
 assert.equal(optionalFixture.sent.length, sentAfterTimeout, "one stuck accounting slot coalesces later optional reads");
-assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {},
-  parse: value => value, waitForSlot: true }), undefined, "trailing accounting wait remains bounded while correlation is stuck");
-assert.equal(optionalFixture.sent.length, sentAfterTimeout, "bounded trailing wait cannot overlap retained correlation");
+for (let attempt = 0; attempt < 3; attempt++) {
+  assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {},
+    parse: value => value, waitForSlot: true }), undefined,
+  "repeated trailing accounting waits remain bounded while correlation is stuck");
+  assert.equal((Reflect.get(optionalClient, "optionalAccountingDrain") as { waiters: Set<unknown> }).waiters.size, 0,
+    "timed-out optional accounting waiter detaches from retained native correlation");
+}
+assert.equal(optionalFixture.sent.length, sentAfterTimeout, "bounded trailing waits cannot overlap retained correlation");
 assert.deepEqual(await optionalClient.request({ method: "turn/start", params: {}, parse: value => value }), { turn: "new" });
 assert.equal(optionalFixture.killed, false, "optional accounting timeout cannot kill a later mutating turn");
 const trailingAccounting = optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {},

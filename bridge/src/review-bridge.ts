@@ -20,7 +20,7 @@ import { readSessions, readSettings, saveSession, saveSettings, workspaceFor, ze
 
 type ProviderMap = Record<ProviderId, ReviewProvider | undefined>;
 type Socket = WebSocket & { fileId?: string; protocolOk?: boolean };
-type PendingStart = { fileId: string; intentId: string; owner: string; session?: ReviewSession };
+type PendingStart = { fileId: string; intentId: string; owner: string; provider?: ProviderId; session?: ReviewSession };
 type Conversation = {
   owner: string;
   intentId: string;
@@ -175,6 +175,7 @@ export function createReviewBridge(args: {
     const dir = workspaceFor(message.fileId, message.fileName);
     const settings = readSettings();
     const providerId = message.resume?.provider ?? settings.provider;
+    reservation.provider = providerId;
     const provider = providers[providerId];
     if (!provider) {
       if (starting === reservation) starting = undefined;
@@ -336,7 +337,8 @@ export function createReviewBridge(args: {
     const preferenceChanged = !samePreference(before.providers[message.provider], message.settings);
     const selected = message.selectedProvider ?? before.provider;
     const selectedChanged = selected !== before.provider;
-    const target = conv;
+    const target = conv, pendingTarget = starting;
+    const pendingProviderOwned = pendingTarget?.provider === message.provider;
     let nativeChanged = false;
     if (target?.record.provider === message.provider && preferenceChanged) {
       try { await target.session.applySettings({ settings: message.settings }); nativeChanged = true; }
@@ -372,10 +374,10 @@ export function createReviewBridge(args: {
       return;
     }
     if (nativeChanged && target?.health) target.health = { ...target.health, model: message.settings.model || target.health.model };
-    if (preferenceChanged && !(nativeChanged && target?.record.provider === message.provider)) {
-      providers[message.provider]?.dispose();
-    }
-    if (selectedChanged && target?.record.provider !== before.provider
+    if (preferenceChanged && !pendingProviderOwned
+      && !(nativeChanged && target?.record.provider === message.provider)) providers[message.provider]?.dispose();
+    const previousProviderOwned = target?.record.provider === before.provider || pendingTarget?.provider === before.provider;
+    if (selectedChanged && !previousProviderOwned
       && (!preferenceChanged || before.provider !== message.provider)) providers[before.provider]?.dispose();
     const activeProviderUpdated = nativeChanged && target?.record.provider === next.provider;
     if (ws.fileId && !activeProviderUpdated
