@@ -8,8 +8,8 @@ import type { ProviderSettings, ToolResult } from "../../../shared/protocol.ts";
 import { CodexRpcError } from "./codex-client.ts";
 import { assertCodexLocalDefaults, CODEX_PERMISSION_PROFILE, type CodexExecutionPolicy } from "./codex-execution.ts";
 import {
-  codexThreadItem, codexUsageAvailability, parseAccountUsageResult, parseCodexNotification, parseDynamicToolRequest,
-  parseModelListResult, parseThreadStartResult, projectCodexModels, type CodexNotification,
+  codexThreadItem, codexUsageAvailability, parseAccountUsageResult, parseCodexNotification, parseCommandApprovalRequest,
+  parseDynamicToolRequest, parseModelListResult, parseThreadStartResult, projectCodexModels, type CodexNotification,
   type CodexServerRequest, type CodexThreadStartResult,
 } from "./codex-protocol.ts";
 import {
@@ -20,6 +20,19 @@ import {
 
 assert.doesNotThrow(() => parseDynamicToolRequest({ threadId: "thread", turnId: "turn", callId: "call", tool: "focus",
   arguments: {} }), "native dynamic-tool requests do not carry itemId");
+const commandApprovalEnvelope = { threadId: "thread", turnId: "turn", itemId: "item" };
+assert.equal(parseCommandApprovalRequest({ ...commandApprovalEnvelope, availableDecisions: [
+  "acceptForSession",
+  { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["prefix_rule(pattern=[\"git\", \"status\"])"] } },
+  { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "example.com", action: "deny" } } },
+  "decline",
+] }).availableDecisions?.length, 4, "experimental command choices accept source-shaped structured alternatives");
+for (const availableDecisions of [["future"], [{ acceptWithExecpolicyAmendment: {
+  execpolicy_amendment: "not-an-array" } }], [{ applyNetworkPolicyAmendment: {
+  network_policy_amendment: { host: "example.com", action: "future" } } }]]) {
+  assert.throws(() => parseCommandApprovalRequest({ ...commandApprovalEnvelope, availableDecisions }),
+    "unknown or malformed experimental command choices fail typed parsing");
+}
 assert.doesNotThrow(() => parseCodexNotification({ method: "turn/started", params: {
   threadId: "thread", turn: { id: "turn", items: [], status: "inProgress" },
 } }), "native turn lifecycle notifications carry turn id inside turn");
@@ -377,6 +390,39 @@ assert.deepEqual(await runtime.server("item/commandExecution/requestApproval", {
 assert.deepEqual(permissionCalls.at(-1), { tool: "codex_command", input: {
   command: "ls", cwd: dir, reason: "inspect", additionalPermissions: undefined,
 } });
+for (const optionalChoices of [{}, { availableDecisions: null }]) {
+  assert.deepEqual(await runtime.server("item/commandExecution/requestApproval", {
+    threadId: "thread-new", turnId: "turn-new", itemId: "legacy-cmd", kind: "command",
+    command: "pwd", cwd: dir, reason: "legacy", ...optionalChoices,
+  }), { decision: "accept" }, "omitted/null choices preserve legacy one-shot Allow");
+}
+const callsBeforeConstrainedDecisions = permissionCalls.length;
+for (const availableDecisions of [
+  ["acceptForSession", "decline"],
+  [],
+  [{ acceptWithExecpolicyAmendment: { execpolicy_amendment: ["prefix_rule(pattern=[\"git\"])"] } }, "decline"],
+  [{ applyNetworkPolicyAmendment: { network_policy_amendment: { host: "example.com", action: "allow" } } }, "decline"],
+]) {
+  assert.deepEqual(await runtime.server("item/commandExecution/requestApproval", {
+    threadId: "thread-new", turnId: "turn-new", itemId: "constrained-cmd", kind: "command",
+    command: "git status", cwd: dir, reason: "constrained", availableDecisions,
+  }), { decision: "decline" }, "choices without exact accept cannot publish or select persistent Allow");
+}
+assert.equal(permissionCalls.length, callsBeforeConstrainedDecisions,
+  "constrained, empty, and amendment-only choices decline before publishing a permission card");
+assert.deepEqual(await runtime.server("item/commandExecution/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "mixed-cmd", kind: "command",
+  command: "git status", cwd: dir, reason: "mixed", availableDecisions: [
+    { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["prefix_rule(pattern=[\"git\"])"] } }, "accept", "decline",
+  ],
+}), { decision: "accept" }, "exact accept remains one-shot when offered beside a structured persistent alternative");
+const callsBeforeMalformedDecisions = permissionCalls.length;
+await assert.rejects(runtime.server("item/commandExecution/requestApproval", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "malformed-cmd", kind: "command",
+  command: "git status", cwd: dir, reason: "malformed", availableDecisions: ["future"],
+}));
+assert.equal(permissionCalls.length, callsBeforeMalformedDecisions,
+  "malformed experimental choices fail typed parsing before publishing a permission card");
 const callsBeforeNetworkAmendments = permissionCalls.length;
 for (const escalation of [
   { proposedNetworkPolicyAmendments: [{ host: "example.com" }] },
@@ -697,6 +743,131 @@ for (const unsupported of ["environments", "selectedCapabilityRoots", "allowProv
 resumed.close(); provider.dispose();
 await waitUntil({ predicate: () => runtime.disposed === 1, label: "runtime disposal" });
 assert.ok(prepared.length >= 2);
+
+async function provePolicyMismatchRetirement(label: string, resume?: string) {
+  const mismatchDir = join(root, label); mkdirSync(join(mismatchDir, "notes"), { recursive: true });
+  writeFileSync(join(mismatchDir, "CLAUDE.md"), "instructions");
+  const mismatchClients: FakeClient[] = [], retirement = deferred<void>();
+  const mismatchProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+    clientFactory: args => {
+      const client = new FakeClient(args, mismatchClients.length % 2 === 0 ? "discovery" : "runtime");
+      mismatchClients.push(client); return client;
+    } });
+  mismatchProvider.prepare({ fileId: label, dir: mismatchDir, settings, boundary });
+  await waitUntil({ predicate: () => mismatchProvider.health({ settings }).status === "ready",
+    label: `${label} preparation` });
+  const offending = mismatchClients[1]!, method = resume ? "thread/resume" : "thread/start";
+  offending.retirementGate = retirement.promise;
+  offending.responses.set(method, {
+    thread: { id: resume ?? `${label}-owned`, turns: [], environments: [offending.args.policy.thread.defaultEnvironment] },
+    model: "codex-cheap", cwd: join(mismatchDir, "wrong-cwd"),
+    runtimeWorkspaceRoots: offending.args.policy.thread.runtimeWorkspaceRoots, approvalsReviewer: "user",
+    approvalPolicy: offending.args.policy.thread.approvalPolicy,
+    activePermissionProfile: { id: CODEX_PERMISSION_PROFILE }, reasoningEffort: "low", serviceTier: "default",
+  });
+  const failed = mismatchProvider.start({ fileId: label, dir: mismatchDir, resume, settings, boundary, baseRecord });
+  await waitUntil({ predicate: () => offending.disposed === 1, label: `${label} offending runtime retirement` });
+  assert.equal(mismatchProvider.health({ settings }).status, "unavailable",
+    "parse-valid thread-policy mismatch invalidates cached readiness before replacement");
+  const replacement = mismatchProvider.start({ fileId: label, dir: mismatchDir, settings, boundary, baseRecord });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(mismatchClients.length, 2, "replacement cannot spawn before exact offending runtime retirement settles");
+  retirement.resolve();
+  await assert.rejects(failed, error => error instanceof CodexThreadPolicyMismatchError
+    && error.fields.length === 1 && error.fields[0] === "cwd");
+  await waitUntil({ predicate: () => mismatchClients.length === 4
+      && mismatchProvider.health({ settings }).status === "ready",
+    label: `${label} fresh qualification` });
+  const replacementSession = await replacement;
+  assert.deepEqual([offending.calls.filter(call => call.method === method).length, offending.disposed,
+    mismatchClients[3]!.calls.filter(call => call.method === "thread/start").length,
+    mismatchClients[3]!.disposed, Reflect.get(replacementSession, "closed")], [1, 1, 1, 0, false],
+  "failed creation retires exact offender and replacement uses one freshly qualified runtime");
+  replacementSession.close(); mismatchProvider.dispose();
+  await waitUntil({ predicate: () => mismatchClients[3]!.disposed === 1, label: `${label} replacement retirement` });
+}
+await provePolicyMismatchRetirement("thread-start-policy-mismatch");
+await provePolicyMismatchRetirement("thread-resume-policy-mismatch", "resume-owned-id");
+
+const staleMismatchDirA = join(root, "stale-policy-mismatch-a"), staleMismatchDirB = join(root, "stale-policy-mismatch-b");
+for (const mismatchDir of [staleMismatchDirA, staleMismatchDirB]) {
+  mkdirSync(join(mismatchDir, "notes"), { recursive: true }); writeFileSync(join(mismatchDir, "CLAUDE.md"), "instructions");
+}
+const staleMismatchClients: FakeClient[] = [];
+const staleMismatchProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, staleMismatchClients.length % 2 === 0 ? "discovery" : "runtime");
+    staleMismatchClients.push(client); return client;
+  } });
+staleMismatchProvider.prepare({ fileId: "stale-policy-a", dir: staleMismatchDirA, settings, boundary });
+await waitUntil({ predicate: () => staleMismatchProvider.health({ settings }).status === "ready",
+  label: "stale mismatch initial preparation" });
+const staleOffender = staleMismatchClients[1]!, staleReply = deferred<unknown>();
+staleOffender.responseQueues.set("thread/start", [staleReply.promise]);
+const staleMismatchStart = staleMismatchProvider.start({
+  fileId: "stale-policy-a", dir: staleMismatchDirA, settings, boundary, baseRecord,
+});
+await waitUntil({ predicate: () => staleOffender.calls.some(call => call.method === "thread/start"),
+  label: "stale mismatch request" });
+const newerMismatchSession = await staleMismatchProvider.start({
+  fileId: "stale-policy-b", dir: staleMismatchDirB, settings, boundary, baseRecord,
+});
+const newerMismatchRuntime = staleMismatchClients[3]!;
+staleReply.resolve({
+  thread: { id: "stale-owned-id", turns: [], environments: [staleOffender.args.policy.thread.defaultEnvironment] },
+  model: "codex-cheap", cwd: join(staleMismatchDirA, "wrong-cwd"),
+  runtimeWorkspaceRoots: staleOffender.args.policy.thread.runtimeWorkspaceRoots, approvalsReviewer: "user",
+  approvalPolicy: staleOffender.args.policy.thread.approvalPolicy,
+  activePermissionProfile: { id: CODEX_PERMISSION_PROFILE }, reasoningEffort: "low", serviceTier: "default",
+});
+await assert.rejects(staleMismatchStart, error => error instanceof CodexThreadPolicyMismatchError
+  && error.fields[0] === "cwd");
+assert.deepEqual([staleOffender.disposed, newerMismatchRuntime.disposed, Reflect.get(newerMismatchSession, "closed"),
+  staleMismatchProvider.health({ settings }).status, Reflect.get(staleMismatchProvider, "active") === newerMismatchSession],
+[1, 0, false, "ready", true],
+"late mismatch retires only its obsolete exact client without invalidating or closing newer ownership");
+newerMismatchSession.close(); staleMismatchProvider.dispose();
+await waitUntil({ predicate: () => newerMismatchRuntime.disposed === 1, label: "stale mismatch replacement retirement" });
+
+const sharedMismatchDir = join(root, "shared-policy-mismatch");
+mkdirSync(join(sharedMismatchDir, "notes"), { recursive: true }); writeFileSync(join(sharedMismatchDir, "CLAUDE.md"), "instructions");
+const sharedMismatchClients: FakeClient[] = [];
+const sharedMismatchProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => {
+    const client = new FakeClient(args, sharedMismatchClients.length % 2 === 0 ? "discovery" : "runtime");
+    sharedMismatchClients.push(client); return client;
+  } });
+sharedMismatchProvider.prepare({ fileId: "shared-policy", dir: sharedMismatchDir, settings, boundary });
+await waitUntil({ predicate: () => sharedMismatchProvider.health({ settings }).status === "ready",
+  label: "shared mismatch preparation" });
+const sharedOffender = sharedMismatchClients[1]!, olderReply = deferred<unknown>(), newerReply = deferred<unknown>();
+sharedOffender.responseQueues.set("thread/start", [olderReply.promise, newerReply.promise]);
+const sharedOlderStart = sharedMismatchProvider.start({
+  fileId: "shared-policy", dir: sharedMismatchDir, settings, boundary, baseRecord,
+});
+await waitUntil({ predicate: () => sharedOffender.calls.filter(call => call.method === "thread/start").length === 1,
+  label: "shared mismatch older request" });
+const sharedNewerStart = sharedMismatchProvider.start({
+  fileId: "shared-policy", dir: sharedMismatchDir, settings, boundary, baseRecord,
+});
+await waitUntil({ predicate: () => sharedOffender.calls.filter(call => call.method === "thread/start").length === 2,
+  label: "shared mismatch newer request" });
+const sharedResult = (threadId: string, cwd: string) => ({
+  thread: { id: threadId, turns: [], environments: [sharedOffender.args.policy.thread.defaultEnvironment] },
+  model: "codex-cheap", cwd, runtimeWorkspaceRoots: sharedOffender.args.policy.thread.runtimeWorkspaceRoots,
+  approvalsReviewer: "user", approvalPolicy: sharedOffender.args.policy.thread.approvalPolicy,
+  activePermissionProfile: { id: CODEX_PERMISSION_PROFILE }, reasoningEffort: "low", serviceTier: "default",
+});
+newerReply.resolve(sharedResult("shared-newer-owned", sharedOffender.args.policy.thread.cwd));
+const sharedNewerSession = await sharedNewerStart;
+olderReply.resolve(sharedResult("shared-older-owned", join(sharedMismatchDir, "wrong-cwd")));
+await assert.rejects(sharedOlderStart, error => error instanceof CodexThreadPolicyMismatchError
+  && error.fields[0] === "cwd");
+await waitUntil({ predicate: () => sharedOffender.disposed === 1, label: "shared mismatch exact retirement" });
+assert.deepEqual([Reflect.get(sharedNewerSession, "closed"), sharedMismatchProvider.health({ settings }).status,
+  Reflect.get(sharedMismatchProvider, "active")], [true, "unavailable", undefined],
+"one parse-valid match cannot keep a shared runtime trusted after another owned reply violates policy");
+sharedMismatchProvider.dispose();
 
 const retirementDir = join(root, "retirement");
 mkdirSync(join(retirementDir, "notes"), { recursive: true });

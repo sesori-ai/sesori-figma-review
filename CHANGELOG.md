@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turns without native error text.
 - Codex binds initial and future settings confirmations to their operation-specific working directories and retires clients with
   outstanding required History reads before replacement.
+- Codex retires the exact runtime after a parse-valid thread-policy mismatch without poisoning newer ownership, and offers one-shot
+  command Allow only when experimental native choices include exact `accept`.
 
 ## [0.3.2]
 

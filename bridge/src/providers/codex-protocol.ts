@@ -190,12 +190,20 @@ const requestBase = turnRequestBase.extend({ itemId: identifier });
 export const parseDynamicToolRequest = (value: unknown) => turnRequestBase.extend({
   callId: identifier, namespace: z.string().nullable().optional(), tool: identifier, arguments: z.unknown(),
 }).parse(value);
+const commandApprovalDecision = z.union([
+  z.enum(["accept", "acceptForSession", "decline", "cancel"]),
+  z.strictObject({ acceptWithExecpolicyAmendment: z.strictObject({ execpolicy_amendment: z.array(z.string()) }) }),
+  z.strictObject({ applyNetworkPolicyAmendment: z.strictObject({
+    network_policy_amendment: z.strictObject({ host: z.string(), action: z.enum(["allow", "deny"]) }),
+  }) }),
+]);
 export const parseCommandApprovalRequest = (value: unknown) => requestBase.extend({
   kind: z.enum(["command", "writeStdin"]).default("command"), command: z.string().nullable().optional(),
   cwd: z.string().nullable().optional(), reason: z.string().nullable().optional(),
   networkApprovalContext: z.unknown().nullable().optional(),
   additionalPermissions: record.nullable().optional(), proposedExecpolicyAmendment: z.unknown().nullable().optional(),
-  proposedNetworkPolicyAmendments: z.unknown().nullable().optional(), availableDecisions: z.array(z.string()).nullable().optional(),
+  proposedNetworkPolicyAmendments: z.unknown().nullable().optional(),
+  availableDecisions: z.array(commandApprovalDecision).nullable().optional(),
 }).parse(value);
 export const parseFileApprovalRequest = (value: unknown) => requestBase.extend({
   reason: z.string().nullable().optional(), grantRoot: z.string().nullable().optional(),

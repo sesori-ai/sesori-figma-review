@@ -92,6 +92,7 @@ type ClientFactory = (args: {
 
 type Prepared = {
   key: string;
+  generation: number;
   policy: CodexExecutionPolicy;
   client: RpcClient;
   qualification: CodexQualification;
@@ -559,6 +560,8 @@ class CodexSession implements ReviewSession {
     if (request.method === "item/commandExecution/requestApproval") {
       const params = parseCommandApprovalRequest(request.params); this.assertOwner(params);
       if (!params.command || !params.cwd || params.kind !== "command") return { decision: "decline" };
+      if (params.availableDecisions != null
+        && !params.availableDecisions.some(decision => decision === "accept")) return { decision: "decline" };
       const network = params.proposedNetworkPolicyAmendments;
       const networkEscalation = params.networkApprovalContext != null
         || network != null && (!Array.isArray(network) || network.length > 0);
@@ -777,7 +780,9 @@ export class CodexProvider implements ReviewProvider {
     const diagnostics = diagnoseCodexThreadPolicy({
       result, resume: args.resume, policy: prepared.policy, model: selected.model, effort: selected.effort,
     });
-    if (!diagnostics.matches) throw new CodexThreadPolicyMismatchError(diagnostics.fields);
+    if (!diagnostics.matches) {
+      await this.rejectThreadPolicy(prepared, new CodexThreadPolicyMismatchError(diagnostics.fields));
+    }
     const health: ProviderHealth = {
       provider: "codex", status: "ready", version: prepared.qualification.version, model: result.model,
       models: prepared.qualification.models,
@@ -914,8 +919,19 @@ export class CodexProvider implements ReviewProvider {
     }));
     try {
       const qualification = await qualifyCodexRuntime({ client: client as CodexClient, policy });
-      return { key: this.preparedKey!, policy, client, qualification };
+      return { key: this.preparedKey!, generation: args.generation, policy, client, qualification };
     } catch (error) { await this.retire(client); throw error; }
+  }
+
+  private async rejectThreadPolicy(prepared: Prepared, error: CodexThreadPolicyMismatchError): Promise<never> {
+    if (prepared.generation === this.generation) {
+      const active = this.active; this.active = undefined; active?.close();
+      this.client = undefined; this.prepared = undefined; this.preparedKey = undefined;
+      this.runtime = { status: "unavailable", error: error.message };
+      this.generation++; this.startSequence++; this.notify();
+    }
+    await this.retire(prepared.client);
+    throw error;
   }
 
   private own<T extends RpcClient>(client: T): T { this.ownedClients.add(client); return client; }
