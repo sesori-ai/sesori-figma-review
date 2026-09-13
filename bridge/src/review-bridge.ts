@@ -290,6 +290,9 @@ export function createReviewBridge(args: {
           } else {
             if (output.accountingCheckpoint) saveSession(current.dir, current.record);
             send(current.fileId, { kind: "session", session: current.record });
+            if (output.accountingCheckpoint) {
+              send(current.fileId, { kind: "sessions", sessions: readSessions(current.dir) });
+            }
           }
         }
       }

@@ -448,12 +448,20 @@ const codexRecord = await codexClient.next(down({ kind: "session", where: messag
 assert.deepEqual([codexRecord.session.provider, codexRecord.session.costUsd, codexRecord.session.costStatus],
   ["codex", 0, "unavailable"]);
 const completionTimestamp = codexRecord.session.updatedAt;
+await codexClient.next(down({ kind: "busy", where: message => !message.busy }));
+const completedBusyMessages = codexClient.matching(down({ kind: "busy", where: message => !message.busy })).length;
 codexSession.output.push(usage(2, 0.75, "estimated", false, true));
 await codexClient.next(down({ kind: "session", where: message => message.session.costUsd === 0.75 }));
+const refreshedSessions = await codexClient.next(down({ kind: "sessions", where: message =>
+  message.sessions.some(session => session.sessionId === "codex-owned" && session.costUsd === 0.75) }));
+const refreshedHistoryRow = refreshedSessions.sessions.find(session => session.sessionId === "codex-owned")!;
 const checkpointed = readSessions(join(process.env.SESORI_REVIEW_HOME, "files", "codex-file"))[0]!;
-assert.deepEqual([checkpointed.turns, checkpointed.updatedAt, checkpointed.costUsd, checkpointed.costStatus],
-  [1, completionTimestamp, 0.75, "estimated"],
-  "delayed cost checkpoints persist without incrementing turns or changing completion time");
+assert.deepEqual([checkpointed.turns, checkpointed.updatedAt, checkpointed.costUsd, checkpointed.costStatus,
+  refreshedHistoryRow.turns, refreshedHistoryRow.updatedAt, refreshedHistoryRow.costUsd, refreshedHistoryRow.costStatus],
+[1, completionTimestamp, 0.75, "estimated", 1, completionTimestamp, 0.75, "estimated"],
+"delayed cost checkpoints persist and refresh History rows without incrementing turns or changing completion time");
+assert.equal(codexClient.matching(down({ kind: "busy", where: message => !message.busy })).length, completedBusyMessages,
+  "accounting checkpoints do not publish a false turn completion");
 codex.history = [{ role: "tool", name: "ask_user", input: { question: "Q" } }, { role: "answer", text: "A" }];
 codexClient.send({ kind: "open", intentId: "codex-history", fileId: "codex-file", fileName: "Codex",
   session: { provider: "codex", sessionId: "codex-owned" } });
