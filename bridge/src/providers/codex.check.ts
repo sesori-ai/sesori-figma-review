@@ -297,6 +297,31 @@ await assert.rejects(timedOut.request({ method: "never/replies", params: {}, par
 assert.equal(timeoutFixture.killed, true);
 await assert.rejects(timedOut.request({ method: "after-timeout", params: {}, parse: String }), /timed out/);
 timeoutFixture.send({ method: "late/event", params: {} }); assert.deepEqual(lateCallbacks, []);
+let delayedAccountingId: unknown;
+const optionalFixture = new FakeChild((message, server) => {
+  if (message.method === "initialize") server.send({ id: message.id,
+    result: { userAgent: "codex/0.154.0", codexHome: "/owned", platformFamily: "unix", platformOs: "linux" } });
+  if (message.method === "account/usage/read") {
+    if (delayedAccountingId === undefined) delayedAccountingId = message.id;
+    else server.send({ id: message.id, result: { threadUsage: null } });
+  }
+  if (message.method === "turn/start") server.send({ id: message.id, result: { turn: "new" } });
+});
+const optionalClient = new CodexClient({ policy, clientVersion: "test", log: () => {}, childFactory: () => optionalFixture,
+  requestTimeoutMs: 5 });
+await optionalClient.connect();
+assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {}, parse: value => value }),
+  undefined, "optional accounting timeout reports unavailable without terminating shared runtime");
+const sentAfterTimeout = optionalFixture.sent.length;
+assert.equal(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {}, parse: value => value }),
+  undefined);
+assert.equal(optionalFixture.sent.length, sentAfterTimeout, "one stuck accounting slot coalesces later optional reads");
+assert.deepEqual(await optionalClient.request({ method: "turn/start", params: {}, parse: value => value }), { turn: "new" });
+assert.equal(optionalFixture.killed, false, "optional accounting timeout cannot kill a later mutating turn");
+optionalFixture.send({ id: delayedAccountingId, result: { threadUsage: null } }); await wait();
+assert.deepEqual(await optionalClient.requestOptionalAccounting({ method: "account/usage/read", params: {}, parse: value => value }),
+  { threadUsage: null }, "late accounting response drains its bounded slot without poisoning newer RPCs");
+optionalClient.dispose();
 const outbound = await connectedFixture({ maxLineBytes: 256 });
 await assert.rejects(
   outbound.fixtureClient.request({ method: "too/large", params: { value: "x".repeat(300) }, parse: String }),

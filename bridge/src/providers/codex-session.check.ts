@@ -91,7 +91,8 @@ class FakeClient {
   confirmSettings = true;
   initialSettingsNotifications = 0;
   turnStartOrder: "none" | "settings-before-response" | "settings-response-started" | "response-settings-started"
-    | "settings-started-response" | "response-started-settings" = "settings-before-response";
+    | "settings-started-response" | "settings-started-completed-response" | "response-started-settings"
+    = "settings-before-response";
   nativeSettings = { model: "codex-cheap", effort: "low", serviceTier: "default" as const };
   retirementGate?: Promise<void>;
   constructor(readonly args: {
@@ -123,13 +124,18 @@ class FakeClient {
       const started = () => this.notify("turn/started", { threadId: turn.threadId, turnId,
         turn: { id: turnId, items: [], status: "inProgress" } });
       if (this.turnStartOrder.startsWith("settings-")) settings();
-      if (this.turnStartOrder === "settings-started-response") started();
+      if (["settings-started-response", "settings-started-completed-response"].includes(this.turnStartOrder)) started();
+      if (this.turnStartOrder === "settings-started-completed-response") {
+        this.notify("turn/completed", { threadId: turn.threadId,
+          turn: { id: turnId, items: [], status: "completed" } });
+      }
       if (this.turnStartOrder === "settings-response-started") setImmediate(started);
       if (this.turnStartOrder === "response-settings-started") setImmediate(() => { settings(); started(); });
       if (this.turnStartOrder === "response-started-settings") setImmediate(() => { started(); settings(); });
     }
     return args.parse(response);
   }
+  requestOptionalAccounting<T>(args: RpcArgs<T>): Promise<T | undefined> { return this.request(args); }
   private defaultResponse(method: string, params: unknown): unknown {
     if (method === "config/read") {
       const config = effectiveConfig(this.args.policy);
@@ -424,6 +430,21 @@ assert.deepEqual(await runtime.server("item/tool/requestUserInput", {
 }), { answers: { q1: { answers: ["Free text"] } } });
 toolGate = undefined;
 assert.deepEqual(toolCalls.at(-1), { tool: "ask_user", args: { question: "Continue?", options: ["Yes"] } });
+const interruptedQuestion = deferred<ToolResult>(), toolCallsBeforeInterrupt = toolCalls.length;
+toolGate = interruptedQuestion.promise;
+const interruptedQuestions = runtime.server("item/tool/requestUserInput", {
+  threadId: "thread-new", turnId: "turn-new", itemId: "questions", isBlocking: true,
+  questions: [
+    { id: "first", header: "First", question: "First?", options: null },
+    { id: "second", header: "Second", question: "Second?", options: null },
+  ],
+});
+await waitUntil({ predicate: () => toolCalls.length === toolCallsBeforeInterrupt + 1, label: "first native question" });
+await session.interrupt();
+interruptedQuestion.resolve({ content: [{ type: "text", text: "stopped" }], isError: true });
+await assert.rejects(interruptedQuestions, /user input request was interrupted/);
+assert.equal(toolCalls.length, toolCallsBeforeInterrupt + 1, "Stop during first question cannot publish a second card");
+toolGate = undefined;
 
 session.send({ text: "Steer", selection: [] }); await new Promise(resolve => setImmediate(resolve));
 assert.equal(runtime.calls.filter(call => call.method === "turn/steer").length, 1);
@@ -686,6 +707,94 @@ async function orderingFixture(label: string) {
   return { provider: fixtureProvider, session: fixtureSession, runtime: fixtureClients[1]!, clients: fixtureClients,
     iterator: fixtureIterator, dir: fixtureDir };
 }
+const rapidSettings = await orderingFixture("rapid-settings-send");
+rapidSettings.runtime.turnStartOrder = "settings-response-started";
+const rapidSettingsResponse = deferred<unknown>();
+rapidSettings.runtime.responseQueues.set("thread/settings/update", [rapidSettingsResponse.promise]);
+const rapidUpdate = rapidSettings.session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
+rapidSettings.session.send({ text: "after settings", selection: [] });
+await waitUntil({ predicate: () => rapidSettings.runtime.calls.some(call => call.method === "thread/settings/update"),
+  label: "rapid settings request" });
+assert.equal(rapidSettings.runtime.calls.some(call => call.method === "turn/start"), false,
+  "rapid send waits behind previously admitted settings update");
+rapidSettingsResponse.resolve({}); await rapidUpdate;
+await waitUntil({ predicate: () => Reflect.get(rapidSettings.session, "activeTurn") === "turn-new",
+  label: "rapid send after settings" });
+assert.deepEqual(Reflect.get(rapidSettings.session, "settings"), { model: "codex-cheap", effort: "medium" });
+assert.equal(Reflect.get(rapidSettings.session, "closed"), false,
+  "settings confirmation cannot be misclassified as stale initial snapshot");
+rapidSettings.session.close(); rapidSettings.provider.dispose();
+await waitUntil({ predicate: () => rapidSettings.runtime.disposed === 1, label: "rapid settings retirement" });
+
+const reciprocal = await orderingFixture("send-settings-interleave");
+reciprocal.runtime.turnStartOrder = "settings-started-response";
+const reciprocalStart = deferred<unknown>(); reciprocal.runtime.responseQueues.set("turn/start", [reciprocalStart.promise]);
+reciprocal.session.send({ text: "before settings", selection: [] });
+await waitUntil({ predicate: () => reciprocal.runtime.calls.some(call => call.method === "turn/start"),
+  label: "reciprocal turn request" });
+const reciprocalUpdate = reciprocal.session.applySettings({ settings: { model: "codex-cheap", effort: "medium" } });
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(reciprocal.runtime.calls.some(call => call.method === "thread/settings/update"), false,
+  "settings admitted after send waits for the owned turn start");
+reciprocalStart.resolve({ turn: { id: "turn-new", items: [], status: "inProgress" } });
+await reciprocalUpdate;
+assert.deepEqual(reciprocal.runtime.calls.filter(call =>
+  ["turn/start", "thread/settings/update", "turn/settings/update"].includes(call.method)).map(call => call.method),
+["turn/start", "thread/settings/update", "turn/settings/update"]);
+reciprocal.session.close(); reciprocal.provider.dispose();
+await waitUntil({ predicate: () => reciprocal.runtime.disposed === 1, label: "reciprocal retirement" });
+
+const completedBeforeResponse = await orderingFixture("turn-completed-before-response");
+completedBeforeResponse.runtime.turnStartOrder = "settings-started-completed-response";
+completedBeforeResponse.session.send({ text: "fast completion", selection: [] });
+assert.equal(((await completedBeforeResponse.iterator.next()).value as { event: { type: string } }).event.type, "turn_end");
+assert.equal(((await completedBeforeResponse.iterator.next()).value as Extract<ProviderOutput, { kind: "usage" }>).turnCompleted,
+  true);
+await completedBeforeResponse.iterator.next();
+await waitUntil({ predicate: () => Reflect.get(completedBeforeResponse.session, "turnStart") === undefined,
+  label: "completed-before-response lifecycle" });
+assert.deepEqual([Reflect.get(completedBeforeResponse.session, "activeTurn"),
+  completedBeforeResponse.runtime.calls.filter(call => call.method === "turn/interrupt").length], [undefined, 0]);
+await completedBeforeResponse.session.interrupt();
+assert.equal(completedBeforeResponse.runtime.calls.filter(call => call.method === "turn/interrupt").length, 0,
+  "late start response cannot resurrect a completed active turn");
+completedBeforeResponse.session.close(); completedBeforeResponse.provider.dispose();
+await waitUntil({ predicate: () => completedBeforeResponse.runtime.disposed === 1,
+  label: "completed-before-response retirement" });
+
+const reversedStartDir = join(root, "reversed-provider-starts");
+mkdirSync(join(reversedStartDir, "notes"), { recursive: true }); writeFileSync(join(reversedStartDir, "CLAUDE.md"), "instructions");
+const reversedClients: FakeClient[] = [];
+const reversedProvider = new CodexProvider({ version: "test", log: () => {}, onPrepared: () => {},
+  clientFactory: args => { const client = new FakeClient(args, reversedClients.length % 2 === 0 ? "discovery" : "runtime");
+    reversedClients.push(client); return client; } });
+reversedProvider.prepare({ fileId: "reversed", dir: reversedStartDir, settings, boundary });
+await waitUntil({ predicate: () => reversedProvider.health({ settings }).status === "ready", label: "reversed preparation" });
+const reversedRuntime = reversedClients[1]!, olderStart = deferred<unknown>(), newerStart = deferred<unknown>();
+reversedRuntime.responseQueues.set("thread/start", [olderStart.promise, newerStart.promise]);
+const olderSessionPromise = reversedProvider.start({ fileId: "reversed", dir: reversedStartDir, settings, boundary, baseRecord });
+await waitUntil({ predicate: () => reversedRuntime.calls.filter(call => call.method === "thread/start").length === 1,
+  label: "older provider start" });
+const newerSessionPromise = reversedProvider.start({ fileId: "reversed", dir: reversedStartDir, settings, boundary, baseRecord });
+await waitUntil({ predicate: () => reversedRuntime.calls.filter(call => call.method === "thread/start").length === 2,
+  label: "newer provider start" });
+const threadStartResult = (threadId: string) => ({
+  thread: { id: threadId, turns: [], environments: [reversedRuntime.args.policy.thread.defaultEnvironment] },
+  model: "codex-cheap", cwd: reversedRuntime.args.policy.thread.cwd,
+  runtimeWorkspaceRoots: reversedRuntime.args.policy.thread.runtimeWorkspaceRoots, approvalsReviewer: "user",
+  approvalPolicy: reversedRuntime.args.policy.thread.approvalPolicy,
+  activePermissionProfile: { id: CODEX_PERMISSION_PROFILE }, reasoningEffort: "low", serviceTier: "default",
+});
+newerStart.resolve(threadStartResult("thread-newer")); const newerSession = await newerSessionPromise;
+olderStart.resolve(threadStartResult("thread-older")); const olderSession = await olderSessionPromise;
+assert.deepEqual([Reflect.get(olderSession, "closed"), Reflect.get(newerSession, "closed"),
+  Reflect.get(reversedProvider, "active") === newerSession], [true, false, true],
+"reversed stale start completion cannot close or replace the newer session");
+assert.equal(((await olderSession.output[Symbol.asyncIterator]().next()).value as Extract<ProviderOutput,
+  { kind: "initialized" }>).sessionId, "thread-older", "stale returned thread identity remains observable");
+newerSession.close(); reversedProvider.dispose();
+await waitUntil({ predicate: () => reversedRuntime.disposed === 1, label: "reversed start retirement" });
+
 const sourceOrders: TurnStartOrder[] = ["settings-response-started", "response-settings-started", "settings-started-response"];
 for (const order of sourceOrders) {
   const fixture = await orderingFixture(`turn-order-${order}`); fixture.runtime.turnStartOrder = order;

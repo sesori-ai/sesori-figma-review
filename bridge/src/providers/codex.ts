@@ -80,7 +80,7 @@ class OutputQueue implements AsyncIterable<ProviderOutput> {
   }
 }
 
-type RpcClient = Pick<CodexClient, "connect" | "request" | "dispose" | "disposeAndWait">;
+type RpcClient = Pick<CodexClient, "connect" | "request" | "requestOptionalAccounting" | "dispose" | "disposeAndWait">;
 type ClientFactory = (args: {
   policy: CodexExecutionPolicy;
   onRequest?: (request: CodexServerRequest) => Promise<unknown>;
@@ -230,7 +230,8 @@ export function projectCodexHistory(turns: { id: string; items: CodexThreadItem[
 }
 
 type TurnStartLifecycle = {
-  responseSettled: boolean; started: boolean; settingsObserved: boolean; turnId?: string; model: string; effort: string;
+  responseSettled: boolean; started: boolean; completed: boolean; settingsObserved: boolean;
+  turnId?: string; model: string; effort: string;
 };
 
 class CodexSession implements ReviewSession {
@@ -247,6 +248,7 @@ class CodexSession implements ReviewSession {
   private turnStart?: TurnStartLifecycle;
   private closed = false;
   private generation = 0;
+  private interruptionGeneration = 0;
   private readonly completedTurns = new Set<string>();
   private costReadSequence = 0;
   private readonly changes = new Map<string, unknown[]>();
@@ -284,7 +286,9 @@ class CodexSession implements ReviewSession {
     const input: Record<string, unknown>[] = [{ type: "text", text: userText(args), textElements: [] }];
     if (this.firstInput) input.push({ type: "skill", name: "review-flow", path: this.args.skillPath });
     this.firstInput = false;
+    const settingsBarrier = this.settingsQueue;
     const dispatch = this.sendQueue.then(async () => {
+      await settingsBarrier;
       if (this.closed) throw new Error("Codex session is closed");
       const turnId = this.activeTurn;
       if (!turnId) { await this.startTurn(input); return; }
@@ -308,6 +312,7 @@ class CodexSession implements ReviewSession {
     await this.sendQueue;
     const turnId = this.activeTurn;
     if (this.closed || !turnId) return;
+    this.interruptionGeneration++;
     await this.args.client.request({
       method: "turn/interrupt", params: { threadId: this.args.threadId, turnId }, parse: parseEmptyResult,
     });
@@ -315,7 +320,9 @@ class CodexSession implements ReviewSession {
 
   applySettings(args: { settings: ProviderSettings }): Promise<void> {
     const requested = this.resolveSettings(args.settings);
+    const sendBarrier = this.sendQueue;
     const update = this.settingsQueue.then(async () => {
+      await sendBarrier;
       if (this.closed) throw new Error("Codex session is closed");
       const previous = this.settings;
       if (requested.model === previous.model && requested.effort === previous.effort) return;
@@ -350,8 +357,10 @@ class CodexSession implements ReviewSession {
   }
   private async startTurn(input: Record<string, unknown>[]) {
     if (this.turnStart) throw new Error("Codex turn start is already pending");
-    const lifecycle: TurnStartLifecycle = this.turnStart = { responseSettled: false, started: false, settingsObserved: false,
-      model: this.settings.model, effort: this.settings.effort };
+    const lifecycle: TurnStartLifecycle = this.turnStart = {
+      responseSettled: false, started: false, completed: false, settingsObserved: false,
+      model: this.settings.model, effort: this.settings.effort,
+    };
     const started = await this.args.client.request({
       method: "turn/start", params: {
         threadId: this.args.threadId, input, environments: this.args.policy.thread.turnEnvironments,
@@ -361,7 +370,8 @@ class CodexSession implements ReviewSession {
     if (lifecycle.turnId && lifecycle.turnId !== started.turn.id) {
       throw new Error("Codex turn start response does not match the started turn");
     }
-    lifecycle.turnId = started.turn.id; lifecycle.responseSettled = true; this.activeTurn = started.turn.id;
+    lifecycle.turnId = started.turn.id; lifecycle.responseSettled = true;
+    if (!lifecycle.completed) this.activeTurn = started.turn.id;
     if (lifecycle.started && this.turnStart === lifecycle) this.turnStart = undefined;
   }
   private async updateFuture(settings: ProviderSettings) {
@@ -458,6 +468,7 @@ class CodexSession implements ReviewSession {
   private completeTurn(turn: { id: string; status: string; error?: { message: string } | null }) {
     if (this.completedTurns.has(turn.id)) return;
     this.completedTurns.add(turn.id);
+    if (this.turnStart?.turnId === turn.id) this.turnStart.completed = true;
     if (this.activeTurn === turn.id) this.activeTurn = undefined;
     const outcome = turn.status === "interrupted" ? "interrupted" : turn.status === "failed" ? "failed" : "completed";
     this.emit({ type: "turn_end", session: this.ref(), itemId: turn.id, outcome,
@@ -477,10 +488,11 @@ class CodexSession implements ReviewSession {
     });
   }
   private async readCost() {
-    const result = await this.args.client.request({ method: "account/usage/read", params: {
+    const result = await this.args.client.requestOptionalAccounting({ method: "account/usage/read", params: {
       threadId: this.args.threadId,
     }, parse: parseAccountUsageResult });
-    return costFrom(result, this.cost.usd, this.args.threadId);
+    return result ? costFrom(result, this.cost.usd, this.args.threadId)
+      : { usd: this.cost.usd, status: "unavailable" as const };
   }
 
   async request(request: CodexServerRequest): Promise<unknown> {
@@ -530,11 +542,16 @@ class CodexSession implements ReviewSession {
     }
     if (request.method === "item/tool/requestUserInput") {
       const params = parseUserInputRequest(request.params); this.assertOwner(params);
+      const interruptionGeneration = this.interruptionGeneration;
       const answers: Record<string, { answers: string[] }> = {};
       for (const question of params.questions) {
         const result = await this.args.boundary.tool({ tool: "ask_user", args: {
           question: question.question, options: question.options?.map(option => option.label),
         } });
+        if (interruptionGeneration !== this.interruptionGeneration) {
+          throw new Error("Codex user input request was interrupted");
+        }
+        this.assertOwner(params);
         const text = result.content.flatMap(item => item.type === "text" ? [item.text] : []).join("\n");
         answers[question.id] = { answers: [text] };
       }
@@ -621,6 +638,7 @@ export class CodexProvider implements ReviewProvider {
   private client?: RpcClient;
   private active?: CodexSession;
   private generation = 0;
+  private startSequence = 0;
   private readonly ownedClients = new Set<RpcClient>();
   private readonly retirements = new WeakMap<object, Promise<void>>();
   private retirement: Promise<void> = Promise.resolve();
@@ -659,8 +677,10 @@ export class CodexProvider implements ReviewProvider {
     fileId: string; dir: string; resume?: string; settings: ProviderSettings; boundary: ProviderRequestBoundary;
     baseRecord: ProviderSessionRecord;
   }): Promise<ReviewSession> {
+    const startSequence = ++this.startSequence;
     this.active?.close();
     const prepared = await this.ensurePrepared(args);
+    if (startSequence !== this.startSequence) throw new Error("Codex session start was superseded");
     const selected = this.resolveSettings(prepared.qualification, args.settings);
     const scaffold = provisionCodexWorkspace({ dir: args.dir });
     const common = {
@@ -704,6 +724,10 @@ export class CodexProvider implements ReviewProvider {
       fresh: !args.resume, skillPath: scaffold.skillPath, boundary: args.boundary, baseRecord: args.baseRecord, health,
       onClose: (target, nativeTurnPending) => this.sessionClosed(target, nativeTurnPending), log: this.args.log,
     });
+    if (startSequence !== this.startSequence) {
+      session.close();
+      return session;
+    }
     this.active?.close(); this.active = session;
     return session;
   }
@@ -719,10 +743,10 @@ export class CodexProvider implements ReviewProvider {
     if (result.thread.id !== args.sessionId) throw new Error("Codex read a different native thread");
     let cost = { usd: args.baseRecord.costUsd, status: args.baseRecord.costStatus };
     try {
-      const usage = await prepared.client.request({ method: "account/usage/read", params: {
+      const usage = await prepared.client.requestOptionalAccounting({ method: "account/usage/read", params: {
         threadId: args.sessionId,
       }, parse: parseAccountUsageResult });
-      cost = costFrom(usage, cost.usd, args.sessionId);
+      cost = usage ? costFrom(usage, cost.usd, args.sessionId) : { usd: cost.usd, status: "unavailable" };
     } catch (error) {
       this.args.log("Codex history cost read failed", error); cost = { usd: cost.usd, status: "unavailable" };
     }
@@ -819,5 +843,5 @@ export class CodexProvider implements ReviewProvider {
     for (const client of clients) void this.retire(client).catch(error => this.args.log("Codex retirement uncertain", error));
     this.prepared = undefined; this.preparedKey = undefined;
   }
-  dispose() { this.generation++; this.disposeRuntime(); this.runtime = undefined; this.notify(); }
+  dispose() { this.generation++; this.startSequence++; this.disposeRuntime(); this.runtime = undefined; this.notify(); }
 }

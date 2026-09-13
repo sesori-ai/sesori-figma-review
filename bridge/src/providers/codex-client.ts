@@ -74,6 +74,7 @@ type Pending = {
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
+  timedOut?: boolean;
 };
 
 export class CodexRpcError extends Error {
@@ -86,6 +87,7 @@ export class CodexClient {
   private initialized?: CodexInitializeResult;
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, Pending>();
+  private optionalAccountingId?: JsonRpcId;
   private readonly stdoutBuffer = new LineAccumulator();
   private stderrBuffer = Buffer.alloc(0);
   private terminalError?: Error;
@@ -120,6 +122,14 @@ export class CodexClient {
   async request<T>(args: { method: string; params: unknown; parse: (value: unknown) => T }): Promise<T> {
     await this.connect();
     return this.rawRequest(args);
+  }
+
+  async requestOptionalAccounting<T>(args: {
+    method: "account/usage/read"; params: unknown; parse: (value: unknown) => T;
+  }): Promise<T | undefined> {
+    await this.connect();
+    if (this.optionalAccountingId !== undefined) return;
+    return this.rawRequest(args, { optionalAccounting: true });
   }
 
   notify(args: { method: string; params: unknown }) {
@@ -161,12 +171,21 @@ export class CodexClient {
     }
   }
 
-  private rawRequest<T>(args: { method: string; params: unknown; parse: (value: unknown) => T }): Promise<T> {
+  private rawRequest<T>(args: { method: string; params: unknown; parse: (value: unknown) => T }): Promise<T>;
+  private rawRequest<T>(args: { method: string; params: unknown; parse: (value: unknown) => T },
+    options: { optionalAccounting: true }): Promise<T | undefined>;
+  private rawRequest<T>(args: { method: string; params: unknown; parse: (value: unknown) => T },
+    options: { optionalAccounting?: boolean } = {}): Promise<T | undefined> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.nextId++;
-    return new Promise<T>((resolve, reject) => {
+    if (options.optionalAccounting) this.optionalAccountingId = id;
+    return new Promise<T | undefined>((resolve, reject) => {
       const timeoutMs = this.args.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
       const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (options.optionalAccounting && pending) {
+          pending.timedOut = true; resolve(undefined); return;
+        }
         this.terminate(new Error(`Codex ${args.method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pending.set(id, {
@@ -177,7 +196,11 @@ export class CodexClient {
         timer,
       });
       try { this.send({ id, method: args.method, params: args.params }); }
-      catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
+      catch (error) {
+        clearTimeout(timer); this.pending.delete(id);
+        if (this.optionalAccountingId === id) this.optionalAccountingId = undefined;
+        reject(error);
+      }
     });
   }
 
@@ -240,13 +263,16 @@ export class CodexClient {
     const pending = this.pending.get(message.id);
     if (!pending) throw new Error(`response has unknown id ${JSON.stringify(message.id)}`);
     this.pending.delete(message.id); clearTimeout(pending.timer);
+    if (this.optionalAccountingId === message.id) this.optionalAccountingId = undefined;
     if (message.error) {
-      pending.reject(new CodexRpcError(message.error.code, message.error.message, message.error.data));
+      if (!pending.timedOut) pending.reject(new CodexRpcError(message.error.code, message.error.message, message.error.data));
       return;
     }
-    try { pending.resolve(pending.parse(message.result)); }
-    catch (error) {
-      pending.reject(new Error(`Invalid Codex ${pending.method} response: ${this.error(error).message}`));
+    try {
+      const parsed = pending.parse(message.result);
+      if (!pending.timedOut) pending.resolve(parsed);
+    } catch (error) {
+      if (!pending.timedOut) pending.reject(new Error(`Invalid Codex ${pending.method} response: ${this.error(error).message}`));
     }
   }
 
@@ -322,7 +348,7 @@ export class CodexClient {
     try { this.args.onTerminal?.(error); }
     catch (callbackError) { this.args.log("Codex terminal callback failed", callbackError); }
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
-    this.pending.clear();
+    this.pending.clear(); this.optionalAccountingId = undefined;
     const child = this.child;
     if (!child) return;
     this.flushStderr();
