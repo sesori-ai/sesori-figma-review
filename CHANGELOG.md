@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Codex-support plan is parked under `.plan/parked/codex-support/` (steps 1–3 merged; step 5 part 1 kept on its branch), with a note on how to resume it.
 - Quick start and the bridge banner recommend importing the plugin already bundled with npm while Figma Community review is pending. Manual setup docs cover the stable manifest path, standalone release ZIPs, matching bridge versions, and the different update steps for bridge-managed, ZIP and Community installs.
 - Architecture and contributor docs describe manual-install release assets and the `zip`/`unzip` tooling used to package and check them.
 
