@@ -1,5 +1,7 @@
 # Codex support tracker
 
+**Parked 2026-11-20.** The owner closed the step 5 part 1/3 PR (#14, last pushed 2026-09-13) and parked the series. Steps 1–3 are merged. Step 4 was finished locally, and step 5 part 1 lives on branch `codex-support-step-5-part-1`. Steps 6–8 were not started. To resume, move this directory back to `.plan/active/` and reopen or rebase from that branch.
+
 Plan: [PLAN.md](PLAN.md). Scope: full user-facing parity on Claude and Codex; Codex-native sandboxed file/command
 access approved. The user authorized executing the whole series: use automatic GitHub reviews only, automatically squash-merge each
 PR once ready for human review, and continue without manual review requests or extra review-completion gates. Full
